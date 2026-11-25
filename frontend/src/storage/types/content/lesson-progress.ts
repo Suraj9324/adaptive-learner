@@ -1,0 +1,275 @@
+/**
+ * Lesson progress rows + namespace.
+ *
+ * Split out of the former ``storage/types.ts`` god-file (#354).
+ */
+
+
+export type RawAnswer = (
+  | { kind: "matching"; matches: [number, number][] }
+  | { kind: "picture_choice"; selected: number }
+  | { kind: "free_text"; input: string }
+  | { kind: "word_tiles"; placed: number[] }
+  | { kind: "cloze"; inputs: string[] }
+  /** #1195 — cloze ``multiselect`` ("select all that apply"): the
+   *  chosen option set. Persisted so a revisited, locked question
+   *  restores its exact checkbox state. */
+  | { kind: "cloze_multiselect"; selected: string[] }
+  /** #1525 — native ``multiple_choice`` (schema v1.6): the chosen
+   *  option texts (one entry in single mode, the chosen set in
+   *  ``multiple`` mode). */
+  | { kind: "multiple_choice"; selected: string[] }
+  /** #1579 — adopted extension ext:al-categorization: the learner's
+   *  item -> bucket-name assignment, persisted so a revisited, locked
+   *  question restores its exact bucket state. */
+  | { kind: "al_categorization"; assignments: [string, string][] }
+  /** #1579 — adopted extension ``ext:al-error-correction``: the tapped
+   *  token index plus the typed correction, persisted so a revisited,
+   *  locked question restores its exact state. */
+  | { kind: "al_error_correction"; picked_index: number; typed: string }
+  /** #1579 — adopted extension ``ext:al-reading-comprehension``: the
+   *  learner's answer per sub-question (in order), persisted so a
+   *  revisited, locked passage restores its exact state. */
+  | { kind: "al_reading_comprehension"; answers: string[] }
+  /** #1579 — adopted extension ``ext:al-graded-quiz``: the learner's chosen
+   *  option texts (or [typed] free-text) per question, in order. */
+  | { kind: "al_graded_quiz"; answers: string[][] }
+  /** #1881 — adopted extension ``ext:al-dictation``: the typed transcription
+   *  of the audio clip, persisted so a revisited, locked exercise restores
+   *  its exact input. */
+  | { kind: "al_dictation"; input: string }
+  | { kind: "al_image_description"; input: string }
+  /** engine#68 idea 3 - adopted extension ``ext:al-speak-and-record``:
+   *  whether the learner recorded a clip this step, persisted so a
+   *  revisited step shows the same completed state. The clip ITSELF
+   *  lives in the separate ``speechRecordings`` store (keyed by
+   *  exercise, not step-history) - this flag is only a locked-view
+   *  marker, mirroring every other ungraded step's minimal footprint. */
+  | { kind: "al_speak_and_record"; recorded: boolean }
+  /** adopted extension ``ext:al-audio-choice``: the selected option's audio
+   *  reference, persisted so a revisited, locked exercise restores its
+   *  exact selection. */
+  | { kind: "al_audio_choice"; selected_audio: string }
+  /** adopted extension ``ext:al-audio-tiles``: the learner's placed tile
+   *  order (indices into ``ext_payload.tiles``), mirroring core
+   *  ``word_tiles``'s own ``placed`` shape. */
+  | { kind: "al_audio_tiles"; placed: number[] }
+  /** #3110 — adopted extension ``ext:al-ordering``: the learner's placed
+   *  tile order (indices into ``ext_payload.items``), mirroring core
+   *  ``word_tiles``'s own ``placed`` shape (no ``accept_orderings``
+   *  equivalent — the payload's order is the sole canonical sequence). */
+  | { kind: "al_ordering"; placed: number[] }
+  /** #3110 — adopted extension ``ext:al-parsons``: the learner's placed
+   *  line order (indices into ``ext_payload.lines``) AND their chosen
+   *  indent per SLOT, persisted together so a revisited, locked exercise
+   *  restores its exact sequence AND depth. */
+  | { kind: "al_parsons"; placed: number[]; indents: number[] }
+  /** #3110 — adopted extension ``ext:al-hotspot``: the index of the
+   *  clicked zone (into ``ext_payload.zones``), persisted so a revisited,
+   *  locked exercise restores its exact selection. */
+  | { kind: "al_hotspot"; selected_zone: number }
+) & {
+  /** #3109, schema v1.14 parametric exercises — the drawn/computed value
+   *  per declared ``exercise.variables`` name (resolveExerciseVariables's
+   *  ``values``), present only when the exercise declared ``variables``.
+   *  Applies to every kind above, not just ``free_text`` — any exercise
+   *  type's string fields can carry a ``{{name}}`` reference (the
+   *  dispatcher resolves once per attempt before any renderer sees the
+   *  exercise). Persisted so a revisited attempt substitutes the SAME
+   *  concrete instance instead of sampling a fresh one. */
+  resolved_variables?: Record<string, number>;
+};
+
+export interface LessonStepResult {
+  step_id: string;
+  correct: number;
+  total: number;
+  attempts?: number;
+  /** Phase 52C / v1.35.0 — the user's text-form answer for the
+   *  step, when applicable. Free-text + word-tiles populate
+   *  it; matching + picture-choice leave it undefined. Powers
+   *  the lesson-summary token-diff display. */
+  user_answer?: string | null;
+  /** BUG P1 / Problem 2 — the raw user answer, persisted so a
+   *  revisited (locked) step re-renders the exact post-check
+   *  visual instead of a fresh re-answerable exercise. */
+  raw_answer?: RawAnswer | null;
+  /** #594 Hint Economy — true when the learner revealed a hint on this
+   *  step before answering. Counted in the lesson summary's "hints
+   *  used" line. */
+  hint_used?: boolean;
+}
+
+/**
+ * One learner action on a lesson (#3365), as the viewer reports it.
+ * ``step`` is arriving on a step (forward or back), ``answer`` a graded
+ * check, ``pause`` the pause dialog or button, ``exit`` leaving the lesson
+ * by navigation, ``restart`` a confirmed start-over, ``complete`` reaching
+ * the summary. Autosave, timers, app switches, mode switches, hints and
+ * read-aloud are not actions.
+ */
+export interface LessonStepEvent {
+  kind: "step" | "answer" | "pause" | "exit" | "restart" | "complete";
+  step_index: number;
+  /** ``null`` on the summary, which has no step id. */
+  step_id?: string | null;
+  /** Only on ``answer``: whether the check was fully correct. */
+  correct?: boolean;
+}
+
+/** A logged action in ``LessonProgress.recent_steps``: the event plus the
+ *  time the storage layer stamped on it. */
+export interface LessonStepEventStored extends LessonStepEvent {
+  /** ISO-8601 timestamp. */
+  at: string;
+}
+
+export interface LessonProgressUpsertBody {
+  source: string;
+  set_id: string;
+  lesson_filename: string;
+  /** #1007 Phase 2 — the lesson mode the run is played in
+   *  (practice/exam/timed/…). Sent on the first upsert (lesson start);
+   *  omitting it leaves the stored value unchanged. */
+  lesson_mode?: string;
+  step_result?: LessonStepResult;
+  time_spent_seconds_delta?: number;
+  /** BUG #41 — the step index the user is currently on, so a paused
+   *  lesson resumes at the exact step. Omitting it leaves the stored
+   *  value unchanged. */
+  current_step?: number;
+  /** #3365 - the learner action this write records; appended to
+   *  ``recent_steps`` (the last ten are kept). Omitting it records
+   *  nothing. */
+  step_event?: LessonStepEvent;
+  mark_completed?: boolean;
+  /** #2893 - transient game-mode combo bonus (client-capped, hard
+   *  ceiling 20 on both backends). Read only with mark_completed. */
+  combo_bonus_xp?: number;
+  /** Phase 63A — flip the row to ``paused`` and stamp
+   *  ``paused_at``. ``step_results`` stay intact for the resume. */
+  mark_paused?: boolean;
+  /** Phase 63A — flip the row to ``abandoned`` and stamp
+   *  ``abandoned_at``. ``step_results`` are cleared; ElementErrors
+   *  from completed steps stay in their own table. */
+  mark_abandoned?: boolean;
+  /** Phase 63C — flip a ``paused`` row back to ``in_progress`` and
+   *  clear ``paused_at`` so the viewer can resume from the saved
+   *  ``step_results``. */
+  mark_resumed?: boolean;
+  /** Phase 63C — discard ``step_results`` + score and reset
+   *  ``status`` to ``in_progress`` from any prior state. Used by
+   *  the resume-dialog "Start Over" path. */
+  mark_restarted?: boolean;
+}
+
+/**
+ * One stored step result inside ``LessonProgress.step_results``.
+ * Mirrors what the backend service writes per step.
+ */
+export interface LessonStepResultStored {
+  correct: number;
+  total: number;
+  attempts: number;
+  completed_at: string;
+  /** Phase 52C / v1.35.0 — see ``LessonStepResult.user_answer``.
+   *  Old rows without this field surface as ``undefined`` and the
+   *  summary falls back to the canonical-answer-only line. */
+  user_answer?: string | null;
+  /** BUG P1 / Problem 2 — see ``LessonStepResult.raw_answer``.
+   *  Old rows (completed before this shipped) lack it; the
+   *  viewer falls back to a compact "completed" panel for those
+   *  on revisit instead of an exact reconstruction. */
+  raw_answer?: RawAnswer | null;
+  /** #594 Hint Economy — see ``LessonStepResult.hint_used``. */
+  hint_used?: boolean;
+}
+
+/**
+ * One completed-attempt entry in ``LessonProgress.attempt_history``
+ * (#983). ``errors`` is derived in the UI as ``total - correct``.
+ */
+export interface LessonAttempt {
+  /** ISO-8601 completion timestamp. */
+  at: string;
+  correct: number;
+  total: number;
+}
+
+export interface LessonProgress {
+  id: string;
+  user_id: string;
+  source: string;
+  set_id: string;
+  lesson_filename: string;
+  /** Phase 63A — lifecycle widened from in_progress|completed. */
+  status: "in_progress" | "paused" | "abandoned" | "completed";
+  /** #1007 Phase 2 — the mode the run was played in (practice/exam/…).
+   *  Optional on the wire so pre-feature rows type-check; read with
+   *  `?? "practice"`. */
+  lesson_mode?: string;
+  /** Map of step_id → result. Parsed JSON; never a string. */
+  step_results: Record<string, LessonStepResultStored>;
+  score_correct: number;
+  score_total: number;
+  /** Lifetime seconds across every run; statistics and missions sum it. */
+  time_spent_seconds: number;
+  /** #3747 - seconds of the current run; starts over on a restart or an
+   *  abandon. The summary shows it. Always emitted by both storage
+   *  backends; optional on the wire type so hand-built fixtures that omit
+   *  it still type-check. Read with `?? 0`. */
+  run_time_seconds?: number;
+  /** BUG #41 — the step index the user is currently on; drives
+   *  resume-at-paused-step. Always emitted by both storage backends
+   *  (defaults to 0); optional on the wire type so pre-feature
+   *  fixtures/rows that omit it still type-check. Read with `?? 0`. */
+  current_step?: number;
+  started_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  /** Phase 63A — set on pause, cleared on resume + completion. */
+  paused_at: string | null;
+  /** Phase 63A — set on abandon, cleared on completion. */
+  abandoned_at: string | null;
+  /** #983 — lesson retry tracking. Number of COMPLETED attempts.
+   *  Optional on the wire so pre-feature fixtures/rows type-check;
+   *  read with `?? 0`. */
+  attempts?: number;
+  /** #983 — the highest-percentage attempt's raw score, so progress
+   *  surfaces can show the BEST result, not the last. Read with `?? 0`. */
+  best_score_correct?: number;
+  best_score_total?: number;
+  /** #983 — completed-attempt history, oldest first. Powers the
+   *  improvement comparison after a retry. Read with `?? []`. */
+  attempt_history?: LessonAttempt[];
+  /** #3365 - the last ten learner actions, oldest first. A resume lands
+   *  on the last ``step`` entry's ``step_id``. Read with `?? []`. */
+  recent_steps?: LessonStepEventStored[];
+}
+
+/**
+ * Per-user × per-lesson progress tracking. Parallel to the
+ * session-plugin's ``ITrackingNamespace`` (sessions stay
+ * separate from content-loader lessons in v1.28.0; Phase 46
+ * unifies them when SRS lands).
+ */
+export interface ILessonProgressNamespace {
+  list(userId: string): Promise<LessonProgress[]>;
+  get(
+    userId: string,
+    source: string,
+    setId: string,
+    lessonFilename: string,
+  ): Promise<LessonProgress | null>;
+  upsert(userId: string, body: LessonProgressUpsertBody): Promise<LessonProgress>;
+}
+
+/**
+ * One element attempt — the unit the recording endpoint
+ * consumes. Multiple attempts per exercise submit for
+ * matching (one per pair); single attempt per submit for
+ * picture-choice / free-text / word-tiles. The exercise-side
+ * deriver (C9) builds these from ``(exercise, userInput)``.
+ *
+ * Phase 46B / EXP-007 / P-129.
+ */

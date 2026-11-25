@@ -1,0 +1,444 @@
+import {useCallback, useEffect, useState, type FormEvent} from "react";
+import {useNavigate, useSearchParams} from "react-router";
+import {DashboardCard, DashboardCardTitle} from "@/shared/layout";
+
+import AddTopicDialog from "../../components/topic/AddTopicDialog";
+import CurriculumDescriptionEditor from "../../components/topic/CurriculumDescriptionEditor";
+import HelpLink from "../../components/help/HelpLink";
+import HelpTooltip from "../../components/help/HelpTooltip";
+import LessonList from "../../components/dashboard/LessonList";
+import TopicTree from "../../components/topic/TopicTree";
+import {Button} from "@/components/ui/button";
+import {isDevMode} from "../../hooks/settings/useDevMode";
+import {inlineErrorText} from "../../utils/errorMessages";
+import {useI18n} from "../../hooks/ui/useI18n";
+import {useConfirm} from "../../contexts/ConfirmContext";
+import {readLearnerState} from "../../lib/learning/learnerState";
+import {getStorage} from "../../storage";
+import {notify} from "../../utils/notify";
+import type {Curriculum, LearningTopic, Lesson} from "../../types";
+
+/**
+ * Curriculum page (project-reference §8 v0.2.0 addition,
+ * /curriculum).
+ *
+ * Per-user CRUD over the curriculum + topic tree:
+ *
+ *   1. Mount: read user_id from localStorage; redirect to
+ *      /onboarding if missing. List the user's curricula via
+ *      GET /api/users/{user_id}/curricula; select the one named by
+ *      ``?curriculum=<id>``, else the first (or expose the create
+ *      dialog if zero exist).
+ *   2. For the selected curriculum, load topics via
+ *      GET /api/curricula/{id}/topics and render the forest
+ *      with TopicTree (uses TypedTreeNode + buildTreeFromFlat).
+ *   3. CRUD: add-root, add-subtopic, rename, delete via the
+ *      AddTopicDialog modal + the per-node action buttons.
+ */
+type DialogMode =
+    | {kind: "closed"}
+    | {kind: "add-root"}
+    | {kind: "add-sub"; parentId: string}
+    | {kind: "rename"; topicId: string; initialTitle: string};
+
+export default function Curriculum() {
+    const {t} = useI18n();
+    const confirm = useConfirm();
+    const navigate = useNavigate();
+
+    // ``?curriculum=<id>`` (#3659): the import page links a curriculum it
+    // just created; an unknown id falls back to the first one.
+    const [searchParams] = useSearchParams();
+    const requestedId = searchParams.get("curriculum");
+    const [curricula, setCurricula] = useState<Curriculum[]>([]);
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [topics, setTopics] = useState<LearningTopic[]>([]);
+    const [lessons, setLessons] = useState<Lesson[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [dialog, setDialog] = useState<DialogMode>({kind: "closed"});
+    const [submitting, setSubmitting] = useState(false);
+    const [creatingCurriculum, setCreatingCurriculum] = useState(false);
+    const [newCurriculumTitle, setNewCurriculumTitle] = useState("");
+
+    const reloadTopics = useCallback(async (curriculumId: string) => {
+        try {
+            const fresh = await getStorage().curricula.listTopics(curriculumId);
+            setTopics(fresh);
+        } catch (err) {
+            notify.error(
+                t("curriculum.topics_load_failed", "Could not load the topics."),
+                {error: err},
+            );
+        }
+        // ``t`` omitted on purpose: the load effect depends on this
+        // callback, and an unstable ``t`` (test i18n mocks) would re-fire
+        // it on every render (lessons/frontend.md, useEffect + i18n mocks).
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const reloadLessons = useCallback(async (curriculumId: string) => {
+        try {
+            const fresh = await getStorage().curricula.listLessons(curriculumId);
+            setLessons(fresh);
+        } catch (err) {
+            notify.error(
+                t("curriculum.lessons_load_failed", "Could not load the lessons."),
+                {error: err},
+            );
+        }
+        // ``t`` omitted on purpose, as in ``reloadTopics``.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const handleCreateLesson = async (title: string) => {
+        if (!selectedId || submitting) return;
+        setSubmitting(true);
+        try {
+            await getStorage().curricula.createLesson(selectedId, {title});
+            await reloadLessons(selectedId);
+            notify.success(t("curriculum.lesson_created", "Lesson created."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handleUpdateLesson = async (
+        lessonId: string,
+        title: string,
+        content: string,
+    ) => {
+        if (!selectedId || submitting) return;
+        setSubmitting(true);
+        try {
+            await getStorage().lessons.update(lessonId, {title, content});
+            await reloadLessons(selectedId);
+            notify.success(t("curriculum.lesson_saved", "Lesson saved."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handleDeleteLesson = async (lessonId: string) => {
+        if (!selectedId || submitting) return;
+        const ok = await confirm({
+            message: t("curriculum.lesson_delete_confirm", "Delete this lesson?"),
+            confirmLabel: t("common.delete", "Delete"),
+            variant: "danger",
+        });
+        if (!ok) return;
+        setSubmitting(true);
+        try {
+            await getStorage().lessons.remove(lessonId);
+            await reloadLessons(selectedId);
+            notify.success(t("curriculum.lesson_deleted", "Lesson deleted."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    // Bootstrap: load curricula on mount.
+    useEffect(() => {
+        const userId = readLearnerState().userId;
+        if (!userId) {
+            navigate("/onboarding", {replace: true});
+            return;
+        }
+        let cancelled = false;
+        getStorage().curricula
+            .list(userId)
+            .then((list) => {
+                if (cancelled) return;
+                setCurricula(list);
+                if (list.length > 0) {
+                    const requested = list.find((c) => c.id === requestedId);
+                    setSelectedId((requested ?? list[0]).id);
+                }
+                setLoading(false);
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                setError(inlineErrorText(err, t("common.error"), isDevMode()));
+                setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [navigate, requestedId]);
+
+    // Load topics + lessons whenever the selected curriculum
+    // changes.
+    useEffect(() => {
+        if (!selectedId) {
+            setTopics([]);
+            setLessons([]);
+            return;
+        }
+        void reloadTopics(selectedId);
+        void reloadLessons(selectedId);
+    }, [selectedId, reloadTopics, reloadLessons]);
+
+    const handleCreateCurriculum = async (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        const title = newCurriculumTitle.trim();
+        if (!title || creatingCurriculum) return;
+        const userId = readLearnerState().userId;
+        if (!userId) return;
+        setCreatingCurriculum(true);
+        try {
+            const created = await getStorage().curricula.create(userId, {title});
+            setCurricula((prev) => [...prev, created]);
+            setSelectedId(created.id);
+            setNewCurriculumTitle("");
+            notify.success(t("curriculum.created", "Curriculum created."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setCreatingCurriculum(false);
+        }
+    };
+
+    const handleDialogSubmit = async (title: string) => {
+        if (!selectedId || submitting) return;
+        setSubmitting(true);
+        try {
+            if (dialog.kind === "add-root") {
+                await getStorage().curricula.createTopic(selectedId, {
+                    title,
+                    parent_id: null,
+                });
+            } else if (dialog.kind === "add-sub") {
+                await getStorage().curricula.createTopic(selectedId, {
+                    title,
+                    parent_id: dialog.parentId,
+                });
+            } else if (dialog.kind === "rename") {
+                await getStorage().topics.update(dialog.topicId, {title});
+            }
+            await reloadTopics(selectedId);
+            setDialog({kind: "closed"});
+            notify.success(t("curriculum.saved", "Saved."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handleUpdateDescription = async (next: string | null) => {
+        if (!selectedId) return;
+        try {
+            const updated = await getStorage().curricula.update(selectedId, {
+                description: next,
+            });
+            setCurricula((prev) =>
+                prev.map((c) => (c.id === updated.id ? updated : c)),
+            );
+            notify.success(
+                t("curriculum.description_saved", "Description saved."),
+            );
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+            throw err;
+        }
+    };
+
+    const handleDelete = async (topicId: string) => {
+        if (!selectedId || submitting) return;
+        const ok = await confirm({
+            message: t(
+                "curriculum.delete_confirm",
+                "Delete this topic? Its children stay as their own roots.",
+            ),
+            confirmLabel: t("common.delete", "Delete"),
+            variant: "danger",
+        });
+        if (!ok) return;
+        setSubmitting(true);
+        try {
+            await getStorage().topics.remove(topicId);
+            await reloadTopics(selectedId);
+            notify.success(t("curriculum.deleted", "Topic deleted."));
+        } catch (err) {
+            notify.error(t("common.error"), {error: err});
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    if (loading) {
+        return (
+            <main id="main" data-testid="curriculum-loading" className="dashboard-page">
+                <p className="muted" role="status">{t("common.loading", "Loading…")}</p>
+            </main>
+        );
+    }
+
+    if (error) {
+        return (
+            <main id="main" data-testid="curriculum-error" className="dashboard-page">
+                <p className="error-text" role="alert">{error}</p>
+            </main>
+        );
+    }
+
+    return (
+        <main id="main" data-testid="curriculum" className="dashboard-page">
+            <header className="dashboard-header">
+                <h1>
+                    <HelpTooltip glossaryKey="curriculum">
+                        {t("curriculum.title", "Curriculum")}
+                    </HelpTooltip>
+                    <HelpLink glossaryKey="curriculum" size={18} />
+                </h1>
+            </header>
+
+            {/* Curriculum picker + create form. The picker stays
+             *  hidden when there's only one or zero curricula —
+             *  the dropdown would add visual noise without
+             *  helping the user. */}
+            <section className="curriculum-toolbar">
+                {curricula.length > 1 && (
+                    <label className="flex flex-col gap-2">
+                        <span className="text-[0.95rem] font-medium">
+                            {t("curriculum.active", "Active curriculum")}
+                        </span>
+                        <select
+                            data-testid="curriculum-select"
+                            value={selectedId ?? ""}
+                            onChange={(e) => setSelectedId(e.target.value)}
+                        >
+                            {curricula.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                    {c.title}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                )}
+                <form
+                    className="curriculum-create-form"
+                    onSubmit={handleCreateCurriculum}
+                >
+                    <input
+                        type="text"
+                        data-testid="curriculum-new-title"
+                        value={newCurriculumTitle}
+                        onChange={(e) => setNewCurriculumTitle(e.target.value)}
+                        placeholder={t(
+                            "curriculum.new_placeholder",
+                            "New curriculum title…",
+                        )}
+                        disabled={creatingCurriculum}
+                    />
+                    <Button
+                        variant="default"
+                        type="submit"
+                        data-testid="curriculum-create"
+                        disabled={
+                            creatingCurriculum || newCurriculumTitle.trim().length === 0
+                        }
+                    >
+                        {t("curriculum.create", "Create curriculum")}
+                    </Button>
+                </form>
+            </section>
+
+            {selectedId ? (
+                <DashboardCard as="section" wide>
+                    <div className="curriculum-tree-head">
+                        <DashboardCardTitle>
+                            {curricula.find((c) => c.id === selectedId)?.title ?? ""}
+                        </DashboardCardTitle>
+                        <Button
+                            variant="secondary"
+                            type="button"
+                            data-testid="curriculum-add-root"
+                            onClick={() => setDialog({kind: "add-root"})}
+                        >
+                            {t("curriculum.add_root_topic", "Add root topic")}
+                        </Button>
+                    </div>
+                    <CurriculumDescriptionEditor
+                        key={selectedId}
+                        description={
+                            curricula.find((c) => c.id === selectedId)
+                                ?.description ?? null
+                        }
+                        onSave={handleUpdateDescription}
+                    />
+
+                    {topics.length === 0 ? (
+                        <p className="muted" data-testid="curriculum-empty">
+                            {t(
+                                "curriculum.no_topics",
+                                "No topics yet - add your first to get started.",
+                            )}
+                        </p>
+                    ) : (
+                        <TopicTree
+                            topics={topics}
+                            onAddSubtopic={(parentId) =>
+                                setDialog({kind: "add-sub", parentId})
+                            }
+                            onRename={(topicId, currentTitle) =>
+                                setDialog({
+                                    kind: "rename",
+                                    topicId,
+                                    initialTitle: currentTitle,
+                                })
+                            }
+                            onDelete={handleDelete}
+                        />
+                    )}
+                </DashboardCard>
+            ) : null}
+
+            {selectedId && (
+                <DashboardCard as="section" wide>
+                    <DashboardCardTitle>
+                        {t("curriculum.lessons_title", "Lessons")}
+                    </DashboardCardTitle>
+                    <LessonList
+                        lessons={lessons}
+                        onCreate={handleCreateLesson}
+                        onUpdate={handleUpdateLesson}
+                        onDelete={handleDeleteLesson}
+                        submitting={submitting}
+                    />
+                </DashboardCard>
+            )}
+
+            {!selectedId ? (
+                <p className="muted" data-testid="curriculum-no-selection">
+                    {t(
+                        "curriculum.no_curriculum",
+                        "Create a curriculum to start building a topic tree.",
+                    )}
+                </p>
+            ) : null}
+
+            <AddTopicDialog
+                open={dialog.kind !== "closed"}
+                initialTitle={dialog.kind === "rename" ? dialog.initialTitle : ""}
+                titleKey={
+                    dialog.kind === "rename"
+                        ? "curriculum.rename_topic"
+                        : dialog.kind === "add-sub"
+                          ? "curriculum.add_subtopic"
+                          : "curriculum.add_topic"
+                }
+                onCancel={() => setDialog({kind: "closed"})}
+                onSubmit={handleDialogSubmit}
+                submitting={submitting}
+            />
+        </main>
+    );
+}

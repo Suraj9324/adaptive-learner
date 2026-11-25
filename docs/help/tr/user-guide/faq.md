@@ -1,0 +1,242 @@
+<!-- Translation: AI-generated, pending native review -->
+
+# SSS
+
+## Verilerim güvende mi?
+
+**Yerel modda** tarayıcınız verilerinizi kendi cihazınızda (IndexedDB ve
+localStorage içinde) saklar; bunlar arasında başka şeylerin yanı sıra
+ilerlemeniz, içe aktarılan sohbetler ve API anahtarları ile GitHub
+token'ı dahil ayarlarınız bulunur ve işletmeciye ait bir sunucu
+kullanılmaz. Başkaları bunların bölümlerini yalnızca bir özellik onlara
+ihtiyaç duyduğunda alır, örneğin yapay zekâyı kullandığınızda yapay zekâ
+sağlayıcınız veya uygulama açılışta yeni içerik olup olmadığını
+kendiliğinden GitHub'a sorduğunda GitHub. Tarayıcı sekmesini kapatmak
+bu verileri silmez; tarayıcıdaki site verilerini temizlemek onları
+cihazınızdan kaldırır. Cihazı paylaşıyorsanız, bu tarayıcı profiline
+erişimi olan herkes okuyabilir.
+
+**Sunucu modunda** öğrenme verileriniz, FastAPI arka ucunun yönettiği
+SQLite veritabanında bulunur. Ders ilerlemesi ve ses kayıtlarından
+çevrimdışıyken oluşanlar, uygulama bunları aktarana kadar bu tarayıcıda
+bekler; en fazla ne kadarının beklediğini ve geri kalanına ne olduğunu
+[Yedekleme ve geri yükleme](../features/backup.md) sayfası açıklar. API
+anahtarları Fernet ile şifrelenmiş olarak
+`~/.config/adaptive_learner/secrets.yaml` içinde, her sağlayıcı için
+en son çalışan API anahtarının bir yedek kopyası da aynı şekilde
+şifrelenmiş olarak veritabanında bulunur. Şifreleme anahtarı ilk
+başlatmada oluşturulur ve
+`~/.config/adaptive_learner/secret.key` içine kaydedilir; hiçbir şey
+ayarlamanız gerekmez. Kendi anahtarınızı belirlemek isterseniz, ilk
+başlatmadan önce `ADAPTIVE_LEARNER_SECRET_KEY` (ya da `secrets.yaml`
+içinde `secret_key:`) ayarlayın.
+
+Her iki mod da seçtiğiniz yapay zeka sağlayıcısı dışında herhangi bir
+üçüncü tarafa telemetri, analitik ya da mesajlarınızı göndermez. Bir
+öğrenme oturumunda bu sağlayıcı şunları alır:
+
+- sistem talimatı: öğrenme projenizin konusu ve hedefi, bir profil
+  ipucu (tercih ettiğiniz öğrenme yöntemi ve ağırlığı), tamamladığınız
+  dersler ve sonuçları, üzerinde çalıştığınız ders ve adım, son
+  hatalarınız (her biri cevabınız, doğru cevap ve kaç kez olduğuyla
+  birlikte) ve yapay zekânın yanıt vereceği dil; içe aktarılan bir
+  sohbetten başlatılan oturumda öğrenme ilerlemeniz yerine o sohbetin
+  analizi ve dökümü yer alır;
+- mesajlarınız ve yapay zekânın oturumdaki önceki yanıtları;
+- her istekte olduğu gibi, başka şeylerin yanı sıra, IP adresiniz ve API
+  anahtarınız.
+
+XP'niz ve rozetleriniz bunlara dahil değildir. Başka yapay zekâ
+özellikleri de sağlayıcınıza veri gönderir, örneğin içe aktarılan bir
+sohbetin analizi. [Yapay zekâ içerik denetimi](ai-validation.md)
+denetlediği setin kartlarını (her kartın tanımlayıcısını, ön yüzünü,
+arka yüzünü ve notlarını) gönderir. Paylaşmadan önceki yapay zekâ
+denetimi derslerinizden yalnızca paylaştıklarınızı, bunlardan da başka
+şeylerin yanı sıra kartları, adımların metinlerini ve alıştırmaları
+(soru ve yanlış cevap seçenekleri) gönderir. İkisi de ayrıca setin
+kaynak dilini, hedef dilini ve seviyesini gönderir. Bu içeriklerde kendi
+yazdığınız her şey de gönderilir ve kişisel bilgi içerebilir.
+[Gizlilik politikası](../legal/privacy.md) yapay zekâya giden her isteği
+listeler.
+
+## API anahtarına ihtiyacım var mı?
+
+Yapay zeka oturumları için evet. Uygulama desteklenen her sağlayıcı
+için **kendi anahtarınızı getirin** modelini kullanır: Anthropic
+Claude, OpenAI GPT ve Google Gemini, ayrıca sunucu modunda Perplexity
+(masaüstü uygulaması; tarayıcı sürümü Perplexity'yi doğrudan
+çağıramaz). Ücretsiz katman sınırları genellikle
+başlamak için yeterlidir.
+
+Anahtarı koyabileceğiniz üç yer (en yüksek öncelik kazanır):
+`ADAPTIVE_LEARNER_<PROVIDER>_API_KEY` ortam değişkeni,
+`~/.config/adaptive_learner/secrets.yaml` içindeki
+`ai.<provider>.api_key` alanı ya da Ayarlar arayüzü. Arayüz her sağlayıcı
+için kaynağı gösterir, böylece anahtarınızın nereden geldiğini her zaman
+bilirsiniz.
+
+Müfredatı gezebilir, Değerlendirmeyi yapabilir, Gösterge Tablonuzu
+görüntüleyebilir ve hatta API anahtarı olmadan sohbet geçmişi
+İçe Aktarma'yı çalıştırabilirsiniz. Oturum sayfası + analiz adımı +
+yapay zeka çıkarma özellikleri anahtar gerektiren olanlardır.
+
+## Çevrimdışı kullanabilir miyim?
+
+Kısmen. PWA hizmet çalışanı statik varlıkları (HTML, JS, CSS, simgeler)
+önbelleğe alır, bu nedenle uygulama internet olmadan başlatılır. Geçmiş
+oturumlar ve Gösterge Tablosu verileri de yerel depolamadan yüklenir,
+dolayısıyla eski materyalleri okumak sorunsuz çalışır.
+
+**Canlı oturumlar hâlâ internet gerektirir** çünkü yapay zeka sağlayıcısı
+tarayıcınızın dışında bulunur. Oturum sayfası "çevrimdışı" durumunu
+algılar ve sessizce başarısız olmak yerine açık bir satır içi mesaj
+gösterir.
+
+## Yöntem değişikliği ne anlama gelir?
+
+Arka arkaya üç oturumda anlayışınız durağan VE stresiniz yüksekse,
+uygulama bir pankart gösterir: "Sonraki oturum için [diğer yöntem]i
+denemek ister misiniz?". Öneri, son zamanlarda kullanmadığınız
+değerlendirmedeki ikinci en güçlü yönteminizi tercih eder.
+
+Bu bir *öneri*, emir değil. Pankartı kapatıp mevcut yönteminize devam
+edebilirsiniz; durgunluk kalıbı devam ederse pankart yeniden görünür.
+Yöntem değişiklikleri `method_switches` tablosuna kaydedilir ve İlerleme
+sayfası dağılımında görünür.
+
+## Otomatik döngü nedir?
+
+Bir oturum 7. adıma (Bütünleştirme) ulaştığında ve konu-geçiş
+değerlendirici konunun bütünleştirildiğine hükmedip devam etmeyi
+önerdiğinde, yeni bir alt konuyla otomatik olarak yeni bir döngü başlar.
+Oturum başına en fazla 5 döngü (sonsuz döngü koruması). Sohbet geçmişi,
+her geçişte kesik kenarlı "Döngü N" kartları gösterir. Oturum sonu
+derecelendirme iletişim kutusu, `cycle_count > 1` olduğunda çok döngülü
+yolculuğu özetler.
+
+Yalnızca masaüstü uygulamasında: Tarayıcı sürümünde oturum 7. adımda
+kalır ve oturum sayfası bunu belirtir. Oturumu orada bitirin ve yeni bir
+oturum başlatın.
+
+## Verilerimi dışa aktarabilir miyim?
+
+Evet, diğerlerinin yanı sıra şu yollarla:
+
+- **Yedek**: Ayarlar > Veri > Yedekleme ve dışa aktarma > Yedek
+  oluştur. Bir `.alb` yedek dosyası indirir; her iki depolama modunda
+  da yedek oluşturabilirsiniz. API anahtarlarınız bu dosyada yer almaz;
+  onları nasıl aktaracağınız [Ayarlar](settings.md) sayfasının "Şifreli
+  anahtar dışa aktarma (.alk)" bölümünde anlatılır. Bir yedeğin neleri
+  içermediğine dair başka örnekleri
+  [Yedekleme ve geri yükleme](../features/backup.md) sayfası verir.
+- **İlerleme / Oturum / Müfredat raporları**: Ayarlar > Veri >
+  Yedekleme ve dışa aktarma > Dışa aktar.
+  Markdown + PDF (tarayıcı yazdırma-PDF).
+- **Anki .apkg**: `/anki` sayfasında yapay zeka tarafından çıkarılan
+  flash kartları inceleyin, beğendiklerinizi kabul edin, Dışa Aktar'a
+  tıklayın. Dosya doğrudan Anki masaüstünde çalışır.
+- **NotebookLM ZIP**: İlerleme sayfasından, NotebookLM'nin kaynak
+  yüklemesi için biçimlendirilmiş yapılandırılmış bir ZIP (özet +
+  kelime hazinesi + kurallar + hatalar + flash kartlar + oturumlar)
+  indirin.
+
+## Ses özelliği nedir?
+
+Üç Web Speech API entegrasyonu:
+
+- **Yapay zeka yanıtlarında + Değerlendirme sonuçlarında Metinden
+  Sese** - her birinin yanındaki ▶ düğmesi dil eşleştirmesiyle
+  yüksek sesle okur.
+- **Oturum girişinde Sesten Metne** - 🎤 düğmesi sesinizi yakalar ve
+  göndermeden önce alanı ara dökümlerle doldurur.
+- **Dil projeleri için Telaffuz Pratiği** - `/pronunciation` sayfasını
+  ziyaret edin, yapay zeka bir hedef cümle oluşturur, siz konuşun ve
+  yargıç yapay zeka benzerliği puanlar + geliştirmeler önerir.
+
+Ses geçişleri Ayarlar > Öğrenme > Sesli okuma ve dikte bölümünde
+bulunur. API'yi desteklemeyen tarayıcılarda bu alan kendini gizler.
+
+## Sohbet geçmişi içe aktarma nedir?
+
+İçe Aktarma sayfası (`/import`) ChatGPT, Claude.ai (hem JSON toplu dışa
+aktarma hem de tek konuşma Markdown dışa aktarma), Gemini ve keyfi
+Markdown'dan yapıştırılan ya da yüklenen sohbet dökümlerini kabul eder.
+Analizci konunuzu, zayıf noktalarınızı, hata kalıplarınızı, önerilen
+yöntemi, kelime hazinesini (dil konuşmaları için) ve önerilen bir
+müfredatı çıkarır. Bir tıklamayla analizden Müfredat oluşturulur +
+hedefli bir oturum başlatılır.
+
+## Cihazlar arasında senkronizasyon?
+
+Henüz değil. Uygulama, verilerinizi henüz cihazlar arasında senkronize
+edemez: Bir cihazı şu ana kadar eşleştiremezsiniz ve eşleştirme
+olmadan senkronizasyon hiçbir veri alışverişi yapmaz. Ayarlar > Veri >
+Eşitleme altında ne gördüğünüz depolama moduna bağlıdır:
+
+- Yerel modda bu bölüm denetimler yerine "Yalnızca masaüstü
+  uygulamasıyla kullanılabilir." bildirimini gösterir. Tarayıcı sürümü,
+  yüklenmiş web uygulaması olarak da, her zaman Yerel modu kullanır;
+  masaüstü uygulamasında, Yerel moda ayarlı olduğu sürece aynı bildirim
+  görünür (Ayarlar > Genel > Depolama modu: "Yerel (Tarayıcı)"). Ancak
+  masaüstü uygulaması da şu ana kadar senkronizasyon yapmaz (bir sonraki
+  maddeye bakın).
+- Masaüstü uygulamasının Sunucu modunda (Ayarlar > Genel > Depolama
+  modu: "Sunucu") bu bölüm, host ve port için giriş alanlarını ve
+  "Eşleştirme kodu oluştur" düğmesini gösterir. Düğmeye tıklandığında
+  bir eşleştirme bağlantısı, bir QR kodu ve bağlantıyı kopyalamaya
+  yarayan bir düğme görünür. Ancak bu bağlantıyı henüz hiçbir cihaz
+  kullanamaz, QR kodu üzerinden de kullanamaz; yani bununla şu ana
+  kadar ikinci bir cihaz eşleştirilemez.
+
+Senkronizasyon kullanılamadığı sürece verilerinizi bir yedekle başka
+bir cihaza taşırsınız, ancak hepsini değil. Bir yedek, başka şeylerin
+yanı sıra API anahtarlarınızı da içermez; API anahtarlarınızı nasıl
+aktaracağınız [Ayarlar](settings.md) sayfasının "Şifreli anahtar dışa
+aktarma (.alk)" bölümünde anlatılır. Bir yedeğin neleri içermediğine
+dair başka örnekleri
+[Yedekleme ve geri yükleme](../features/backup.md) sayfası verir.
+
+## Bu ChatGPT'den nasıl farklı?
+
+ChatGPT, tek bir modele sohbet arayüzüdür. Adaptive Learner, arka planda
+yapay zeka kullanan ama şunları ekleyen *yapılandırılmış bir öğrenme
+sistemidir*:
+
+1. **6 yöntem × 7 adım matrisinden** özel sistem istemleri.
+2. **Tur başına adım değerlendirme** - ikinci bir yapay zeka çağrısı
+   hazırlığı değerlendirir ve sizi ileri / geri taşıyabilir.
+3. **Konu bütünleştirildiğinde yeni döngülere otomatik döngü**.
+4. **12 sorulu değerlendirmeden** öğrenme tercihlerinizin **profili**.
+5. **Uzun vadeli takip** - ProgressCommits, seri ısı haritası, XP,
+   rozetler, adım başına süre grafikleri. ChatGPT sekmeyi kapattığınızda
+   unutur.
+6. **Sağlayıcı özgürlüğü** - Anthropic, OpenAI ya da Gemini, ayrıca
+   sunucu modunda Perplexity.
+7. **Yerel öncelikli seçenek** - Yerel modda tarayıcınız başka şeylerin
+   yanı sıra öğrenme ilerlemenizi, istatistiklerinizi ve ayarlarınızı
+   saklar; başkaları bunların bölümlerini yalnızca bir özellik onlara
+   ihtiyaç duyduğunda alır. Uygulama, bir özellik gerektirdiğinde
+   sunuculara bağlanır; örneğin içerikler için GitHub'a (bunun için
+   bağlı depoları uygulama başlatıldığında da kendiliğinden eşitler),
+   yapay zeka sağlayıcınıza ve bir şey paylaştığınızda ya da bir hata
+   raporunu orada açtığınızda GitHub'a.
+   [Gizlilik politikası](../legal/privacy.md), bunların hangi durumlar
+   olduğunu ve neyin aktarıldığını açıklar.
+
+## Yapay zeka yanlış giderse ne olur?
+
+Sistem görünür biçimde başarısız olur:
+
+- **Yanlış API anahtarı**: yapay zeka çağrısı sohbette satır içi
+  gösterilen açık bir hata mesajı döndürür.
+- **Sağlayıcı çevrimdışı**: aynı - hata, sağlayıcının API'sindeki
+  HTTP durumunu gösterir.
+- **Değerlendiricide JSON ayrıştırma hatası**: deterministik +1 ilerleme
+  devreye girer (7. adımda sınırlanır), biçimle mücadele eden modellerin
+  gelecekteki denetimlerde görülebilmesi için `fallback_used: true`
+  kaydedilir.
+- **Akış yanıt ortasında kesildi**: kısmi yanıt kaydedilir; bir sonraki
+  mesaj oradan devam eder.
+- **Eski ya da tuhaf yapay zeka yanıtı**: oturumu sonlandırın, düşük
+  bir derecelendirme verin, yeniden başlayın. Kalıp devam ederse yöntem
+  değiştirme buluşsal yöntemi farklı bir yöntem önerecektir.

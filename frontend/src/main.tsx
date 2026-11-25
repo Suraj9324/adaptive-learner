@@ -1,0 +1,94 @@
+import React from "react";
+import ReactDOM from "react-dom/client";
+import {BrowserRouter} from "react-router";
+import App from "./App";
+import {loadDebugConsole, shouldLoadDebugConsole} from "./components/dev/debug-console";
+import {initSyncQueueReplay} from "./lib/pwa/sync-queue";
+import {resolveStorageMode} from "./storage";
+// Tailwind first: it declares the @layer order (theme, base, components,
+// utilities) and emits only LAYERED CSS, so every unlayered rule in the
+// theme sheets + global.css below always wins. This keeps existing pages
+// pixel-identical while making utility classes available to new code.
+// Phase A — see docs/development/tailwind-migration.md.
+import "./styles/tailwind.css";
+// Theme files first (light before the rest so the active theme wins the
+// equal-specificity tie against :root), then the shared global sheet.
+import "./styles/themes/theme-light.css";
+import "./styles/themes/theme-dark.css";
+import "./styles/themes/theme-ocean.css";
+import "./styles/themes/theme-forest.css";
+import "./styles/themes/theme-high-contrast.css";
+import "./styles/themes/theme-sepia.css";
+import "./styles/themes/theme-catppuccin-latte.css";
+import "./styles/themes/theme-supabase.css";
+import "./styles/themes/theme-graphite.css";
+import "./styles/themes/theme-catppuccin-mocha.css";
+import "./styles/themes/theme-soft-pop.css";
+import "./styles/themes/theme-amethyst-haze.css";
+import "./styles/global.css";
+import "./styles/fonts-devanagari.css";
+import "./styles/fonts-hangul.css";
+// Side-effect: capture ``beforeinstallprompt`` at startup (#604) so the
+// Settings "Install app" button can offer a manual install later.
+import "./lib/pwa/install";
+
+/**
+ * Phase 11+: when deployed to a sub-path (e.g. GitHub Pages at
+ * ``/adaptive-learner/``) React Router must prefix every route
+ * with that same path or links resolve to the wrong absolute
+ * URL. ``import.meta.env.BASE_URL`` is Vite's runtime mirror of
+ * the ``base`` build option — ``/`` in local dev, ``/foo/`` on
+ * a sub-path build. React Router's ``basename`` wants the path
+ * WITHOUT the trailing slash, so trim it.
+ */
+const basename = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+/**
+ * Phase 39 C6 — dev-only axe-core accessibility audit. Logs
+ * WCAG violations to the browser console on every render while
+ * the dev server is running. Vite tree-shakes this branch out
+ * of the production bundle entirely: ``import.meta.env.DEV``
+ * is replaced with the literal ``false`` at build time, so the
+ * dynamic ``import("@axe-core/react")`` becomes dead code.
+ *
+ * Verified by ``scripts/verify-no-axe-in-prod-bundle.sh`` and
+ * the C6 audit recipe: ``grep -r "axe" dist/assets/*.js`` is
+ * empty after ``npm run build``.
+ */
+if (import.meta.env.DEV) {
+    void import("@axe-core/react").then(({default: axe}) => {
+        axe(React, ReactDOM, 1000);
+    });
+}
+
+/**
+ * #2283 — real-browser concurrency probe. The Playwright cell
+ * ``e2e/dexie/dexie-concurrency.spec.ts`` navigates with
+ * ``?e2e-hooks=1`` to fire the storage layer's read-modify-write
+ * paths concurrently against real IndexedDB. A normal visit never
+ * carries the flag, so the dynamic chunk is never fetched.
+ */
+if (new URLSearchParams(window.location.search).has("e2e-hooks")) {
+    void import("./storage/e2e/concurrency-hooks");
+}
+
+/**
+ * #2575 — on-device console for LAN device debugging (iOS Safari, no
+ * Mac). ``?debug=1`` only; a normal visit never fetches eruda's chunk.
+ * See ``components/dev/debug-console.ts``.
+ */
+if (shouldLoadDebugConsole(window.location.search)) {
+    void loadDebugConsole();
+}
+
+// S3 (PWA hardening): replay the lesson-progress upserts and speech-recording
+// saves queued while offline, on reconnect + once at startup if online.
+initSyncQueueReplay(resolveStorageMode());
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BrowserRouter basename={basename}>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>,
+);

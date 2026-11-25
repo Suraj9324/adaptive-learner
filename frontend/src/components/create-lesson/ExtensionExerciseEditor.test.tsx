@@ -1,0 +1,637 @@
+/**
+ * Tests for the extension-exercise inline editor (#1852, editors 1+2).
+ *
+ * One group per authored extension type covers: the type-specific fields
+ * render, an edit round-trips through ``onSave`` (after normalization), and
+ * the Save gate reflects the shipped payload validator. The pure
+ * validation/normalization rules are pinned in ``extension-edit.test.ts``.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import {fireEvent, render, screen} from "@testing-library/react";
+import {useState} from "react";
+import {describe, expect, it, vi} from "vitest";
+
+import ExtensionExerciseEditor from "./ExtensionExerciseEditor";
+import {
+    CATEGORIZATION_EXT_TYPE,
+    DICTATION_EXT_TYPE,
+    ERROR_CORRECTION_EXT_TYPE,
+    GRADED_QUIZ_EXT_TYPE,
+    HOTSPOT_EXT_TYPE,
+    ORDERING_EXT_TYPE,
+    PARSONS_EXT_TYPE,
+    READING_COMPREHENSION_EXT_TYPE,
+    SPEAK_AND_RECORD_EXT_TYPE,
+} from "../../lib/exercises";
+import type {ContentLessonExercise} from "../../storage/types";
+
+/** Stateful harness so edits round-trip through the exercise record. */
+function Harness({exercise}: {exercise: ContentLessonExercise}) {
+    const [ex, setEx] = useState(exercise);
+    const [saved, setSaved] = useState<ContentLessonExercise | null>(null);
+    if (saved) {
+        return <div data-testid="saved-json">{JSON.stringify(saved)}</div>;
+    }
+    return (
+        <ExtensionExerciseEditor
+            exercise={ex}
+            onSave={(updated) => {
+                setEx(updated);
+                setSaved(updated);
+            }}
+            onCancel={vi.fn()}
+        />
+    );
+}
+
+function saveButton(id: string): HTMLButtonElement {
+    return screen.getByTestId(`exercise-ext-save-${id}`) as HTMLButtonElement;
+}
+
+function savedPayload(): Record<string, unknown> {
+    const raw = screen.getByTestId("saved-json").textContent ?? "{}";
+    return JSON.parse(raw).ext_payload as Record<string, unknown>;
+}
+
+describe("ExtensionExerciseEditor — categorization", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "c1",
+            type: CATEGORIZATION_EXT_TYPE,
+            prompt: "Sort each signal",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                categories: [
+                    {name: "Sight", items: ["flat hand"]},
+                    {name: "Sound", items: ["Sit"]},
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders a category editor per category", () => {
+        render(<Harness exercise={ex()} />);
+        expect(
+            screen.getByTestId("exercise-ext-cat-name-c1-0"),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByTestId("exercise-ext-cat-name-c1-1"),
+        ).toBeInTheDocument();
+    });
+
+    it("commits an edited category name on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-cat-name-c1-0"), {
+            target: {value: "Visual"},
+        });
+        fireEvent.click(saveButton("c1"));
+        const categories = savedPayload().categories as {name: string}[];
+        expect(categories[0].name).toBe("Visual");
+    });
+
+    it("disables Save when a category name is blank", () => {
+        const blank = ex();
+        (blank.ext_payload as {categories: {name: string}[]}).categories[0].name =
+            "";
+        render(<Harness exercise={blank} />);
+        expect(saveButton("c1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-c1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — error correction", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "e1",
+            type: ERROR_CORRECTION_EXT_TYPE,
+            prompt: "Fix the wrong word",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                tokens: ["The", "dog", "follow"],
+                error_index: 2,
+                accept: ["follows"],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders a token editor per word with the error radio checked", () => {
+        render(<Harness exercise={ex()} />);
+        expect(
+            screen.getByTestId("exercise-ext-token-input-e1-2"),
+        ).toBeInTheDocument();
+        const radio = screen.getByTestId(
+            "exercise-ext-token-error-e1-2",
+        ) as HTMLInputElement;
+        expect(radio.checked).toBe(true);
+    });
+
+    it("moves the error marker when another word is marked", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.click(screen.getByTestId("exercise-ext-token-error-e1-1"));
+        fireEvent.click(saveButton("e1"));
+        expect(savedPayload().error_index).toBe(1);
+    });
+
+    it("disables Save when no accepted correction exists", () => {
+        const blank = ex();
+        (blank.ext_payload as {accept: string[]}).accept = [];
+        render(<Harness exercise={blank} />);
+        expect(saveButton("e1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-e1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — reading comprehension", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "r1",
+            type: READING_COMPREHENSION_EXT_TYPE,
+            prompt: "Read and answer",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                passage: "Rex ran into the garden.",
+                questions: [
+                    {
+                        prompt: "Where did Rex run?",
+                        type: "multiple_choice",
+                        options: [
+                            {text: "The garden", correct: true},
+                            {text: "The street", correct: false},
+                        ],
+                        accept: [],
+                    },
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders the passage + a question editor", () => {
+        render(<Harness exercise={ex()} />);
+        expect(screen.getByTestId("exercise-ext-rc-passage-r1")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-ext-rc-q-r1-0")).toBeInTheDocument();
+    });
+
+    it("commits an edited passage on Save (drops the unused accept branch)", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-rc-passage-r1"), {
+            target: {value: "A new passage."},
+        });
+        fireEvent.click(saveButton("r1"));
+        const payload = savedPayload() as {
+            passage: string;
+            questions: {accept?: unknown}[];
+        };
+        expect(payload.passage).toBe("A new passage.");
+        expect(payload.questions[0].accept).toBeUndefined();
+    });
+
+    it("disables Save when the passage is blank", () => {
+        const blank = ex();
+        (blank.ext_payload as {passage: string}).passage = "";
+        render(<Harness exercise={blank} />);
+        expect(saveButton("r1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-r1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — graded quiz", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "q1",
+            type: GRADED_QUIZ_EXT_TYPE,
+            prompt: "Answer the quiz",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                pass_threshold: 60,
+                questions: [
+                    {
+                        prompt: "2+2?",
+                        type: "multiple_choice",
+                        options: [
+                            {text: "4", correct: true},
+                            {text: "5", correct: false},
+                        ],
+                        accept: [],
+                        points: 2,
+                    },
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders the threshold + points fields", () => {
+        render(<Harness exercise={ex()} />);
+        expect(
+            screen.getByTestId("exercise-ext-gq-threshold-q1"),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByTestId("exercise-ext-gq-q-q1-0-points"),
+        ).toBeInTheDocument();
+    });
+
+    it("commits an edited points value on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-gq-q-q1-0-points"), {
+            target: {value: "5"},
+        });
+        fireEvent.click(saveButton("q1"));
+        const payload = savedPayload() as {questions: {points: number}[]};
+        expect(payload.questions[0].points).toBe(5);
+    });
+
+    it("disables Save when points are not positive", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-gq-q-q1-0-points"), {
+            target: {value: "0"},
+        });
+        expect(saveButton("q1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-q1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — dictation", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "d1",
+            type: DICTATION_EXT_TYPE,
+            prompt: "Type what you hear",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {audio: "assets/audio/one.mp3", accept: ["un"]},
+        }) as ContentLessonExercise;
+
+    it("renders the audio-path input + the accepted-answers editor", () => {
+        render(<Harness exercise={ex()} />);
+        expect(screen.getByTestId("exercise-ext-dict-audio-d1")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-ext-dict-accept-d1")).toBeInTheDocument();
+    });
+
+    it("commits an edited audio path on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-dict-audio-d1"), {
+            target: {value: "assets/audio/two.mp3"},
+        });
+        fireEvent.click(saveButton("d1"));
+        expect(savedPayload().audio).toBe("assets/audio/two.mp3");
+    });
+
+    it("adds an accepted transcription and commits it on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(
+            screen.getByTestId("exercise-ext-dict-accept-d1-input"),
+            {target: {value: "deux"}},
+        );
+        fireEvent.click(screen.getByTestId("exercise-ext-dict-accept-d1-add"));
+        fireEvent.click(saveButton("d1"));
+        expect(savedPayload().accept).toEqual(["un", "deux"]);
+    });
+
+    it("disables Save when the audio path is blank", () => {
+        const blank = ex();
+        (blank.ext_payload as {audio: string}).audio = "";
+        render(<Harness exercise={blank} />);
+        expect(saveButton("d1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-d1")).toBeInTheDocument();
+    });
+
+    it("disables Save when no accepted transcription exists", () => {
+        const blank = ex();
+        (blank.ext_payload as {accept: string[]}).accept = [];
+        render(<Harness exercise={blank} />);
+        expect(saveButton("d1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-d1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — speak and record (#2817, ungraded)", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "s1",
+            type: SPEAK_AND_RECORD_EXT_TYPE,
+            prompt: "Say it out loud",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {sentence: "Guten Tag"},
+        }) as ContentLessonExercise;
+
+    it("renders the sentence input + the (reused) audio field", () => {
+        render(<Harness exercise={ex()} />);
+        expect(screen.getByTestId("exercise-ext-sar-sentence-s1")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-ext-dict-audio-s1")).toBeInTheDocument();
+    });
+
+    it("commits an edited sentence on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-sar-sentence-s1"), {
+            target: {value: "Auf Wiedersehen"},
+        });
+        fireEvent.click(saveButton("s1"));
+        expect(savedPayload().sentence).toBe("Auf Wiedersehen");
+    });
+
+    it("saves with no audio at all — this extension is ungraded, audio is optional", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.click(saveButton("s1"));
+        expect(savedPayload()).toEqual({sentence: "Guten Tag"});
+    });
+
+    it("disables Save when the sentence is blank", () => {
+        const blank = ex();
+        (blank.ext_payload as {sentence: string}).sentence = "";
+        render(<Harness exercise={blank} />);
+        expect(saveButton("s1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-s1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — type conversion (EXP-050 Stage 1)", () => {
+    const dictation = (): ContentLessonExercise =>
+        ({
+            id: "cd1",
+            type: DICTATION_EXT_TYPE,
+            prompt: "Write what you hear",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {audio: "assets/audio/clip.mp3", accept: ["bonjour"]},
+        }) as ContentLessonExercise;
+
+    it("offers the reading-comprehension target for a graded-quiz + calls onConvert", () => {
+        const onConvert = vi.fn();
+        const gq = {
+            id: "gq1",
+            type: "ext:al-graded-quiz",
+            prompt: "Quiz",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                pass_threshold: 60,
+                questions: [
+                    {prompt: "Q1", type: "free_text", accept: ["x"], points: 1},
+                ],
+            },
+        } as ContentLessonExercise;
+        render(
+            <ExtensionExerciseEditor
+                exercise={gq}
+                onSave={vi.fn()}
+                onCancel={vi.fn()}
+                allowConversion
+                onConvert={onConvert}
+            />,
+        );
+        const select = screen.getByTestId(
+            "exercise-ext-type-select-gq1",
+        ) as HTMLSelectElement;
+        expect(Array.from(select.options).map((o) => o.value)).toContain(
+            "ext:al-reading-comprehension",
+        );
+        fireEvent.change(select, {target: {value: "ext:al-reading-comprehension"}});
+        expect(onConvert).toHaveBeenCalledTimes(1);
+        const converted = onConvert.mock.calls[0][0];
+        expect(converted.type).toBe("ext:al-reading-comprehension");
+        expect(converted.ext_payload.passage).toBe("");
+    });
+
+    it("offers the free_text conversion when allowed and calls onConvert", () => {
+        const onConvert = vi.fn();
+        render(
+            <ExtensionExerciseEditor
+                exercise={dictation()}
+                onSave={vi.fn()}
+                onCancel={vi.fn()}
+                allowConversion
+                onConvert={onConvert}
+            />,
+        );
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-cd1"), {
+            target: {value: "free_text"},
+        });
+        expect(onConvert).toHaveBeenCalledTimes(1);
+        const converted = onConvert.mock.calls[0][0];
+        expect(converted.type).toBe("free_text");
+        expect(converted.accept).toEqual(["bonjour"]);
+        expect("ext_payload" in converted).toBe(false);
+    });
+
+    it("converts error-correction to free_text, lifting accept (key-preserving)", () => {
+        const onConvert = vi.fn();
+        const ec = {
+            id: "ec1",
+            type: "ext:al-error-correction",
+            prompt: "Fix the wrong word",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {tokens: ["Je", "suit", "ici"], error_index: 1, accept: ["suis"]},
+        } as ContentLessonExercise;
+        render(
+            <ExtensionExerciseEditor
+                exercise={ec}
+                onSave={vi.fn()}
+                onCancel={vi.fn()}
+                allowConversion
+                onConvert={onConvert}
+            />,
+        );
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-ec1"), {
+            target: {value: "free_text"},
+        });
+        expect(onConvert).toHaveBeenCalledTimes(1);
+        const converted = onConvert.mock.calls[0][0];
+        expect(converted.type).toBe("free_text");
+        expect(converted.accept).toEqual(["suis"]);
+        expect("ext_payload" in converted).toBe(false);
+    });
+
+    it("hides the conversion control when not allowed", () => {
+        render(
+            <ExtensionExerciseEditor
+                exercise={dictation()}
+                onSave={vi.fn()}
+                onCancel={vi.fn()}
+            />,
+        );
+        expect(screen.queryByTestId("exercise-ext-type-select-cd1")).toBeNull();
+    });
+
+    it("shows no conversion control for a non-convertible extension type", () => {
+        const categorization = {
+            id: "cd2",
+            type: CATEGORIZATION_EXT_TYPE,
+            prompt: "Sort",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {categories: [{name: "A", items: ["x"]}]},
+        } as ContentLessonExercise;
+        render(
+            <ExtensionExerciseEditor
+                exercise={categorization}
+                onSave={vi.fn()}
+                onCancel={vi.fn()}
+                allowConversion
+                onConvert={vi.fn()}
+            />,
+        );
+        expect(screen.queryByTestId("exercise-ext-type-select-cd2")).toBeNull();
+    });
+});
+
+describe("ExtensionExerciseEditor — post-answer explanation (#2992)", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "ec9",
+            type: ERROR_CORRECTION_EXT_TYPE,
+            prompt: "Fix the wrong word",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                tokens: ["el", "rojo", "coche"],
+                error_index: 1,
+                accept: ["coche rojo"],
+            },
+        }) as ContentLessonExercise;
+
+    it("round-trips the explanation through Save alongside the payload", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-ec9-explanation"), {
+            target: {value: " **Regel:** Adjektive stehen hinten. "},
+        });
+        fireEvent.click(saveButton("ec9"));
+        const saved = JSON.parse(screen.getByTestId("saved-json").textContent ?? "{}");
+        expect(saved.explanation).toBe("**Regel:** Adjektive stehen hinten.");
+        expect(saved.ext_payload.accept).toEqual(["coche rojo"]);
+    });
+});
+
+describe("ExtensionExerciseEditor — ordering (#3110)", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "o1",
+            type: ORDERING_EXT_TYPE,
+            prompt: "Put the steps in order",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {items: ["Engage clutch", "Select gear"]},
+        }) as ContentLessonExercise;
+
+    it("renders the step-list editor", () => {
+        render(<Harness exercise={ex()} />);
+        expect(screen.getByTestId("exercise-ext-ordering-items-o1")).toBeInTheDocument();
+    });
+
+    it("adds a step and commits it on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-ordering-items-o1-input"), {
+            target: {value: "Release clutch"},
+        });
+        fireEvent.click(screen.getByTestId("exercise-ext-ordering-items-o1-add"));
+        fireEvent.click(saveButton("o1"));
+        expect(savedPayload().items).toEqual([
+            "Engage clutch",
+            "Select gear",
+            "Release clutch",
+        ]);
+    });
+
+    it("disables Save when fewer than 2 items remain", () => {
+        const blank = ex();
+        (blank.ext_payload as {items: string[]}).items = ["only one"];
+        render(<Harness exercise={blank} />);
+        expect(saveButton("o1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-o1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — parsons (#3110)", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "p1",
+            type: PARSONS_EXT_TYPE,
+            prompt: "Arrange the code",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                lines: [
+                    {code: "def greet(name):", indent: 0},
+                    {code: "print(name)", indent: 1},
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders the code textarea, pre-filled with indented code", () => {
+        render(<Harness exercise={ex()} />);
+        const textarea = screen.getByTestId(
+            "exercise-ext-parsons-code-p1",
+        ) as HTMLTextAreaElement;
+        expect(textarea.value).toBe("def greet(name):\n    print(name)");
+    });
+
+    it("commits edited code, re-deriving indent from leading spaces, on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.change(screen.getByTestId("exercise-ext-parsons-code-p1"), {
+            target: {value: "def f():\n    return 1\n        return 2"},
+        });
+        fireEvent.click(saveButton("p1"));
+        expect(savedPayload().lines).toEqual([
+            {code: "def f():", indent: 0},
+            {code: "return 1", indent: 1},
+            {code: "return 2", indent: 2},
+        ]);
+    });
+
+    it("disables Save when fewer than 2 lines remain", () => {
+        const blank = ex();
+        (blank.ext_payload as {lines: unknown[]}).lines = [{code: "only one", indent: 0}];
+        render(<Harness exercise={blank} />);
+        expect(saveButton("p1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-p1")).toBeInTheDocument();
+    });
+});
+
+describe("ExtensionExerciseEditor — hotspot (#3110)", () => {
+    const ex = (): ContentLessonExercise =>
+        ({
+            id: "h1",
+            type: HOTSPOT_EXT_TYPE,
+            prompt: "Click the capital",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                src: "assets/map.png",
+                zones: [
+                    {shape: "rect", coords: {x: 10, y: 10, width: 20, height: 20}, is_correct: "true"},
+                    {shape: "circle", coords: {cx: 70, cy: 70, radius: 15}},
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("renders one zone row per authored zone", () => {
+        render(<Harness exercise={ex()} />);
+        expect(screen.getByTestId("exercise-ext-hotspot-zone-h1-0")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-ext-hotspot-zone-h1-1")).toBeInTheDocument();
+    });
+
+    it("adds a zone and commits it on Save", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.click(screen.getByTestId("exercise-ext-hotspot-zone-add-h1"));
+        fireEvent.click(saveButton("h1"));
+        expect((savedPayload().zones as unknown[]).length).toBe(3);
+    });
+
+    it("re-marking the correct zone moves is_correct to the new zone", () => {
+        render(<Harness exercise={ex()} />);
+        fireEvent.click(screen.getByTestId("exercise-ext-hotspot-zone-correct-h1-1"));
+        fireEvent.click(saveButton("h1"));
+        const zones = savedPayload().zones as {is_correct?: string}[];
+        expect(zones[0].is_correct).toBeUndefined();
+        expect(zones[1].is_correct).toBe("true");
+    });
+
+    it("disables Save when the image src is blank", () => {
+        const blank = ex();
+        (blank.ext_payload as {src: string}).src = "";
+        render(<Harness exercise={blank} />);
+        expect(saveButton("h1")).toBeDisabled();
+        expect(screen.getByTestId("exercise-ext-error-h1")).toBeInTheDocument();
+    });
+});

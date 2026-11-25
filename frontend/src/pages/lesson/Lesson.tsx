@@ -1,0 +1,648 @@
+/**
+ * /lesson/:setSlug/:setId/:filename — lesson viewer
+ * (Phase 44 / EXP-002 / 3B — F-102 + F-103).
+ *
+ * Walks the user through a downloaded lesson step-by-step:
+ * theory bodies render via react-markdown (same pipeline the
+ * help drawer + Learning-Repo page use), exercise steps land
+ * a placeholder for now (commit 4 + 5 add MatchingExercise +
+ * PictureChoiceExercise; commit 6 wires them into the
+ * dispatch). After the last step, a summary card surfaces the
+ * aggregate score + time-spent + a "Mark complete" button.
+ *
+ * Storage-mode-agnostic: the underlying ``useLesson`` hook
+ * routes through ``getStorage().contentLoader.*`` /
+ * ``lessonProgress.*`` so the page works in API mode AND
+ * Dexie-mode (GitHub Pages). When a user lands here for a set
+ * they haven't downloaded yet, the viewer shows a friendly
+ * "Open the Set Browser to download" notice instead of
+ * crashing with a 404 toast.
+ *
+ * Mobile-first: prev / next buttons stretch to fill on small
+ * viewports so the touch target stays above 44px.
+ */
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router";
+
+import LessonResumeDialog from "../../components/lesson/dialogs/LessonResumeDialog";
+import LessonExitDialog from "../../components/lesson/dialogs/LessonExitDialog";
+import LessonTimedStatus from "../../components/lesson/chrome/LessonTimedStatus";
+import { LessonModeProvider } from "../../hooks/lesson/modes/useLessonMode";
+import { TestModeProvider } from "../../hooks/lesson/modes/useTestMode";
+import TestModeBanner from "../../components/lesson/testmode/TestModeBanner";
+import TestModeActivationZone from "../../components/lesson/testmode/TestModeActivationZone";
+import { useTimedLesson } from "../../hooks/lesson/modes/useTimedLesson";
+import {
+  readDefaultLessonMode,
+  type LessonMode,
+} from "../../lib/learning/lessonModePref";
+import { configForMode } from "../../lib/learning/lessonModeConfig";
+import { maybeReverseLesson } from "../../lib/reverse/reverse-lesson";
+import LessonReverseNote from "../../components/lesson/chrome/LessonReverseNote";
+import LessonSummaryScreen from "../../components/lesson/summary/LessonSummaryScreen";
+import LessonHeader from "../../components/lesson/chrome/LessonHeader";
+import LessonMentorNote from "../../components/lesson/mentor/LessonMentorNote";
+import LessonOptionsBar from "../../components/lesson/chrome/LessonOptionsBar";
+import LessonProgressBar from "../../components/lesson/chrome/LessonProgressBar";
+import PlayfulModeHint from "../../components/lesson/chrome/PlayfulModeHint";
+import LessonCombo from "../../components/lesson/chrome/LessonCombo";
+import LessonMascot from "../../components/lesson/mascot/LessonMascot";
+import { useLessonCombo } from "../../hooks/lesson/useLessonCombo";
+import { usePlayfulMode } from "../../hooks/settings/usePlayfulMode";
+import { useLessonTension } from "../../hooks/lesson/useLessonTension";
+import { comboBonusForRun } from "../../lib/learning/playful/playfulComboXpPref";
+import LessonTensionChrome from "../../components/lesson/chrome/tension/LessonTensionChrome";
+import LessonHeartsDialog from "../../components/lesson/dialogs/LessonHeartsDialog";
+import LessonStepView from "../../components/lesson/steps/LessonStepView";
+import LessonFooterNav from "../../components/lesson/chrome/LessonFooterNav";
+import { FooterStatusProvider } from "../../components/lesson/runner/footer-status";
+import LessonTtsMiniPlayerSlot from "../../components/lesson/tts/LessonTtsMiniPlayerSlot";
+import LessonStatusView, {
+  resolveLessonStatusKind,
+} from "../../components/lesson/steps/LessonStatusView";
+import { useLessonAutoRead } from "../../hooks/lesson/audio/useLessonAutoRead";
+import { isPlayableExerciseStep } from "../../lib/lesson/lesson-step-state";
+import { useI18n } from "../../hooks/ui/useI18n";
+import { useLesson } from "../../hooks/lesson/session/useLesson";
+import { useLessonFlowControl } from "../../hooks/lesson/session/useLessonFlowControl";
+import { useLessonMotivation } from "../../hooks/lesson/session/useLessonMotivation";
+import { useLessonNavigation } from "../../hooks/lesson/session/useLessonNavigation";
+import { useLessonSetContext } from "../../hooks/lesson/session/useLessonSetContext";
+import { exitRouteForLesson, lessonRoute } from "../../lib/content/browse/continue-learning";
+import { useLessonStepState } from "../../hooks/lesson/session/useLessonStepState";
+import { useOrientationReanchor } from "../../hooks/lesson/interaction/useOrientationReanchor";
+import { useStepReanchor } from "../../hooks/lesson/interaction/useStepReanchor";
+import { clearHintUsage } from "../../lib/hints/hint-usage";
+import { readLearnerState } from "../../lib/learning/learnerState";
+import { useLessonWakeLock } from "../../hooks/lesson/session/useLessonWakeLock";
+import LessonNoProfileNotice from "../../components/lesson/LessonNoProfileNotice";
+import LessonExamNotice from "../../components/lesson/LessonExamNotice";
+
+interface UrlParams {
+  setSlug: string;
+  setId: string;
+  filename: string;
+  [key: string]: string | undefined;
+}
+
+/** Whether the step index sits on the summary view (past the last step). */
+function isAtSummary(lesson: {steps: unknown[]} | null, index: number): boolean {
+  return lesson !== null && index >= lesson.steps.length;
+}
+
+export default function LessonPage() {
+  const params = useParams<UrlParams>();
+  const navigate = useNavigate();
+  const { t } = useI18n();
+
+  const source = useMemo(
+    () => (params.setSlug ?? "").replace(/--/g, "/"),
+    [params.setSlug],
+  );
+  const setId = params.setId ?? "";
+  const filename = params.filename ?? "";
+
+  // #1007 — Practice / Exam / Timed mode. Seeded from the learner's
+  // default-mode setting; switchable until the lesson is under way (so the
+  // rules can't change mid-run). Practice keeps every aid on; exam hides
+  // the scaffolding (hints, theory recap, auto-read, solution toggles,
+  // celebration). Declared before useLesson so the mode is persisted on
+  // every progress upsert (#1007 Phase 2 — XP + SRS read the attempt's
+  // mode). Default ``practice`` keeps the lower-pressure mode for new
+  // learners.
+  const [lessonMode, setLessonMode] = useState<LessonMode>(() =>
+    readDefaultLessonMode(),
+  );
+  const modeConfig = configForMode(lessonMode);
+
+  const {
+    status,
+    lesson,
+    progress,
+    currentStepIndex,
+    error,
+    goNext,
+    goPrev,
+    goToStep,
+    goToStepById,
+    recordStepResult,
+    markCompleted,
+    markPaused,
+    markAbandoned,
+    markResumed,
+    markRestarted,
+    autosave,
+  } = useLesson({ source, setId, lessonFilename: filename, lessonMode });
+
+  // Phase 63 B/C/E lifecycle (exit dialog, resume prompt, auto-pause,
+  // 30s autosave) lives in the extracted hook (#354).
+  const {
+    exitOpen,
+    setExitOpen,
+    isInProgress,
+    modeLocked,
+    showResumePrompt,
+    resumeBlocked,
+    handleResume,
+    handleStartOver,
+    handlePauseFromDialog,
+    handleAbandonFromDialog,
+  } = useLessonFlowControl({
+    status,
+    progress,
+    markPaused,
+    markAbandoned,
+    markResumed,
+    markRestarted,
+    autosave,
+    goToStep,
+    // #3075 - the summary is the end of the run, not a place to pause.
+    atSummary: isAtSummary(lesson, currentStepIndex),
+    // #3742 / #3750 - a run from another mode (exam on either side), or a
+    // started exam reopened as an exam, starts over.
+    lessonMode,
+  });
+
+  // Phase 46B — userId for the elementErrors.recordBulk
+  // call inside ExerciseDispatcher's onComplete. Read once
+  // on mount; useLesson already reads it for the progress
+  // path but doesn't expose it.
+  const learnerUserId = useMemo(() => readLearnerState().userId, []);
+
+  // #1013 — reverse mode flips each exercise's drill direction (matching
+  // gets its columns flipped; other types stay original + show a
+  // "(not reversible)" note). Memoized so the played exercise objects keep
+  // a stable identity across renders — a fresh object every render would
+  // remount the active exercise and wipe the in-progress answer. The
+  // synthetic lesson is purely presentational: ``useLesson`` keeps the
+  // original ``lesson`` for progress IO (step ids are preserved).
+  const playedLesson = useMemo(
+    () => maybeReverseLesson(lesson, modeConfig.cardDirection),
+    [lesson, modeConfig.cardDirection],
+  );
+
+  // #594 Hint Economy — start each lesson with a clean hint-usage slate
+  // so a hint on a reused exercise id from a prior lesson never bleeds.
+  useEffect(() => {
+    clearHintUsage();
+  }, [source, setId, filename]);
+
+  // #2874 game-mode juice — the answer streak, fed by the celebration
+  // bus (exam mode emits no per-answer events, so it stays silent
+  // there by construction). One hook instance so the live chip and
+  // the summary's best-run chip read the same lesson.
+  const playful = usePlayfulMode();
+  const { combo, resetCombo } = useLessonCombo(playful);
+  // #2893 — the game-mode combo bonus for this run: the reducer's
+  // eligible-answer count through the user-configured cap; 0 while the
+  // combo-XP switch or the game mode is off. One number for both the
+  // summary display and the completion award.
+  const comboBonusXp = comboBonusForRun(combo.bonusEligible);
+  useEffect(() => {
+    resetCombo();
+  }, [source, setId, filename, resetCombo]);
+
+  // The two-phase check state cluster (exercise handle, answerable /
+  // checked / reviewed flags, render-phase per-step reset, Enter
+  // shortcut) lives in the extracted hook (#1790).
+  const {
+    exerciseRef,
+    answerable,
+    setAnswerable,
+    checked,
+    setChecked,
+    enteredReviewed,
+    reviewedRaw,
+    enterStateRef,
+  } = useLessonStepState({lesson, currentStepIndex, progress});
+  // #959 — scroll anchor placed just above the progress bar so a step
+  // change can bring the task into view on mobile (see the effect below).
+  const stepScrollRef = useRef<HTMLDivElement>(null);
+
+  // #1009 — timed-mode orchestration (countdown length, timeout
+  // auto-advance, correct-answer bonus, end-of-run timing stats). Inert
+  // unless the lesson runs in timed mode, so practice/exam are unaffected.
+  const timed = useTimedLesson({
+    enabled: lessonMode === "timed",
+    lesson,
+    currentStepIndex,
+    checked,
+    progress,
+    recordStepResult,
+    goNext,
+  });
+
+  // #2878 game-mode tension - hearts + per-exercise countdown ring,
+  // both opt-in (default OFF). All gating (mode, summary, correction
+  // round) lives inside the hook.
+  const tension = useLessonTension({
+    playful,
+    lesson,
+    playedLesson,
+    currentStepIndex,
+    lessonMode,
+    checked,
+    source,
+    setId,
+    filename,
+  });
+
+  // Scroll-to-top on step change + the #140 theory back-link
+  // round-trip live in the extracted hook (#354).
+  const {
+    precedingTheoryIndex,
+    theoryReturnIndex,
+    openTheoryFromExercise,
+    returnToExercise,
+  } = useLessonNavigation({ lesson, currentStepIndex, goToStep });
+
+
+  // TTS read-aloud — auto-read mode, the "R" shortcut, and continuous
+  // theory reading now live in the extracted hook (#404).
+  const {
+    tts,
+    autoRead,
+    toggleAutoRead,
+    endReadAloud,
+    startContinuous,
+    isContinuous,
+    theoryBlock,
+    readTheoryStepAt,
+    continuousAvailable,
+  } = useLessonAutoRead({ lesson, currentStepIndex, showResumePrompt, goToStep });
+
+  // Mid-lesson motivation toast (#586) lives in the extracted hook (#1790).
+  useLessonMotivation({lesson, currentStepIndex});
+
+  // #959 — the lesson header (set line + title + description) eats too
+  // much vertical space on EVERY viewport, so the progress bar + step
+  // content start below the fold and the learner has to scroll on each of
+  // the steps. After load + each step change, bring the content into view
+  // so they see the task, not the header. #3126 — the hard scroll reset
+  // and the anchor scroll are ONE ordered hook now (reset, then anchor
+  // once the new layout is committed): the former two competing scrolls
+  // left iOS with a stale offset after a long-to-short step change, the
+  // content cut off and the sticky footer mid-screen.
+  useStepReanchor(stepScrollRef, currentStepIndex, !showResumePrompt);
+
+  // #1422 — after a device ROTATION, re-anchor the same step anchor: iOS
+  // leaves stale scroll offsets / sticky positions after an orientation
+  // change until the next scroll, which can strand the task + the sticky
+  // footer outside the freshly-sized viewport.
+  useOrientationReanchor(stepScrollRef, !showResumePrompt);
+
+  // Next-lesson pointer + set title/domain/book (three silent-degrade
+  // mount reads) live in the extracted hook (#1790).
+  const {
+    nextLessonFilename,
+    prevLessonFilename,
+    position,
+    setTitle,
+    setDomain,
+    setBook,
+    setEvaluation,
+  } = useLessonSetContext({source, setId, filename});
+  // #2793 — the header's backward/forward links; the same route builder the
+  // rest of the app uses, so a neighbour opens exactly like any other lesson.
+  const prevLessonHref = prevLessonFilename
+    ? lessonRoute(source, setId, prevLessonFilename)
+    : null;
+  const nextLessonHref = nextLessonFilename
+    ? lessonRoute(source, setId, nextLessonFilename)
+    : null;
+
+  const statusKind = resolveLessonStatusKind(
+    source,
+    setId,
+    filename,
+    status,
+    lesson,
+  );
+  // #3358 — keep the screen on while the lesson is open and not on its
+  // summary, also during silent reading (the setting defaults to on).
+  useLessonWakeLock(statusKind, currentStepIndex, playedLesson);
+  if (statusKind) return <LessonStatusView kind={statusKind} error={error} />;
+  // ``resolveLessonStatusKind`` already returns "error" when the lesson
+  // is null, so this only narrows the type for the code below.
+  if (lesson === null) return null;
+
+  // #1013 — the lesson actually played (reverse mode flips the exercises;
+  // identical to ``lesson`` in every other mode). ``maybeReverseLesson``
+  // returns ``lesson`` itself (or a transform of it), so it is non-null
+  // whenever ``lesson`` is — assert the type without adding a branch.
+  const played = playedLesson as NonNullable<typeof playedLesson>;
+  const totalSteps = played.steps.length;
+  const isSummary = currentStepIndex >= totalSteps;
+  const step = isSummary ? null : played.steps[currentStepIndex];
+  // An exercise step gates the two-phase button; theory steps
+  // (and any unsupported/placeholder exercise type) keep the
+  // plain always-enabled "Next" button so the user is never
+  // stuck on a step they can't "check".
+  const isExerciseStep = isPlayableExerciseStep(step);
+  const isLastStep = currentStepIndex + 1 === totalSteps;
+  // Keep the Enter-shortcut listener (#103) reading the latest step
+  // state without re-subscribing on every render.
+  enterStateRef.current = {
+    isSummary,
+    isExerciseStep,
+    checked,
+    enteredReviewed,
+    answerable,
+    // #1007 Phase 2 — exam: Enter submits + advances in one keystroke.
+    delayedFeedback: !modeConfig.immediateFeedback,
+    goNext,
+  };
+
+  return (
+    <TestModeProvider>
+    <main
+      id="main"
+      className="lesson-page flex flex-col min-h-full"
+      data-testid="lesson-page"
+    >
+      <FooterStatusProvider>
+        <LessonHeader
+          lesson={lesson}
+          setTitle={setTitle}
+          position={position}
+          prevHref={prevLessonHref}
+          nextHref={nextLessonHref}
+          setHref={setId ? `/content/set/${encodeURIComponent(setId)}` : null}
+        />
+
+        {/* #2319 — visible while test mode is active (preview build only). */}
+        <TestModeBanner />
+
+        {/* #3364 — without a learner profile nothing here is saved; say so
+            up front instead of only on the summary's disabled button. */}
+        <LessonNoProfileNotice userId={learnerUserId} />
+
+        {/* #2844 — one-time playful-mode discovery hint at the lesson start;
+            the component gates itself on the pref + dismissal flags. */}
+        {!isSummary && currentStepIndex === 0 && <PlayfulModeHint />}
+
+        {/* #1642 — the pause control moved into the footer; the exit dialog it
+            opens is lifted here (portal, controlled by the lesson's exitOpen
+            state) so both the header and the footer stay presentational. */}
+        <LessonExitDialog
+          open={exitOpen}
+          onContinue={() => setExitOpen(false)}
+          onPause={() => void handlePauseFromDialog()}
+          onAbandon={() => void handleAbandonFromDialog()}
+        />
+
+        {/* #1648 — the summary's favorite lives in the labelled
+            SummaryFavorite row inside LessonSummary; the old isolated
+            top-right star here was a duplicate of the same toggle and was
+            removed. During the active lesson the favorite lives in the
+            collapsible options group (#1625). */}
+
+        {/* Phase 63C — resume prompt overlays the step view.
+                  The user must choose before they can interact with
+                  the lesson content. */}
+        <LessonResumeDialog
+          open={showResumePrompt}
+          lessonTitle={lesson.title}
+          blockReason={resumeBlocked}
+          onResume={() => void handleResume()}
+          onStartOver={() => void handleStartOver()}
+        />
+
+        {/* #2878 — out of hearts: the run ends with a friendly forced
+            choice. Retry restarts the run (recorded results stay) and
+            refills the hearts; exit returns to the lesson overview. */}
+        <LessonHeartsDialog
+          open={tension.depleted}
+          onRetry={() => {
+            tension.resetHearts();
+            void handleStartOver();
+          }}
+          onExit={() => navigate(exitRouteForLesson(setId))}
+        />
+
+        {/* #959 — scroll anchor: a step change scrolls this to the top of
+            the viewport, lifting the header off-screen so the progress bar +
+            task land in view. scroll-mt leaves a little gap under the
+            (auto-hiding) nav. */}
+        <div ref={stepScrollRef} aria-hidden="true" className="scroll-mt-4" />
+
+        {/* #959 — keep "Step n of m" visible while reading: the row sticks to
+            the top of the scroll container (all viewports). The lesson nav
+            auto-hides on scroll-down, so the row fills the space it vacates;
+            z-10 stays below the nav (z-50) when the nav is shown. The
+            bg-token backs the sticky row so scrolled content never bleeds
+            through the gaps around the button.
+
+            #1942 — the progress indicator and the collapsible options group
+            share ONE flex row: the bar grows to take the available width and
+            the "Options" button sits beside it (instead of stacking on its
+            own line below). ``flex-wrap`` + a bar min-width keeps it graceful
+            — on very narrow viewports (or once the options panel is expanded
+            and its body needs the room) the options block wraps onto its own
+            line. ``items-start`` pins the bar to the top so an expanded panel
+            can't drag it to the vertical centre. */}
+        <div
+          className="sticky top-0 z-10 flex flex-wrap items-start gap-2 bg-bg-primary py-3"
+          data-testid="lesson-progress-options-row"
+        >
+          {/* #2319 — the progress bar doubles as the hidden test-mode
+              activation target (six quick taps; inert unless the build opted
+              in). display:contents keeps the bar's flex sizing. */}
+          <TestModeActivationZone>
+            <LessonProgressBar
+              isSummary={isSummary}
+              currentStepIndex={currentStepIndex}
+              totalSteps={totalSteps}
+              playful={playful}
+              className="my-0 min-w-[8rem] flex-1"
+            />
+          </TestModeActivationZone>
+
+          {/* #2874 — the streak chip (game mode only): live run during the
+              lesson, the best run on the summary. */}
+          {playful && (
+            <LessonCombo combo={combo} showBest={isSummary} bonusXp={comboBonusXp} />
+          )}
+
+          {/* #2878 — the tension systems (both opt-in): the lives row and
+              the per-exercise countdown ring. Self-gating, hidden on the
+              summary. */}
+          <LessonTensionChrome tension={tension} />
+
+          {/* #2849 — the Lernfunke companion, playful mode only. Reacts to
+              the celebration bus (cheer/encourage/celebrate) and speaks one
+              praise phrase on lesson completion; grows on the summary. */}
+          <LessonMascot large={isSummary} />
+
+          {/* #1625 — the lesson's mode/display SETTINGS (favorite, mode
+              toggle, auto read-aloud) are bundled into one compact,
+              collapsible group (LessonOptionsBar) so they stop eating the
+              vertical space above the exercise on mobile. Default collapsed;
+              the group resets to collapsed per lesson and preserves the
+              choice across step changes. Renders nothing on the summary
+              screen. */}
+          <LessonOptionsBar
+            isSummary={isSummary}
+            className="shrink-0"
+            userId={learnerUserId ?? ""}
+            source={source}
+            setId={setId}
+            filename={filename}
+            title={lesson.title}
+            setTitle={setTitle ?? ""}
+            lessonMode={lessonMode}
+            onModeChange={setLessonMode}
+            modeLocked={modeLocked}
+            showReadAloud={modeConfig.showReadAloud}
+            lesson={lesson}
+            tts={tts}
+            autoRead={autoRead}
+            toggleAutoRead={toggleAutoRead}
+            startContinuous={startContinuous}
+            isContinuous={isContinuous}
+            continuousAvailable={continuousAvailable}
+          />
+        </div>
+
+        {/* #1009 — timed-mode per-question countdown + time-up notice. */}
+        <LessonTimedStatus
+          lessonMode={lessonMode}
+          isSummary={isSummary}
+          isExerciseStep={isExerciseStep}
+          remainingSeconds={timed.remainingSeconds}
+          limitSeconds={timed.limitSeconds}
+          bonusSeconds={timed.bonusSeconds}
+          timedOut={timed.timedOut}
+        />
+
+        <LessonModeProvider mode={lessonMode}>
+        {isSummary ? (
+          <>
+          <LessonSummaryScreen
+            lesson={played}
+            originalLesson={lesson}
+            progress={progress}
+            lessonMode={lessonMode}
+            timedStats={lessonMode === "timed" ? timed.stats : null}
+            nextLessonFilename={nextLessonFilename}
+            userId={learnerUserId ?? ""}
+            setId={setId}
+            setTitle={setTitle ?? ""}
+            source={source}
+            setSlug={params.setSlug ?? ""}
+            lessonFilename={filename}
+            setDomain={setDomain}
+            setBook={setBook}
+            setEvaluation={setEvaluation}
+            comboBonusXp={comboBonusXp}
+            fullHeartsRun={tension.fullHeartsRun}
+            markCompleted={markCompleted}
+            markRestarted={markRestarted}
+            goToStep={goToStep}
+          />
+          </>
+        ) : (
+          <>
+          {/* #3742 - exam mode says up front: no feedback until the end,
+              no way back. Self-gating (exam mode, no answer yet). */}
+          <LessonExamNotice
+            lessonMode={lessonMode}
+            progress={progress}
+            steps={played.steps}
+            currentStepIndex={currentStepIndex}
+          />
+          {/* #1013 — reverse mode can't gradeably reverse non-matching
+              exercise types, so they play in their original format with this
+              note (the issue's documented fallback). */}
+          <LessonReverseNote
+            reverseMode={modeConfig.cardDirection === "reverse"}
+            isExerciseStep={isExerciseStep}
+            step={step}
+          />
+          <LessonStepView
+            step={step!}
+            lesson={played}
+            setId={setId}
+            lessonFilename={filename}
+            source={source}
+            tts={tts}
+            precedingTheoryIndex={precedingTheoryIndex}
+            theoryReturnIndex={theoryReturnIndex}
+            openTheoryFromExercise={openTheoryFromExercise}
+            returnToExercise={returnToExercise}
+            goToStepById={goToStepById}
+            enteredReviewed={enteredReviewed}
+            reviewedRaw={reviewedRaw}
+            progress={progress}
+            exerciseRef={exerciseRef}
+            learnerUserId={learnerUserId}
+            onInteraction={setAnswerable}
+            onChecked={() => setChecked(true)}
+            recordStepResult={recordStepResult}
+            // #1218 — a fully-correct answer offers an in-context
+            // "Continue" (the success-merge) that calls the SAME forward
+            // navigation as the two-phase footer; the label matches the
+            // footer's Next / Finish wording.
+            onAdvance={goNext}
+            advanceLabel={
+              isLastStep
+                ? t("lesson.action.finish", "Finish lesson")
+                : t("lesson.button.next", "Continue")
+            }
+          />
+          {/* #2768 — mentor-mode Phase 2: per-step authoring note for OWN
+              lessons (self-gating, null for non-own sets). Keyed by the
+              step so a step change resets the disclosure + draft. */}
+          <LessonMentorNote
+            key={`mentor-${step!.id}`}
+            source={source}
+            setId={setId}
+            filename={filename}
+            stepId={step!.id}
+          />
+          </>
+        )}
+        </LessonModeProvider>
+
+        <LessonFooterNav
+          isSummary={isSummary}
+          isExerciseStep={isExerciseStep}
+          checked={checked}
+          enteredReviewed={enteredReviewed}
+          answerable={answerable}
+          isLastStep={isLastStep}
+          currentStepIndex={currentStepIndex}
+          // #1007 Phase 2 — exam hides per-question feedback: one button that
+          // submits + advances, forward-only. The synchronous submit() grades
+          // + records, then goNext unmounts the step in the same React batch,
+          // so the renderer's correct/wrong line never paints (revealed only
+          // on the end-of-exam summary).
+          delayedFeedback={!modeConfig.immediateFeedback}
+          isInProgress={isInProgress}
+          onPause={() => setExitOpen(true)}
+          onExit={() => navigate(exitRouteForLesson(setId))}
+          goPrev={goPrev}
+          goNext={goNext}
+          onCheck={() => exerciseRef.current?.submit()}
+          onSubmitAndAdvance={() => {
+            exerciseRef.current?.submit();
+            goNext();
+          }}
+        />
+
+        {/* Floating read-aloud mini-player (C8) — visible while the
+                  engine is active; step-based skip through the theory
+                  block + play/pause + end (#3760). */}
+        <LessonTtsMiniPlayerSlot
+          tts={tts}
+          theoryBlock={theoryBlock}
+          currentStepIndex={currentStepIndex}
+          onReadStepAt={readTheoryStepAt}
+          onEnd={endReadAloud}
+        />
+      </FooterStatusProvider>
+    </main>
+    </TestModeProvider>
+  );
+}

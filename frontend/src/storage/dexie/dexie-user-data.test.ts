@@ -1,0 +1,195 @@
+/**
+ * #791 Teil B — device-local user-data Dexie canonical store + localStorage
+ * cache reconciliation. Exercises the write-through mirror, the boot reconcile
+ * (Dexie wins / localStorage seeds Dexie), the API-mode no-op, and the
+ * end-to-end integration with the synchronous lib writers
+ * (``contribution-history`` + ``custom-paths``).
+ */
+
+import "fake-indexeddb/auto";
+
+import {afterEach, beforeEach, describe, expect, it} from "vitest";
+
+import {_resetDbForTests, getDb} from "./db";
+import {
+    MANAGED_USER_DATA_KEYS,
+    mirrorUserData,
+    syncLanguageAtBoot,
+    syncUserDataAtBoot,
+} from "./dexie-user-data";
+import {listContributions, recordContribution} from "../../lib/content/placement/contribution-history";
+import {createCustomPath, listCustomPaths} from "../../lib/learning-path/custom-paths";
+import {restoreLocalStorageSnapshot} from "../../lib/backup/localStorageSnapshot";
+
+const CONTRIB_KEY = "adaptive-learner.contributions";
+const MODE_KEY = "adaptive-learner.storage_mode";
+
+async function freshDb() {
+    await _resetDbForTests();
+    const {IDBFactory} = await import("fake-indexeddb");
+    (globalThis as unknown as {indexedDB: IDBFactory}).indexedDB = new IDBFactory();
+}
+
+beforeEach(async () => {
+    localStorage.clear();
+    localStorage.setItem(MODE_KEY, "dexie");
+    await freshDb();
+});
+
+afterEach(async () => {
+    localStorage.clear();
+    await _resetDbForTests();
+});
+
+describe("mirrorUserData (#791)", () => {
+    it("writes a value into the Dexie userData store in Dexie mode", async () => {
+        await mirrorUserData(CONTRIB_KEY, '[{"x":1}]');
+        const row = await getDb().userData.get(CONTRIB_KEY);
+        expect(row?.value).toBe('[{"x":1}]');
+    });
+
+    it("deletes the row when value is null", async () => {
+        await mirrorUserData(CONTRIB_KEY, "seed");
+        await mirrorUserData(CONTRIB_KEY, null);
+        expect(await getDb().userData.get(CONTRIB_KEY)).toBeUndefined();
+    });
+
+    it("is a no-op in API mode", async () => {
+        await getDb().userData.clear();
+        localStorage.setItem(MODE_KEY, "api");
+        await mirrorUserData(CONTRIB_KEY, "ignored");
+        expect(await getDb().userData.get(CONTRIB_KEY)).toBeUndefined();
+    });
+});
+
+describe("syncUserDataAtBoot (#791)", () => {
+    it("seeds Dexie from localStorage when Dexie is empty", async () => {
+        localStorage.setItem(CONTRIB_KEY, '["from-local"]');
+        await syncUserDataAtBoot([CONTRIB_KEY]);
+        expect((await getDb().userData.get(CONTRIB_KEY))?.value).toBe('["from-local"]');
+    });
+
+    it("lets Dexie win and hydrates the localStorage cache", async () => {
+        localStorage.setItem(CONTRIB_KEY, '["stale-local"]');
+        await getDb().userData.put({key: CONTRIB_KEY, value: '["canonical-dexie"]'});
+        await syncUserDataAtBoot([CONTRIB_KEY]);
+        expect(localStorage.getItem(CONTRIB_KEY)).toBe('["canonical-dexie"]');
+    });
+
+    it("does nothing in API mode", async () => {
+        await getDb().userData.clear();
+        localStorage.setItem(MODE_KEY, "api");
+        localStorage.setItem(CONTRIB_KEY, '["x"]');
+        await syncUserDataAtBoot([CONTRIB_KEY]);
+        expect(await getDb().userData.get(CONTRIB_KEY)).toBeUndefined();
+    });
+
+    it("covers the contributions, contributor-name, custom-paths, dismissed-sets, set-status, lesson-order, mentor-notes, speech-recording-evicted, avatar-frames, mascot-variants, photo-stash, arcade-unlocks, arcade-tickets, continue-dismissed and ai-fix-undo keys", () => {
+        expect(MANAGED_USER_DATA_KEYS).toEqual([
+            "adaptive-learner.contributions",
+            "adaptive-learner.contributor-name",
+            "adaptive-learner.custom-paths",
+            "adaptive-learner.dismissed-sets",
+            "adaptive-learner.set-status",
+            "adaptive-learner.lesson-order",
+            // #2768 — per-step mentor notes (lib/lesson/mentor-notes-store).
+            "adaptive-learner.mentor-notes",
+            // #2841 — evicted speech-recording ids (lib/voice/speech-recording-evicted-store).
+            "adaptive-learner.speech-recording-evicted",
+            // #2850 — avatar frames (lib/avatar/avatar-frame-store).
+            "adaptive-learner.avatar.frames",
+            // #2861 — mascot variants (lib/mascot/mascot-variant-store).
+            "adaptive-learner.mascot.variants",
+            // #2862 — displaced avatar photo (lib/avatar/avatar-photo-stash).
+            "adaptive-learner.avatar.photo-stash",
+            // #2887 — arcade unlocks (lib/arcade/arcade-unlock-store).
+            "adaptive-learner.arcade.unlocks",
+            // #2889 — arcade tickets (lib/arcade/ticket-store).
+            "adaptive-learner.arcade.tickets",
+            // #3023 — dismissed "Weitermachen" rows
+            // (lib/content/browse/prefs/continue-dismissed-store).
+            "adaptive-learner.continue-dismissed",
+            // #3060 — last apply of AI-check suggestions per own set
+            // (lib/content/validation/ai-fix-undo-store).
+            "adaptive-learner.ai-fix-undo",
+        ]);
+    });
+});
+
+describe("syncLanguageAtBoot (#791)", () => {
+    const USER_KEY = "adaptive-learner.user_id";
+    const LANG_KEY = "adaptive-learner.language";
+
+    it("hydrates the localStorage language cache from Dexie user_settings", async () => {
+        localStorage.setItem(USER_KEY, "u1");
+        localStorage.setItem(LANG_KEY, "en");
+        await getDb().userSettings.put({
+            id: "s1",
+            user_id: "u1",
+            language: "ko",
+        } as never);
+        await syncLanguageAtBoot();
+        expect(localStorage.getItem(LANG_KEY)).toBe("ko");
+    });
+
+    it("no-ops when no user is resolved", async () => {
+        localStorage.setItem(LANG_KEY, "en");
+        await syncLanguageAtBoot();
+        expect(localStorage.getItem(LANG_KEY)).toBe("en");
+    });
+});
+
+describe("lib writers mirror through to Dexie (#791)", () => {
+    it("recordContribution lands in the Dexie canonical store", async () => {
+        recordContribution({
+            lesson_id: "l1",
+            title: "Greetings",
+            shared_at: "2026-06-20T10:00:00Z",
+            github_url: "https://github.com/x/y/pull/1",
+            status: "submitted",
+        });
+        // Mirror is fire-and-forget; let the microtask settle.
+        await Promise.resolve();
+        const row = await getDb().userData.get(CONTRIB_KEY);
+        expect(row).toBeDefined();
+        expect(JSON.parse(row!.value)).toHaveLength(1);
+        // localStorage read path is unchanged.
+        expect(listContributions()).toHaveLength(1);
+    });
+
+    it("createCustomPath mirrors the custom-paths blob", async () => {
+        createCustomPath("My path");
+        await Promise.resolve();
+        const row = await getDb().userData.get("adaptive-learner.custom-paths");
+        expect(row).toBeDefined();
+        expect(JSON.parse(row!.value)).toHaveLength(1);
+        expect(listCustomPaths()).toHaveLength(1);
+    });
+});
+
+describe("a restored localStorage snapshot survives the next boot (#3369)", () => {
+    const SET_STATUS_KEY = "adaptive-learner.set-status";
+
+    it.each(["dexie", "api"])("keeps the backup's value after the boot reconcile (%s mode)", async (mode) => {
+        localStorage.setItem(MODE_KEY, mode);
+        // The device already holds an older value, in Dexie (browser mode)
+        // and in the localStorage cache.
+        localStorage.setItem(SET_STATUS_KEY, '{"es-a1":"active"}');
+        await mirrorUserData(SET_STATUS_KEY, '{"es-a1":"active"}');
+
+        await restoreLocalStorageSnapshot({[SET_STATUS_KEY]: '{"es-a1":"completed"}'});
+        // Next app start.
+        await syncUserDataAtBoot([SET_STATUS_KEY]);
+
+        expect(localStorage.getItem(SET_STATUS_KEY)).toBe('{"es-a1":"completed"}');
+        if (mode === "dexie") {
+            expect((await getDb().userData.get(SET_STATUS_KEY))?.value).toBe('{"es-a1":"completed"}');
+        }
+    });
+
+    it("leaves an unmanaged key to localStorage alone", async () => {
+        await restoreLocalStorageSnapshot({"adaptive-learner.theme": "dark"});
+        expect(localStorage.getItem("adaptive-learner.theme")).toBe("dark");
+        expect(await getDb().userData.get("adaptive-learner.theme")).toBeUndefined();
+    });
+});

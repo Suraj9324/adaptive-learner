@@ -1,0 +1,224 @@
+/**
+ * SummaryExplanations pins (#2547).
+ *
+ * "Why you missed these" must show elements whose LAST attempt was
+ * actually wrong, not merely "not yet SRS-mastered" (3 consecutive
+ * correct answers, element-errors-dexie.ts MASTERY_THRESHOLD). Those
+ * are different conditions: a freshly correct-but-not-yet-mastered
+ * element has correct_streak >= 1, while an element whose most recent
+ * attempt was wrong always has correct_streak === 0 (every correct
+ * attempt increments the streak, every wrong one resets it to 0 -
+ * applyScoreOutcome in element-errors-dexie.ts).
+ */
+
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+
+import { SummaryExplanations } from "./LessonSummarySections";
+import type { ContentLesson, ElementError } from "../../../storage/types";
+
+const t = (_key: string, fallback?: string) => fallback ?? _key;
+
+/** A lesson whose one free_text exercise matches the ``ex-1`` fixture rows,
+ *  so the question line (#2757) can resolve its prompt. */
+function makeLesson(prompt: string): ContentLesson {
+    return {
+        id: "lesson-1",
+        title: "Lesson 1",
+        description: null,
+        estimated_minutes: 10,
+        cards: [],
+        steps: [
+            {
+                id: "step-ex-1",
+                type: "exercise",
+                title: null,
+                exercise: {
+                    id: "ex-1",
+                    type: "free_text",
+                    prompt,
+                    accept: ["días"],
+                    card_ids: [],
+                    distractors: [],
+                },
+            },
+        ],
+    };
+}
+
+function makeError(overrides: Partial<ElementError>): ElementError {
+    return {
+        id: "e1",
+        user_id: "u1",
+        set_id: "es-a1",
+        lesson_id: "lesson-1",
+        exercise_id: "ex-1",
+        element_key: "gracias",
+        element_type: "vocabulary",
+        user_answer: "gracias",
+        correct_answer: "Gracias",
+        error_count: 0,
+        correct_streak: 1,
+        last_error_at: null,
+        last_attempt_at: "2026-08-10T00:00:00Z",
+        mastered: false,
+        mastered_at: null,
+        created_at: "2026-08-10T00:00:00Z",
+        updated_at: "2026-08-10T00:00:00Z",
+        ...overrides,
+    };
+}
+
+describe("SummaryExplanations", () => {
+    it("does NOT show an element whose last attempt was correct, even though it isn't mastered yet", () => {
+        // A case-insensitive-correct answer: correct_streak advanced to 1,
+        // mastered stays false until the streak reaches 3.
+        const errors = [
+            makeError({
+                element_key: "gracias",
+                user_answer: "gracias",
+                correct_answer: "Gracias",
+                correct_streak: 1,
+                mastered: false,
+            }),
+        ];
+        render(<SummaryExplanations sessionErrors={errors} t={t} />);
+        expect(
+            screen.queryByTestId("lesson-summary-explanations"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("shows an element whose last attempt was actually wrong", () => {
+        const errors = [
+            makeError({
+                element_key: "dias",
+                user_answer: "Dias",
+                correct_answer: "días",
+                correct_streak: 0,
+                error_count: 1,
+                mastered: false,
+            }),
+        ];
+        render(<SummaryExplanations sessionErrors={errors} t={t} />);
+        expect(
+            screen.getByTestId("lesson-summary-explanations"),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByTestId(`lesson-summary-explain-${errors[0].id}`),
+        ).toBeInTheDocument();
+    });
+
+    it("resets the list itself, the app loads no preflight (#3341)", () => {
+        // Without a reset the browser's 40px indent and 1em margins stay:
+        // the <li> are flex, so no disc shows, but the cards sit indented
+        // next to the section heading.
+        const errors = [
+            makeError({ user_answer: "Dias", correct_answer: "días", correct_streak: 0 }),
+        ];
+        render(<SummaryExplanations sessionErrors={errors} t={t} />);
+        const list = screen.getByTestId("lesson-summary-explanations").querySelector("ul")!;
+        expect(list.className.split(" ")).toEqual(
+            expect.arrayContaining(["m-0", "list-none", "p-0"]),
+        );
+    });
+
+    it("excludes an already-correct element from a mixed list, keeping the genuinely wrong one", () => {
+        const errors = [
+            makeError({
+                id: "e-correct",
+                element_key: "buenos",
+                user_answer: "Buenos",
+                correct_answer: "Buenos",
+                correct_streak: 2,
+                mastered: false,
+            }),
+            makeError({
+                id: "e-wrong",
+                element_key: "hola",
+                user_answer: "hola",
+                correct_answer: "Hola",
+                correct_streak: 0,
+                error_count: 1,
+                mastered: false,
+            }),
+        ];
+        render(<SummaryExplanations sessionErrors={errors} t={t} />);
+        expect(screen.getByTestId("lesson-summary-explain-e-wrong")).toBeInTheDocument();
+        expect(
+            screen.queryByTestId("lesson-summary-explain-e-correct"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("shows the question above the answer diff when the lesson resolves it (#2757)", () => {
+        const errors = [
+            makeError({
+                element_key: "días",
+                user_answer: "Dias",
+                correct_answer: "días",
+                correct_streak: 0,
+                error_count: 1,
+            }),
+        ];
+        render(
+            <SummaryExplanations
+                sessionErrors={errors}
+                lesson={makeLesson("Translate: days")}
+                t={t}
+            />,
+        );
+        const question = screen.getByTestId(
+            `lesson-summary-explain-question-${errors[0].id}`,
+        );
+        expect(question).toHaveTextContent("Question:");
+        expect(question).toHaveTextContent("Translate: days");
+    });
+
+    it("keeps the answer-only rendering when no lesson is passed", () => {
+        const errors = [
+            makeError({
+                element_key: "días",
+                user_answer: "Dias",
+                correct_answer: "días",
+                correct_streak: 0,
+                error_count: 1,
+            }),
+        ];
+        render(<SummaryExplanations sessionErrors={errors} t={t} />);
+        expect(
+            screen.getByTestId(`lesson-summary-explain-${errors[0].id}`),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByTestId(
+                `lesson-summary-explain-question-${errors[0].id}`,
+            ),
+        ).not.toBeInTheDocument();
+    });
+
+    it("keeps the answer-only rendering when the error's exercise is not in the lesson", () => {
+        const errors = [
+            makeError({
+                exercise_id: "ex-gone",
+                element_key: "días",
+                user_answer: "Dias",
+                correct_answer: "días",
+                correct_streak: 0,
+                error_count: 1,
+            }),
+        ];
+        render(
+            <SummaryExplanations
+                sessionErrors={errors}
+                lesson={makeLesson("Translate: days")}
+                t={t}
+            />,
+        );
+        expect(
+            screen.getByTestId(`lesson-summary-explain-${errors[0].id}`),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByTestId(
+                `lesson-summary-explain-question-${errors[0].id}`,
+            ),
+        ).not.toBeInTheDocument();
+    });
+});

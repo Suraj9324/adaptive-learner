@@ -1,0 +1,286 @@
+/**
+ * "My Lessons" section on /content — the user-generated sets, separate
+ * from downloaded content (extracted from Content.tsx, #401).
+ *
+ * Each row carries up to six actions (Play / Edit / Export / Export as
+ * set / Share / Delete); all are delivered as callbacks from the page.
+ *
+ * #3007 — the section head also carries the create entry EXP-021 planned for
+ * it and that was never built. Whoever looks at their own lessons and misses
+ * one is in the moment of intent; the other entry points all require leaving
+ * this area first. Props-driven like every other action here: the host owns
+ * the navigation.
+ */
+
+import { Layers, Pencil, Plus, Sparkles } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { useI18n } from "../../../hooks/ui/useI18n";
+import type {
+  BulkLessonDeleteTarget,
+  LessonDeleteTarget,
+} from "../../../hooks/content/useContentSetActions";
+import { forkCreditLine } from "../../../lib/content/lesson/fork/fork-provenance";
+import type { ContentSetEntry } from "../../../storage/types";
+import IconBadge from "../../../shared/layout/IconBadge";
+import GenerateSetExercisesButton from "../quality/GenerateSetExercisesButton";
+import SetLessonList from "./SetLessonList";
+import UserSetActions from "./UserSetActions";
+
+interface MyLessonsSectionProps {
+  userSets: ContentSetEntry[];
+  communitySharingEnabled: boolean;
+  onOpen: (entry: ContentSetEntry) => void;
+  onEdit: (entry: ContentSetEntry) => void;
+  onExportJson: (entry: ContentSetEntry) => void;
+  onExportSet: (entry: ContentSetEntry) => void;
+  onShare: (entry: ContentSetEntry) => void;
+  onDelete: (entry: ContentSetEntry) => void;
+  // #2064 — per-lesson list actions for a multi-lesson user set.
+  onPlayLessonFile: (entry: ContentSetEntry, filename: string) => void;
+  // #2210 — edit one specific lesson of a multi-lesson set (by filename).
+  onEditLessonFile: (entry: ContentSetEntry, filename: string) => void;
+  onRequestDeleteLesson: (target: LessonDeleteTarget) => void;
+  // #2065 — bulk multi-select lesson delete within a set.
+  onRequestBulkDeleteLesson: (target: BulkLessonDeleteTarget) => void;
+  /** #3007 — open the lesson creator; the host owns the navigation. */
+  onCreateLesson: () => void;
+  /** AIV-07 (#3060) - the set-wide AI check for an own set; the button
+   *  renders only when given. */
+  onAiCheck?: (entry: ContentSetEntry) => void;
+  /** Why the AI check is unavailable (Dexie-only, key required); renders
+   *  the button disabled with the reason as its tooltip (#335). */
+  aiCheckDisabledReason?: string;
+  // #1741 — combine-into-a-set selection mode.
+  selectMode: boolean;
+  selectedCount: number;
+  isSelected: (entry: ContentSetEntry) => boolean;
+  onToggleSelectMode: () => void;
+  onToggleSelect: (entry: ContentSetEntry) => void;
+  onOpenCombine: () => void;
+}
+
+export default function MyLessonsSection({
+  userSets,
+  communitySharingEnabled,
+  onOpen,
+  onEdit,
+  onExportJson,
+  onExportSet,
+  onShare,
+  onDelete,
+  onPlayLessonFile,
+  onEditLessonFile,
+  onRequestDeleteLesson,
+  onRequestBulkDeleteLesson,
+  onCreateLesson,
+  onAiCheck,
+  aiCheckDisabledReason,
+  selectMode,
+  selectedCount,
+  isSelected,
+  onToggleSelectMode,
+  onToggleSelect,
+  onOpenCombine,
+}: MyLessonsSectionProps) {
+  const { t } = useI18n();
+
+  const setKey = (entry: ContentSetEntry): string => `${entry.source}#${entry.id}`;
+  const originLabel = (entry: ContentSetEntry): string => {
+    if (entry.domain === "adaptive")
+      return t("content.my_lessons.from_adaptive", "from adaptive lesson");
+    if (entry.domain === "imported") return t("content.my_lessons.from_imported", "imported");
+    return t("content.my_lessons.from_analysis", "from analysis");
+  };
+
+  return (
+    <section
+      className="content-section content-my-lessons flex flex-col gap-3"
+      data-testid="content-my-lessons"
+    >
+      <div className="content-section-head flex flex-wrap items-center justify-between gap-2">
+        <h2>{t("content.my_lessons.title", "My Lessons")}</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {userSets.length > 0 && (
+            <Button
+              type="button"
+              variant={selectMode ? "secondary" : "outline"}
+              size="sm"
+              onClick={onToggleSelectMode}
+              data-testid="my-lessons-combine-toggle"
+            >
+              <Layers size={14} aria-hidden="true" />
+              {selectMode
+                ? t("content.combine.cancel_select", "Cancel selection")
+                : t("content.combine.start", "Combine into a set")}
+            </Button>
+          )}
+          {/* #3007 — reuses the existing, fully translated button wording;
+              no new i18n key for a second name of the same action. */}
+          <Button
+            type="button"
+            size="sm"
+            className="min-h-[44px] gap-2"
+            onClick={onCreateLesson}
+            title={t("content.create_lesson.button", "Create New Lesson")}
+            aria-label={t("content.create_lesson.button", "Create New Lesson")}
+            data-testid="my-lessons-create"
+          >
+            <Plus size={14} aria-hidden="true" />
+            {t("content.create_lesson.button", "Create New Lesson")}
+          </Button>
+        </div>
+      </div>
+      {selectMode && userSets.length > 0 && (
+        <div
+          className="mb-2 flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-2"
+          data-testid="my-lessons-combine-bar"
+        >
+          <span className="text-sm" aria-live="polite">
+            {t("content.combine.selected_count", "{n} selected").replace(
+              "{n}",
+              String(selectedCount),
+            )}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            disabled={selectedCount === 0}
+            onClick={onOpenCombine}
+            data-testid="my-lessons-combine-open"
+          >
+            {t("content.combine.start", "Combine into a set")}
+          </Button>
+        </div>
+      )}
+      {userSets.length === 0 ? (
+        <p className="content-empty" data-testid="content-my-lessons-empty">
+          {t(
+            "content.my_lessons.empty",
+            "Import a chat and analyze it to create your first lesson.",
+          )}
+        </p>
+      ) : (
+        <ul className="content-set-list" data-testid="content-my-lessons-list">
+          {userSets.map((entry) => {
+            // #2655 — a forked set (origin "imported") carries the same
+            // "Eigene Bearbeitung" badge as a folded lesson (EXP-026
+            // UGC-03), plus a compact "basiert auf" credit line when the
+            // fork recorded an attribution to carry forward.
+            const isFork = entry.domain === "imported";
+            const creditLine = forkCreditLine(entry.attribution, t);
+            return (
+              <li
+                key={setKey(entry)}
+                className="content-set-row"
+                data-testid={`my-lesson-${entry.id}`}
+              >
+                {selectMode && (
+                  <label className="mr-2 flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={isSelected(entry)}
+                      onChange={() => onToggleSelect(entry)}
+                      data-testid={`my-lesson-${entry.id}-select`}
+                      aria-label={t(
+                        "content.combine.select_aria",
+                        "Select {title}",
+                      ).replace("{title}", entry.title)}
+                    />
+                  </label>
+                )}
+                <div className="content-set-meta max-w-full">
+                  <h3>
+                    {entry.title}{" "}
+                    {isFork && (
+                      <IconBadge
+                        variant="muted"
+                        icon={<Pencil size={12} aria-hidden="true" />}
+                        label={t("content.tree.own_edit", "Your edit")}
+                        testId={`my-lesson-${entry.id}-badge`}
+                      />
+                    )}
+                  </h3>
+                  <p className="content-set-tags">
+                    <span>
+                      {entry.language.toUpperCase()}
+                      {" · "}
+                      {entry.lesson_count} {t("content.lessons", "lessons")}
+                      {" · "}
+                      {originLabel(entry)}
+                    </span>
+                  </p>
+                  {creditLine && (
+                    // EXP-046 Teil 3.3 — plain, unverified text credit;
+                    // never rendered as a checked/verified claim. The
+                    // tooltip carries the self-declared disclaimer.
+                    <p
+                      className="text-xs text-muted-foreground"
+                      data-testid={`my-lesson-${entry.id}-credit`}
+                      title={t(
+                        "content.fork.credit_disclaimer",
+                        "Credits are self-declared and not verified.",
+                      )}
+                    >
+                      {creditLine}
+                    </p>
+                  )}
+                </div>
+                {/* #226 — the shared action set drops onto its own
+                    full-width line so the up-to-6 buttons wrap below the
+                    meta instead of overflowing the card. */}
+                {/* #2210 — a multi-lesson set has no set-level Edit (it would
+                    guess a lesson); the per-lesson Edit in SetLessonList below
+                    is the entry. A single-lesson set keeps it (unambiguous). */}
+                <UserSetActions
+                  entry={entry}
+                  communitySharingEnabled={communitySharingEnabled}
+                  testIdPrefix={`my-lesson-${entry.id}`}
+                  onPlay={onOpen}
+                  onEdit={onEdit}
+                  onExportJson={onExportJson}
+                  onExportSet={onExportSet}
+                  onShare={onShare}
+                  onDelete={onDelete}
+                  showEdit={entry.lesson_count <= 1}
+                />
+                {/* AIX-06 (#833) — batch-generate exercises for every
+                    theory-only lesson in this set; AIV-07 (#3060) — the
+                    set-wide AI check, whose report can write its
+                    suggestions back into an own set. */}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <GenerateSetExercisesButton entry={entry} t={t} />
+                  {onAiCheck && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onAiCheck(entry)}
+                      disabled={!!aiCheckDisabledReason}
+                      title={aiCheckDisabledReason || undefined}
+                      data-testid={`my-lesson-${entry.id}-ai-check`}
+                    >
+                      <Sparkles size={14} aria-hidden="true" />
+                      {t("content.ai_check.button", "Check with AI")}
+                    </Button>
+                  )}
+                </div>
+                {/* #2064 — a multi-lesson set (e.g. a book import) can drop
+                    individual lessons from the lesson list. */}
+                {entry.lesson_count > 1 && (
+                  <SetLessonList
+                    entry={entry}
+                    onPlayLesson={onPlayLessonFile}
+                    onEditLesson={onEditLessonFile}
+                    onRequestDelete={onRequestDeleteLesson}
+                    onRequestBulkDelete={onRequestBulkDeleteLesson}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}

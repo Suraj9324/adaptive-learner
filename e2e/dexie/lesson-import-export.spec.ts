@@ -1,0 +1,212 @@
+/**
+ * Lesson file import/export — device verification (#1672).
+ *
+ * Dexie build, NO backend, no AI key. Exercises the destructive-potential
+ * and multi-step interactions that unit/modal tests cover but that warrant
+ * a real-browser pass:
+ *
+ *   1. Round-trip: build a lesson in the creator, "Save as file"
+ *      (captured download), then re-import that exact file → it lands in
+ *      "My Lessons". Proves export → import works end-to-end on device.
+ *   2. Name collision: re-importing the same file surfaces the
+ *      overwrite / import-as-copy / cancel dialog (overwrite is
+ *      irreversible), and BOTH the copy and the overwrite branches work.
+ *   3. Partial set import: a ZIP fixture with one valid + one invalid
+ *      lesson imports the valid one and shows the skipped report.
+ *
+ * STABLE SELECTORS ONLY: ``data-testid`` anchors.
+ */
+
+import {join} from "node:path";
+
+import {expect, test, type Page} from "@playwright/test";
+
+import {declineDraftPrompt} from "../helpers";
+
+const MIXED_ZIP = join(__dirname, "..", "fixtures", "mixed-set.zip");
+
+// Count ONLY the My-Lessons row roots. A ``[data-testid^="my-lesson-"]``
+// prefix selector also matches each row's nested action buttons
+// (``my-lesson-{id}-play`` / ``-edit`` / ``-delete`` / ...), so its count
+// drifts with how many buttons have rendered — the source of the
+// intermittent ``toHaveCount`` flake. The rows are the direct ``<li>``
+// children of the list, which is stable regardless of button rendering.
+const MY_LESSON_ROWS = '[data-testid="content-my-lessons-list"] > li';
+
+const CARDS = [
+    {front: "Bonjour", back: "Guten Tag"},
+    {front: "Merci", back: "Danke"},
+    {front: "Oui", back: "Ja"},
+    {front: "Non", back: "Nein"},
+];
+
+/** Build + save a lesson through the 4-step creator; return on the
+ *  post-save screen. */
+async function buildAndSaveLesson(page: Page, title: string): Promise<void> {
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 15000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill(title);
+    await page.getByTestId("create-lesson-next").click();
+    for (const card of CARDS) {
+        await page.getByTestId("card-front-input").fill(card.front);
+        await page.getByTestId("card-back-input").fill(card.back);
+        await page.getByTestId("card-add-button").click();
+    }
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-step-3")).toBeVisible();
+    await page.getByTestId("exercise-count-slider").fill("8");
+    await page.getByTestId("exercise-generate").click();
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-step-4")).toBeVisible({
+        timeout: 10000,
+    });
+    await page.getByTestId("create-lesson-save-local").click();
+    await expect(page.getByTestId("create-lesson-saved")).toBeVisible({
+        timeout: 15000,
+    });
+}
+
+/** Open the import modal (via the toolbar button on the currently-loaded
+ *  Content Import tab) and upload a file. Does NOT navigate — the caller
+ *  is already on the tab, so the in-memory set list (used for collision
+ *  detection) stays warm, exactly as for a real user who just imported. */
+async function openModalAndUpload(page: Page, filePath: string): Promise<void> {
+    await page.getByTestId("content-import-lesson").click();
+    await expect(page.getByTestId("import-lesson-modal")).toBeVisible();
+    await page.getByTestId("import-lesson-file").setInputFiles(filePath);
+    await expect(page.getByTestId("import-lesson-preview")).toBeVisible({
+        timeout: 10000,
+    });
+}
+
+/** Land on the Content Import tab and wait until the panel has loaded its
+ *  set list (so collision detection reads a warm list). */
+async function gotoImportTab(page: Page): Promise<void> {
+    await page.goto("/content?tab=import");
+    await expect(page.getByTestId("import-actions-panel")).toBeVisible({
+        timeout: 15000,
+    });
+}
+
+test.describe("Lesson file import/export (#1672)", () => {
+    test("round-trip: save-as-file then re-import, with the collision dialog", async ({
+        page,
+    }, testInfo) => {
+        const errors: string[] = [];
+        page.on("pageerror", (e) => errors.push(e.message));
+
+        // 1. Build + save, then export the lesson as a file (real download).
+        await buildAndSaveLesson(page, "E2E Roundtrip");
+        const [download] = await Promise.all([
+            page.waitForEvent("download"),
+            page.getByTestId("create-lesson-save-file").click(),
+        ]);
+        expect(download.suggestedFilename()).toMatch(/\.json$/);
+        const savedPath = join(
+            testInfo.outputDir,
+            download.suggestedFilename(),
+        );
+        await download.saveAs(savedPath);
+
+        // 2. First import — no collision, lands in My Lessons.
+        await gotoImportTab(page);
+
+        // #1878 — assert each stage's EXACT settled count instead of sampling
+        // the list dynamically. The My-Lessons list is loaded asynchronously
+        // and re-loaded after every import, so its row count trails the Dexie
+        // state by a beat; the original spec captured baselines mid-render
+        // (``.first()`` visible + ``count()``; ``poll().toBeGreaterThan``) and
+        // compared a later count against them, so a row that rendered between
+        // the ``afterCopy`` sample and the final assertion inflated the count
+        // — the intermittent "Expected 2, Received 3". This is NOT leftover
+        // state from an earlier spec: Playwright wipes IndexedDB per context
+        // (storageState restore), so the only rows here are this test's own
+        // three (``created-…`` save-local + ``imported-…`` + its ``…-copy``).
+        // Each ``toHaveCount`` below therefore doubles as a settle barrier:
+        // it waits for the list to reflect Dexie before the next step, which
+        // also keeps the re-import's collision check (it reads the rendered
+        // set list) deterministic. Counts are absolute because a fresh
+        // context starts with zero user sets.
+        //
+        // The created lesson was saved locally under a ``created-{slug}`` set
+        // id — distinct from the ``imported-{slug}`` id the import derives
+        // from the title, so this first import does not collide.
+        await expect(page.locator(MY_LESSON_ROWS)).toHaveCount(1, {
+            timeout: 15000,
+        });
+
+        await openModalAndUpload(page, savedPath);
+        await expect(page.getByTestId("import-lesson-collision")).toHaveCount(0);
+        await page.getByTestId("import-lesson-confirm").click();
+        await expect(page.getByTestId("import-lesson-modal")).toHaveCount(0, {
+            timeout: 15000,
+        });
+        // The created row (1) plus the freshly imported one (2).
+        await expect(page.locator(MY_LESSON_ROWS)).toHaveCount(2, {
+            timeout: 15000,
+        });
+
+        // 3. Re-import the SAME file (same page, warm set list) → collision
+        //    dialog with three choices.
+        await openModalAndUpload(page, savedPath);
+        await page.getByTestId("import-lesson-confirm").click();
+        await expect(page.getByTestId("import-lesson-collision")).toBeVisible({
+            timeout: 10000,
+        });
+        await expect(page.getByTestId("import-lesson-overwrite")).toBeVisible();
+        await expect(page.getByTestId("import-lesson-copy")).toBeVisible();
+        await expect(page.getByTestId("import-lesson-cancel")).toBeVisible();
+
+        // 3a. "Import as copy" → a NEW My-Lessons entry (distinct ``…-copy``
+        //     set id), so the list settles at three.
+        await page.getByTestId("import-lesson-copy").click();
+        await expect(page.getByTestId("import-lesson-modal")).toHaveCount(0, {
+            timeout: 15000,
+        });
+        await expect(page.locator(MY_LESSON_ROWS)).toHaveCount(3, {
+            timeout: 15000,
+        });
+
+        // 3b. Re-import again → collision → "Overwrite" (irreversible) →
+        //     upserts the same ``imported-{slug}`` set id, so it does NOT add
+        //     another entry: the list STAYS at three.
+        await openModalAndUpload(page, savedPath);
+        await page.getByTestId("import-lesson-confirm").click();
+        await expect(page.getByTestId("import-lesson-collision")).toBeVisible({
+            timeout: 10000,
+        });
+        await page.getByTestId("import-lesson-overwrite").click();
+        await expect(page.getByTestId("import-lesson-modal")).toHaveCount(0, {
+            timeout: 15000,
+        });
+        await expect(page.locator(MY_LESSON_ROWS)).toHaveCount(3, {
+            timeout: 15000,
+        });
+
+        expect(errors, `page errors: ${errors.join("; ")}`).toEqual([]);
+    });
+
+    test("partial set import: valid lessons import, invalid ones are reported", async ({
+        page,
+    }) => {
+        const errors: string[] = [];
+        page.on("pageerror", (e) => errors.push(e.message));
+
+        await gotoImportTab(page);
+        await openModalAndUpload(page, MIXED_ZIP);
+        // The valid lesson previews; the skipped-report announces the invalid one.
+        await expect(page.getByTestId("import-lesson-skipped")).toBeVisible();
+        await page.getByTestId("import-lesson-confirm").click();
+        await expect(page.getByTestId("import-lesson-modal")).toHaveCount(0, {
+            timeout: 15000,
+        });
+        await expect(
+            page.locator(MY_LESSON_ROWS).first(),
+        ).toBeVisible({timeout: 15000});
+
+        expect(errors, `page errors: ${errors.join("; ")}`).toEqual([]);
+    });
+});

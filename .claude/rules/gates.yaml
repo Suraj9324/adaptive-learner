@@ -1,0 +1,111 @@
+# Gate <-> rule coupling manifest (#2075).
+#
+# The #1640 visual-baseline gate kept running for a while with its rule
+# section deleted: enforcement without a documented rule, and nothing
+# detected it. This manifest makes that divergence machine-checkable in
+# BOTH directions (scripts/verify_gate_rule_links.py):
+#
+#   forward  - every gate below must point at a rule section that exists
+#              (file + heading anchor), and the workflow file must exist;
+#   backward - every workflow filename mentioned inside a rule file must
+#              exist (a rule may not cite a retired gate).
+#
+# Only RULE-ENFORCING gates belong here. Pure build/deploy/publish
+# workflows (launcher-*, deploy-*, release-*) enforce no documented rule
+# and are listed under `no_rule` with the reason, so "missing from the
+# manifest" is never ambiguous.
+#
+# Adding a gate: add the entry AND the rule section in the same PR. If a
+# gate is retired, remove both - the checker fails on either half alone.
+
+gates:
+  - workflow: ci.yml
+    enforces: quality-checks.md#gate-and-rule-stay-coupled-2075
+    body_sha: 0884e60bace9aa5d
+    note: hosts the verify-gate-rule-links + verify-lessons-inventory steps
+
+  - workflow: backup-e2e.yml
+    enforces: quality-checks.md#backup-akzeptanztest-acceptance-gate-mandatory
+    body_sha: 3a7e984635fb7660
+    note: runs every e2e/dexie/backup-*.spec.ts on PRs touching backup paths; the generic every-table spec is the round-trip evidence (#3693)
+
+  - workflow: visual-baseline-gate.yml
+    enforces: quality-checks.md#visual-baseline-duty-for-visually-critical-prs-1640
+    body_sha: 6d1ecd4261bdd7c4
+    note: visually critical PRs carry their baseline updates (escape label visual-baselines-unaffected); filter is coarse (pages/components/shared/styles) since #2552, plus the UI catalogs since #3687
+
+  - workflow: testid-reference-gate.yml
+    enforces: lessons/ci-gates.md#pr-ci-vs-nightly-gates-different-test-surfaces-green-pr---red-nightlypush
+    body_sha: 05e8e053efe0e13c
+    note: spec-referenced testids may not be removed without touching the spec (escape label testid-refs-unaffected)
+
+  - workflow: docker-build-smoke.yml
+    enforces: lessons/ci-gates.md#pr-ci-vs-nightly-gates-different-test-surfaces-green-pr---red-nightlypush
+    body_sha: 05e8e053efe0e13c
+    note: builds the prod compose path no other gate builds (the #1771 no-cadence class)
+
+  - workflow: complexity-check.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: baseline ratchet on PRs, full warn-only report on the night shift
+
+  - workflow: dexie-smoke.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: nightly + release; on PRs only when they change what the Dexie build or its specs read (#3748)
+
+  - workflow: coverage.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: a report, not a merge gate - night shift by design
+
+  - workflow: security-scan.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: warn-only, weekly + release branches
+
+  - workflow: webkit-gate.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: real-WebKit layout gate the Chromium gates are blind to
+
+  - workflow: engine-schema-parity.yml
+    enforces: lessons/ci-gates.md#engine-re-pin-without-make-sync-schema-is-invisible-until-the-release-gate
+    body_sha: 3b21b7970742be58
+    note: the mirrored schema must match the pinned engine
+
+  - workflow: content-stats.yml
+    enforces: quality-checks.md#ci-cadence-pr-gates-vs-the-night-shift-575
+    body_sha: 2a821a5172a15885
+    note: driven by the separate content repo, so a PR cannot predict it - night shift
+
+# Workflows that deliberately enforce no documented rule.
+no_rule:
+  ratchet-develop-gate.yml: detection re-run of existing ratchets on push to develop (#2182); enforces no new rule section of its own
+  red-runs-rollup.yml: daily visibility aggregation of red schedule/push runs (#2225); enforces no rule of its own - each red it surfaces is classified against the existing rules
+  cohesion-check.yml: file-size + dead-classname ratchets, tracked by their baselines
+  mutation-frontend.yml: informational report behind ENABLE_NIGHTLY_MUTATION
+  visual-regression.yml: produces baselines; the duty to carry them is visual-baseline-gate.yml
+  visual-baseline-sync.yml: housekeeping that pushes CI-rendered baselines onto the PR branch
+  unused-catalog-keys.yml: night-shift report of catalog keys without a consumer older than 14 days (#3444), filed in one issue; not a merge gate so the #2578 translations-first order stays free
+  status-board.yml: night-shift check that STATUS.md, BOARD.md and status/waits.yaml match the open issues of the ecosystem (#3889), filed in one issue; every merge and comment moves that state, so it is not a merge gate
+  smoke-nightly.yml: night-shift run of the mobile-viewport smoke spec against backend + dev server (#3544), findings filed in one issue; checks function at narrow widths, not layout, and is not a merge gate
+  dead-code.yml: night-shift dead-code report (#2741, vulture+knip list baseline); findings are detector claims, deletion PRs verify individually (#2486)
+  manual-automation.yml: executes the manual test plan, does not gate a rule
+  deploy-gh-pages.yml: deployment
+  deploy-preview.yml: deployment
+  image-size-measure.yml: measurement only (#2151 - reports a size, enforces nothing, writes nothing)
+  publish-image.yml: build/publish (GHCR image, #2142 - enforces no documented rule)
+  launcher-linux.yml: build (smoke; no release publish, #2472)
+  launcher-macos.yml: build (smoke; no release publish, #2472)
+  launcher-windows.yml: build (smoke; no release publish, #2472)
+  release.yml: release driver
+  release-prepare.yml: release driver
+  release-finish.yml: release driver
+  release-gate.yml: release driver
+
+# Workflows that no longer exist but are legitimately cited in historical
+# incident records. Citing them is allowed; they may never reappear under
+# `gates:` without the workflow being restored.
+retired:
+  mutation-import.yml: removed; cited in lessons/core.md as the wired-but-never-run precedent

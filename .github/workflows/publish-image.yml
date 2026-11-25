@@ -1,0 +1,479 @@
+name: Publish image (GHCR)
+
+# Publishes the single-container app image to GHCR (#2142, implements the
+# #2110 Option A decision: users pull a built image instead of building one).
+#
+# Runs ON DEMAND only (workflow_dispatch). The release checklist triggers
+# the sharp run against the tag ref AFTER the tag's own CI is green and
+# BEFORE the draft release is made visible - so no visible version ever
+# points at a missing image, and making a draft visible re-runs nothing
+# (a re-build is not bit-identical: ~48k bytes drift between identical-
+# content builds - the verified artifact must BE the shipped one).
+#
+# workflow_dispatch defaults to a DRY RUN: it builds both architectures and
+# does not push. The sharp run (dry_run=false) REQUIRES the green gate on
+# the commit it builds from.
+#
+# A weekly SCHEDULED dry run on develop (#3159 item 3) exercises the two
+# gates that PR CI never runs and that failed four tag-time publishes in a
+# row (v2.12 to v2.15): the per-architecture size ceiling (#3156) and the
+# page-walker chunk coverage (#3155). On a dry run the verify jobs build
+# their own architecture natively and run every station that does not
+# need a registry (version agreement, size ceiling, page render), so a
+# regression surfaces on develop within a week instead of at the tag.
+#
+# Why every step here exists:
+#   - multi-arch, because macOS users run an arm64 Docker Desktop and an
+#     amd64-only image either refuses or crawls under emulation;
+#   - visibility, because a GHCR package is NOT public on first publish and
+#     a private one fails a user's first pull with a 401 that reads like a
+#     broken release;
+#   - anonymous pull, because a pull that works with the CI credentials
+#     proves nothing about an end user;
+#   - one verification job per architecture on a NATIVE runner, because a
+#     built-but-never-started arm64 image is a promise, not a proof;
+#   - version agreement, because an image that claims a release it is not is
+#     worse than a missing image.
+
+on:
+  # NO release: trigger (v2.8.0 decision, Option 1): created never fires
+  # for drafts, published would re-run the chain on draft-publish and
+  # re-build a NON-bit-identical artifact (~48k bytes drift between
+  # identical-content builds) - verified one thing, shipped another.
+  # The chain runs ON DEMAND via workflow_dispatch; the release
+  # checklist carries the trigger. Foot-gun this documents: creating
+  # a release directly produces NO image and NO assets by itself.
+  #
+  # Since #2187 (Option 2) a sharp re-run is IDEMPOTENT: if the tag is
+  # already published, the run skips build+push and only re-verifies the
+  # existing artifact - and the registry digest must match the one the
+  # first run recorded as the `image-digest.txt` release asset, so a
+  # moved-but-working tag is caught and a missing record fails closed
+  # (except below the DIGEST_RECORD_SINCE cutoff, see env).
+  #
+  # Decided 2026-08-06 (#2187): a `release: published` trigger is
+  # deliberately NOT added on top. The draft release is a completeness
+  # buffer - it caught four missing assets before anything went visible -
+  # and the explicit checklist dispatch is a step that has twice caught
+  # something at exactly this point. An automatism that publishes an
+  # unfinished draft would cost more than a forgotten checklist step.
+  # Weekly dry run on develop (#3159 item 3): nothing is pushed; the verify
+  # jobs build natively and run the size ceiling + page walker per arch.
+  schedule:
+    - cron: "30 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build both architectures without pushing (default: yes)"
+        required: false
+        default: true
+        type: boolean
+      version:
+        description: "Version to tag when NOT a dry run (X.Y.Z, no leading v)"
+        required: false
+        type: string
+
+permissions:
+  # contents: write (NOT read) is real: the sharp run ATTACHES the pushed
+  # digest as the `image-digest.txt` release asset and READS it back on an
+  # idempotent re-verify (#2187). A comment claiming `read` would advertise
+  # the workflow as narrower than it is - the token genuinely can write to
+  # releases here.
+  contents: write
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  REGISTRY: ghcr.io
+  # The first release whose publish run records `image-digest.txt`. On an
+  # idempotent re-verify a MISSING asset fails closed AT OR ABOVE this
+  # version, and is tolerated BELOW it - tags published before the
+  # recording mechanism existed have no asset and nobody could have made
+  # one. This is a deliberate cutoff, not an open-ended "missing is fine":
+  # every currently-published tag (<= 2.10.0) predates it, the next release
+  # (> 2.10.0) is the first that must carry the asset. Bump only if the
+  # recording mechanism is ever re-cut. (#2187)
+  DIGEST_RECORD_SINCE: "2.10.1"
+
+jobs:
+  build-and-push:
+    name: Build multi-arch and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      image: ${{ steps.resolve.outputs.image }}
+      # When the tag was already published, the digest comes from the
+      # registry (idempotent re-verify, #2187) instead of a fresh push.
+      digest: ${{ steps.push.outputs.digest || steps.state.outputs.digest }}
+      reused: ${{ steps.state.outputs.exists }}
+      pushed: ${{ steps.resolve.outputs.pushed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # #2145 / #2149: `release: created` fires whether or not this commit's checks
+      # ran, let alone passed. Inferring "CI was green" from the existence of
+      # a release is a conclusion, not a check - and publishing is the least
+      # reversible thing this project does. Pending, unknown or empty counts
+      # as not green; the step names how many checks it considered.
+      # The WHOLE release-driven run is excluded, derived from the
+      # workflows: all four publishers fire on this event, so excluding
+      # only itself made each one see the other three as pending and
+      # refuse - deterministically, on every release (#2149).
+      - name: Refuse to publish from a commit that was not green
+        # Mandatory on every SHARP run; the dry run stays gate-free so the
+        # pipeline can be exercised from any branch. A sharp run is ONLY an
+        # explicit dispatch with dry_run=false: on the weekly schedule
+        # (#3159) `inputs.dry_run` is null, and the expression engine
+        # coerces `null == false` to TRUE, so the event name must be part
+        # of the test or the schedule would publish.
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/verify_release_commit_green.py \
+            --sha "${{ github.sha }}" --exclude-release-jobs
+
+
+      - name: Resolve version and push mode
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            pushed=true
+          else
+            version="${{ inputs.version }}"
+            # Same guard as the green gate above: the schedule has no
+            # inputs, and `null == false` is true in expressions (#3159).
+            pushed=${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
+            if [ -z "$version" ]; then
+              version="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('backend/pyproject.toml').read_text())['tool']['poetry']['version'])")"
+            fi
+          fi
+          # The canonical version lives in backend/pyproject.toml; everything
+          # else derives from it (make sync-versions). A tag that disagrees
+          # with it means the release was cut wrong - fail here, not later.
+          canonical="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('backend/pyproject.toml').read_text())['tool']['poetry']['version'])")"
+          if [ "$version" != "$canonical" ]; then
+            echo "::error::tag version $version != backend/pyproject.toml $canonical"
+            exit 1
+          fi
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$image"     >> "$GITHUB_OUTPUT"
+          echo "pushed=$pushed"   >> "$GITHUB_OUTPUT"
+          echo "Publishing $image:$version (push=$pushed)"
+
+      - name: Is this tag already published? (idempotent re-run, #2187)
+        # A sharp re-run must not re-build: a rebuild is not bit-identical
+        # (~48k bytes drift between identical-content builds), so it would
+        # verify one artifact and ship another. If the tag already exists
+        # in the registry - checked ANONYMOUSLY, the way a user pulls -
+        # the build+push is skipped and the run only RE-VERIFIES the
+        # published artifact (anonymous pull, start, size gates, version
+        # agreement, page render), reading the digest from the registry.
+        #
+        # Outcome map (gate contract: fail closed on an unreadable basis):
+        #   200 -> exists: skip build, re-verify the published digest
+        #   404 -> not published yet: build and push
+        #   401/403 -> the package is not anonymously readable, i.e. from a
+        #     user's point of view NOT published: build, push, make public
+        #   anything else (5xx, network) -> FAIL; "could not check" must
+        #     never read as "not published"
+        id: state
+        if: steps.resolve.outputs.pushed == 'true'
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          version="${{ steps.resolve.outputs.version }}"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" \
+            | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")"
+          code="$(curl -s -o /dev/null -D /tmp/manifest-headers.txt -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${repo}/manifests/${version}")"
+          case "$code" in
+            200)
+              digest="$(grep -i '^docker-content-digest:' /tmp/manifest-headers.txt | tr -d '\r' | awk '{print $2}')"
+              if [ -z "$digest" ]; then
+                echo "::error::tag ${version} exists but the registry returned no digest - refusing to guess"
+                exit 1
+              fi
+              echo "exists=true"     >> "$GITHUB_OUTPUT"
+              echo "digest=$digest"  >> "$GITHUB_OUTPUT"
+              echo "Tag ${version} is already published (${digest}) - skipping build, re-verifying." ;;
+            404|401|403)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "Tag ${version} not anonymously pullable (HTTP $code) - building and pushing." ;;
+            *)
+              echo "::error::registry state check returned HTTP $code - failing closed (#2187)"
+              exit 1 ;;
+          esac
+
+      - name: The published digest must match the recorded one (#2187)
+        # Only on the re-verify path (the tag already exists). Compares the
+        # digest the registry serves NOW against the one the first publish
+        # run recorded as `image-digest.txt` on the release: a match proves
+        # the tag was not moved after publish; a mismatch means it was.
+        #
+        # A MISSING record fails CLOSED - a missing digest must never be
+        # indistinguishable from a matching one (gate contract point 5).
+        # The sole exception is the explicit DIGEST_RECORD_SINCE cutoff:
+        # tags published before the recording mechanism existed have no
+        # asset through nobody's fault, so below the cutoff an absent
+        # record is expected and tolerated (logged, not passed silently).
+        id: digest-match
+        if: steps.state.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.resolve.outputs.version }}"
+          registry_digest="${{ steps.state.outputs.digest }}"
+          since="${DIGEST_RECORD_SINCE}"
+          if gh release download "v${version}" --pattern image-digest.txt --output recorded-digest.txt 2>/dev/null; then
+            recorded_digest="$(tr -d '[:space:]' < recorded-digest.txt)"
+            if [ -z "$recorded_digest" ]; then
+              echo "::error::recorded image-digest.txt on release v${version} is empty - failing closed (#2187)"
+              exit 1
+            fi
+            if [ "$recorded_digest" != "$registry_digest" ]; then
+              echo "::error::registry digest $registry_digest != recorded $recorded_digest - the tag was moved after publish (#2187)"
+              exit 1
+            fi
+            echo "Registry digest matches the recorded digest ($registry_digest)."
+          elif python3 -c "import sys; p=lambda v: tuple(int(x) for x in v.split('.')[:3]); sys.exit(0 if p('$version') >= p('$since') else 1)"; then
+            echo "::error::release v${version} is at or above the digest cutoff ${since} but has no image-digest.txt - failing closed (#2187)"
+            exit 1
+          else
+            echo "::warning::release v${version} predates the digest cutoff ${since} - no recorded digest expected, skipping the match (#2187)"
+          fi
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: steps.state.outputs.exists != 'true'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.state.outputs.exists != 'true'
+
+      - name: Log in to GHCR
+        if: steps.resolve.outputs.pushed == 'true' && steps.state.outputs.exists != 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push) multi-arch
+        # Skipped when the tag is already published (#2187): the run then
+        # only re-verifies the existing artifact. Dry runs always build
+        # (the state step does not run there, so `exists` is empty).
+        id: push
+        if: steps.state.outputs.exists != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.resolve.outputs.pushed == 'true' }}
+          tags: |
+            ${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }}
+            ${{ steps.resolve.outputs.image }}:latest
+          provenance: true
+          sbom: true
+
+      - name: Make the package public
+        # A GHCR package is private on first publish. Left private, every
+        # user's first pull is a 401 that looks like a broken release.
+        if: steps.resolve.outputs.pushed == 'true' && steps.state.outputs.exists != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pkg="${GITHUB_REPOSITORY#*/}"
+          gh api -X PATCH "user/packages/container/${pkg}" -f visibility=public \
+            || gh api -X PATCH "orgs/${GITHUB_REPOSITORY%%/*}/packages/container/${pkg}" -f visibility=public \
+            || echo "::warning::could not set visibility via API - set it once in the package settings"
+
+      - name: Record the pushed digest on the release (#2187)
+        # Only on a FRESH push. Writes the manifest-list digest as
+        # `image-digest.txt` on the release for this tag, so a later
+        # idempotent re-verify (above) can prove the served digest still
+        # matches what was published. --clobber makes re-pushing the same
+        # tag idempotent. Fails loudly on an empty digest or a missing
+        # release: a silently-unrecorded digest would make the NEXT
+        # re-verify fail closed on a tag that is actually fine.
+        if: steps.resolve.outputs.pushed == 'true' && steps.state.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          digest="${{ steps.push.outputs.digest }}"
+          version="${{ steps.resolve.outputs.version }}"
+          if [ -z "$digest" ]; then
+            echo "::error::the push step produced no digest - refusing to record an empty one (#2187)"
+            exit 1
+          fi
+          printf '%s\n' "$digest" > image-digest.txt
+          gh release upload "v${version}" image-digest.txt --clobber
+          echo "Recorded $digest as image-digest.txt on release v${version}."
+
+  verify-anonymous-pull:
+    # One job per architecture, each on a NATIVE runner. The first version of
+    # this workflow pulled both architectures on an amd64 runner and started
+    # only the amd64 one - so the arm64 image would have shipped without a
+    # single process ever having run inside it, and a native wheel broken
+    # under emulation would have been found by an Apple-silicon user. Native
+    # arm64 runners are free for public repositories (probed: ubuntu-24.04-arm
+    # reports aarch64), so the emulation-only failure class is gone too.
+    # On a DRY RUN (dispatch default, and the weekly schedule, #3159) the job
+    # runs too: it builds its own architecture natively instead of pulling,
+    # then runs the same version, size-ceiling and page-render stations.
+    # Only the anonymous pull needs a published tag, so only that step is
+    # conditional on a sharp run.
+    name: Pull and run it the way a user does (${{ matrix.arch }})
+    needs: build-and-push
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build this architecture locally (dry run only, #3159)
+        # A dry run pushes nothing, so there is nothing to pull. Build under
+        # the same tag the stations below expect, so every station after
+        # this one runs unchanged. No platform is forced: buildx builds the
+        # runner's own architecture (the runner IS that arch, no QEMU), and
+        # the assertion below proves the built image is that arch, the same
+        # way the pull step proves what the manifest list served. The
+        # multi-arch build in build-and-push already proved both platforms
+        # build together.
+        if: needs.build-and-push.outputs.pushed != 'true'
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}"
+          docker buildx build --load -f backend/Dockerfile -t "$image" .
+          got="$(docker image inspect "$image" --format '{{.Architecture}}')"
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "::error::built $got on a ${{ matrix.arch }} runner"
+            exit 1
+          fi
+          echo "RESULT: dry run - built $image natively for $got, nothing pushed"
+
+      - name: Pull without any credentials
+        # No docker/login-action in this job on purpose. If the package is
+        # private, this is where it fails - before a user finds out.
+        if: needs.build-and-push.outputs.pushed == 'true'
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}"
+          docker logout ghcr.io || true
+          rm -f ~/.docker/config.json || true
+          docker pull "$image"
+          got="$(docker image inspect "$image" --format '{{.Architecture}}')"
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "::error::pulled $got on a ${{ matrix.arch }} runner - the manifest list is wrong"
+            exit 1
+          fi
+          echo "RESULT: anonymous pull on a native ${{ matrix.arch }} runner yields a $got image"
+
+      - name: The version in the image must be the released version
+        # Three strings have to agree: the release tag, the version baked
+        # into the image, and what /api/health reports at runtime. Anything
+        # else ships an image claiming a release it is not.
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}"
+          expected="${{ needs.build-and-push.outputs.version }}"
+          docker run -d --name verify -p 18711:8000 \
+            -e ADAPTIVE_LEARNER_PORT=8000 -e ADAPTIVE_LEARNER_DATA_DIR=/app/data \
+            "$image"
+          for _ in $(seq 1 60); do
+            sleep 2
+            if curl -sf http://127.0.0.1:18711/api/health >/tmp/health.json; then break; fi
+          done
+          cat /tmp/health.json
+          reported="$(python3 -c "import json;print(json.load(open('/tmp/health.json'))['version'])")"
+          docker rm -f verify >/dev/null
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::/api/health reports $reported, release is $expected"
+            exit 1
+          fi
+          echo "RESULT: on ${{ matrix.arch }}, tag, image and /api/health all report $expected"
+
+      - name: The published image must respect the size ceiling
+        # #2133 ratchets what a user downloads. On a sharp run this measures
+        # the PUBLISHED artifact, never a local rebuild. On a dry run it
+        # measures the native local build (#3159): the same Dockerfile and
+        # the same ceiling, so a growth shows up on develop before the tag.
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}"
+          python3 scripts/verify_image_size.py --image "$image" --arch "${{ matrix.arch }}"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: The page must APPEAR, not merely respond (#2197)
+        # Every earlier station proved proxies (health JSON, status codes,
+        # script tags). This one executes the page in a real Chromium:
+        # a known element must be visible and the console must be free of
+        # errors and blocked resources - the v2.8.0 white page shipped
+        # through a fully green chain of proxies. Also pins the bare-
+        # container security posture: debug=false (#2198) and a CSP that
+        # is not the deny-everything API policy on the SPA.
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}"
+          # RATE_LIMIT_ENABLED=0: the walk navigates ~24 route states in
+          # quick succession; the limiter (its own backend test suite pins
+          # it ON by default) would 429 the settings tabs and the station
+          # would measure the limiter, not the page.
+          docker run -d --name verify-page -p 18712:8000 \
+            -e ADAPTIVE_LEARNER_PORT=8000 -e ADAPTIVE_LEARNER_DATA_DIR=/app/data \
+            -e ADAPTIVE_LEARNER_SERVE_FRONTEND=1 -e ADAPTIVE_LEARNER_FRONTEND_DIST=/app/static \
+            -e RATE_LIMIT_ENABLED=0 \
+            "$image"
+          for _ in $(seq 1 60); do sleep 2; curl -sf http://127.0.0.1:18712/api/health >/tmp/h.json && break; done
+          cat /tmp/h.json
+          grep -q '"debug":false' /tmp/h.json || { echo "::error::bare container reports debug!=false (#2198)"; exit 1; }
+          curl -sI http://127.0.0.1:18712/ | tee /tmp/root-headers.txt | grep -i "content-security-policy"
+          if grep -i "content-security-policy" /tmp/root-headers.txt | grep -q "default-src 'none'"; then
+            echo "::error::the SPA still ships the deny-everything API CSP (#2197)"; exit 1
+          fi
+          # e2e is bun-managed (bun.lock, no package-lock - the #1496
+          # class that already broke frontend/Dockerfile's npm ci once).
+          cd e2e && npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          # "<bytes> <name>" lines: the size column lets the script class
+          # sub-2500-byte tree-shaken micro-chunks; names-only would keep
+          # the stricter behaviour but fail on icon chunks.
+          docker exec verify-page sh -c 'ls -l /app/static/assets | awk "{print \$5, \$9}"' \
+            | grep '\.js$' > /tmp/chunks.txt
+          wc -l /tmp/chunks.txt
+          node scripts/verify-container-page.mjs http://127.0.0.1:18712 /tmp/chunks.txt
+          docker rm -f verify-page >/dev/null
+
+      - name: Record tag and digest
+        run: |
+          {
+            echo "### ${{ needs.build-and-push.outputs.pushed != 'true' && 'Dry run (nothing published)' || 'Published image' }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`${{ needs.build-and-push.outputs.image }}\` |"
+            echo "| tag | \`${{ needs.build-and-push.outputs.version }}\` |"
+            echo "| digest | \`${{ needs.build-and-push.outputs.digest }}\` |"
+            echo "| platforms | linux/amd64, linux/arm64 |"
+            echo "| mode | ${{ needs.build-and-push.outputs.pushed != 'true' && 'dry run: built natively per architecture, nothing pushed (#3159)' || needs.build-and-push.outputs.reused == 'true' && 're-verified an already-published tag (build skipped, #2187)' || 'freshly built and pushed' }} |"
+            echo ""
+            echo "${{ needs.build-and-push.outputs.pushed != 'true' && 'Native build, version agreement, size ceiling and page render on amd64 and arm64 runners; the anonymous pull needs a published tag and was skipped.' || 'Anonymous pull AND a health check on native amd64 and arm64 runners, without credentials.' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

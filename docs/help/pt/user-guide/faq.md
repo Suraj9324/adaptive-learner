@@ -1,0 +1,263 @@
+<!-- Translation: AI-generated, pending native review -->
+
+# FAQ
+
+## Os meus dados estão seguros?
+
+No **modo Local** o seu navegador armazena os seus dados no seu
+próprio dispositivo (no IndexedDB e no localStorage), entre outras
+coisas o seu progresso, as conversas importadas e as suas
+definições, incluindo as chaves de API e o token do GitHub; não há
+nenhum servidor do administrador envolvido. Outros recebem partes
+deles só quando uma funcionalidade precisa delas, por exemplo o
+seu fornecedor de IA, quando utiliza a IA, ou o GitHub, quando a
+aplicação pergunta por iniciativa própria, ao iniciar, se há
+conteúdos novos. Fechar o separador do navegador não elimina estes
+dados; limpar os dados do site no navegador remove-os do seu
+dispositivo. Se partilha o dispositivo, qualquer pessoa com acesso
+a este perfil do navegador pode lê-los.
+
+No **modo Servidor** os seus dados de aprendizagem ficam na base
+de dados SQLite que o backend FastAPI gere. O que é criado offline
+em progresso de lições e em gravações de voz aguarda neste
+navegador até a aplicação o transferir; a quantidade máxima que
+fica a aguardar e o que acontece ao resto estão descritos em
+[Backup e restauro](../features/backup.md). As chaves de API ficam
+encriptadas com Fernet em
+`~/.config/adaptive_learner/secrets.yaml`, e, para cada
+fornecedor, uma cópia de segurança da última chave de API que
+funcionou fica, também encriptada, na base de dados. A chave de
+encriptação é gerada no primeiro arranque e guardada em
+`~/.config/adaptive_learner/secret.key`;
+não precisa de configurar nada. Se quiser indicar uma chave
+própria, defina `ADAPTIVE_LEARNER_SECRET_KEY` (ou `secret_key:` em
+`secrets.yaml`) antes do primeiro arranque.
+
+Nenhum dos modos envia telemetria, análises ou as suas
+mensagens para terceiros além do fornecedor de IA que escolheu.
+Numa sessão de aprendizagem, esse fornecedor recebe:
+
+- a instrução de sistema, com o tema e o objetivo do seu projeto
+  de aprendizagem, uma indicação de perfil (o seu método de
+  aprendizagem preferido e o respetivo peso), as lições que
+  concluiu com os resultados, a lição e o passo em que está, os
+  seus erros recentes (cada um com a sua resposta, a correta e
+  quantas vezes) e o idioma em que a IA deve responder; uma
+  sessão iniciada a partir de uma conversa importada contém a
+  análise e a transcrição dessa conversa em vez do seu progresso;
+- as suas mensagens e as respostas anteriores da IA na sessão;
+- como em cada pedido, entre outras coisas, o seu endereço IP e a sua
+  chave de API.
+
+Os seus XP e emblemas não fazem parte disto. Também outras
+funcionalidades de IA enviam dados ao seu fornecedor, por exemplo
+a análise de uma conversa importada. A
+[verificação de conteúdo por IA](ai-validation.md) envia os
+cartões do conjunto verificado (de cada cartão, o identificador, a
+frente, o verso e as notas). A revisão por IA antes de partilhar
+envia, das suas lições, apenas as que partilha e, delas, entre
+outras coisas, os cartões, os textos dos passos e os exercícios
+(enunciado e opções de resposta erradas). Ambas enviam também o
+idioma de origem, o idioma de destino e o nível do conjunto. O
+texto que escreve nestes conteúdos também é enviado e pode ser, em
+si, pessoal. A [política de privacidade](../legal/privacy.md)
+enumera cada pedido à IA.
+
+## Preciso de uma chave de API?
+
+Sim para sessões de IA. A aplicação usa **traga a sua própria
+chave** para cada fornecedor suportado: Anthropic Claude, OpenAI
+GPT e Google Gemini, mais Perplexity no modo servidor (a aplicação de
+ambiente de trabalho; a versão de navegador não consegue chamar o
+Perplexity diretamente). Os limites do tier gratuito
+costumam ser suficientes para começar.
+
+Três lugares para colocar a chave (maior prioridade ganha):
+uma variável de ambiente `ADAPTIVE_LEARNER_<PROVIDER>_API_KEY`,
+o campo `ai.<provider>.api_key` em
+`~/.config/adaptive_learner/secrets.yaml`, ou a interface de
+Definições. A interface mostra a fonte por fornecedor para que
+saiba sempre de onde veio a sua chave.
+
+Pode navegar no Currículo, fazer a Avaliação, ver o seu
+Dashboard e até executar a Importação de historial de chat
+sem uma chave de API. A página de Sessão + o passo de análise
++ as funcionalidades de extração por IA são as que precisam
+de uma chave.
+
+## Posso usá-lo offline?
+
+Parcialmente. O service worker da PWA armazena em cache os
+ativos estáticos (HTML, JS, CSS, ícones) para que a aplicação
+inicie sem internet. Os dados de sessões passadas e do Dashboard
+também carregam do armazenamento local, por isso ler material
+antigo funciona bem.
+
+**As sessões em tempo real ainda precisam de internet** porque
+o fornecedor de IA fica fora do seu navegador. A página de
+Sessão deteta "offline" e mostra uma mensagem clara em linha
+em vez de falhar silenciosamente.
+
+## O que significa a mudança de método?
+
+Quando três sessões seguidas mostram a sua compreensão
+estagnada E o seu stress alto, a aplicação apresenta um banner:
+"Quer tentar [outro método] para a próxima sessão?". A
+recomendação prefere o seu segundo método mais forte da
+avaliação que não usou recentemente.
+
+É uma *sugestão*, não uma ordem. Pode dispensar o banner e
+continuar com o seu método atual; o banner reaparece se o
+padrão de estagnação continuar. As mudanças de método são
+registadas na tabela `method_switches` e aparecem na
+distribuição da página de Progresso.
+
+## O que é o auto-loop?
+
+Quando uma sessão atinge o passo 7 (Integração) e o avaliador
+de transição de tópico julga o tópico integrado E recomenda
+continuar, um novo ciclo começa automaticamente com um novo
+subtópico. Até 5 ciclos por sessão (proteção contra
+descontrolo). O historial do chat renderiza cartões com borda
+tracejada "Ciclo N" em cada transição. O diálogo de avaliação
+de fim de sessão resume a jornada de múltiplos ciclos quando
+`cycle_count > 1`.
+
+Só na aplicação de ambiente de trabalho: na versão de navegador, a
+sessão fica no passo 7, e a página da sessão indica-o. Termine aí a
+sessão e inicie uma nova.
+
+## Posso exportar os meus dados?
+
+Sim, entre outros, por estes caminhos:
+
+- **Backup**: Definições > Dados > Cópia de segurança e
+  exportação > Criar backup. Descarrega um ficheiro de cópia de
+  segurança `.alb`; pode criar uma cópia de segurança em ambos os
+  modos de armazenamento. As suas chaves de API não estão incluídas
+  nela; como as transferir está descrito na página
+  [Definições](settings.md), na secção "Exportação cifrada de chaves
+  (.alk)". A página [Backup e restauro](../features/backup.md) indica
+  outros exemplos do que uma cópia de segurança não contém.
+- **Relatórios de Progresso / Sessão / Currículo**: Definições >
+  Dados > Cópia de segurança e exportação > Exportar. Markdown +
+  PDF (impressão para PDF do navegador).
+- **Anki .apkg**: reveja os flashcards extraídos pela IA na
+  página `/anki`, aceite os que gosta, clique em Exportar.
+  O ficheiro funciona diretamente no Anki desktop.
+- **ZIP NotebookLM**: a partir da página de Progresso, descarregue
+  um ZIP estruturado (resumo + vocabulário + regras + erros +
+  flashcards + sessões) formatado para o upload de fontes do
+  NotebookLM.
+
+## O que é a funcionalidade de voz?
+
+Três integrações da Web Speech API:
+
+- **Texto para Fala** nas respostas da IA + resultados da
+  Avaliação - um botão ▶ ao lado de cada um fala-o em voz
+  alta, com correspondência de idioma.
+- **Fala para Texto** na entrada da Sessão - um botão 🎤
+  captura a sua voz e preenche a área de texto com transcrições
+  provisórias antes de enviar.
+- **Prática de Pronúncia** para projetos de idiomas - visite
+  `/pronunciation`, a IA gera uma frase alvo, você fala, e
+  uma IA juiz pontua a semelhança + sugere melhorias.
+
+As alternâncias de voz ficam em Definições > Aprendizagem >
+Leitura em voz alta e ditado. A área oculta-se nos navegadores que
+não suportam a API.
+
+## O que é a importação de historial de chat?
+
+A página de Importação (`/import`) aceita transcrições de
+chat coladas ou carregadas do ChatGPT, Claude.ai (tanto
+exportação JSON em massa como exportação Markdown de conversa
+única), Gemini e Markdown arbitrário. O analisador extrai o
+seu tópico, pontos fracos, padrões de erros, método
+recomendado, vocabulário (para conversas em idiomas) e um
+currículo sugerido. Um clique semeia um Currículo + inicia
+uma sessão direcionada a partir da análise.
+
+A exportação Markdown por conversa do Claude.ai é um caso de
+importação validado - o analisador inclui extração completa de
+timestamps + preservação de limite de papel para esse formato.
+
+## Sincronização entre dispositivos?
+
+Ainda não. A aplicação ainda não consegue sincronizar os seus dados
+entre dispositivos: por enquanto não pode emparelhar um dispositivo, e
+sem emparelhamento a sincronização não troca dados. O que vê em
+Definições > Dados > Sincronização depende do modo de armazenamento:
+
+- No modo Local, esta área não mostra controlos, mas sim o aviso
+  "Disponível apenas com o aplicativo para desktop." A versão de
+  navegador usa sempre o modo Local, também como aplicação web
+  instalada; na aplicação de ambiente de trabalho aparece o mesmo
+  aviso enquanto estiver definida para o modo Local (Definições >
+  Geral > Modo de armazenamento: "Local (Navegador)"). No entanto, a
+  aplicação de ambiente de trabalho também ainda não sincroniza (ver o
+  ponto seguinte).
+- No modo Servidor da aplicação de ambiente de trabalho (Definições >
+  Geral > Modo de armazenamento: "Servidor"), esta área mostra campos
+  para o host e a porta e o botão "Gerar código de pareamento". Um
+  clique nele mostra uma ligação de emparelhamento, um código QR e um
+  botão para copiar a ligação. Mas ainda nenhum dispositivo consegue
+  resgatar esta ligação, nem através do código QR; por isso, por
+  enquanto, não é possível emparelhar um segundo dispositivo com ela.
+
+Enquanto a sincronização não estiver disponível, leva os seus dados
+para outro dispositivo com uma cópia de segurança, mas não todos.
+Entre outras coisas, uma cópia de segurança não contém as suas chaves
+de API; como transferir as chaves de API está descrito na página
+[Definições](settings.md), na secção "Exportação cifrada de chaves
+(.alk)". A página [Backup e restauro](../features/backup.md) indica
+outros exemplos do que uma cópia de segurança não contém.
+
+## Como é diferente do ChatGPT?
+
+O ChatGPT é uma interface de chat para um único modelo. O
+Adaptive Learner é um *sistema de aprendizagem estruturado*
+que usa uma IA internamente mas adiciona:
+
+1. **Uma matriz de 6 métodos × 7 passos** de prompts de sistema
+   personalizados.
+2. **Avaliação de passo por turno** - uma segunda chamada de IA
+   julga a prontidão e pode movê-lo para a frente / para trás.
+3. **Auto-loop para novos ciclos** quando o tópico é integrado.
+4. **Um perfil** das suas preferências de aprendizagem da
+   avaliação de 12 perguntas.
+5. **Rastreamento a longo prazo** - ProgressCommits, mapa de
+   calor de sequência, XP, emblemas, gráficos de tempo por
+   passo. O ChatGPT esquece quando fecha o separador.
+6. **Liberdade de fornecedor** - Anthropic, OpenAI ou Gemini, mais
+   Perplexity no modo servidor.
+7. **Opção local primeiro** - no modo local, o seu navegador
+   armazena, entre outras coisas, o progresso, as estatísticas e as
+   definições; outros recebem partes deles só quando uma
+   funcionalidade precisa delas. A aplicação contacta servidores
+   quando uma funcionalidade precisa disso, por exemplo o GitHub
+   para os conteúdos (para isso, também sincroniza por si própria os
+   repositórios ligados no arranque), o seu fornecedor de IA, e o
+   GitHub quando você partilha algo ou abre lá um relatório de erro.
+   A [política de privacidade](../legal/privacy.md) descreve que
+   casos são esses e o que é transferido.
+
+## E se a IA correr mal?
+
+O sistema falha visivelmente:
+
+- **Chave de API errada**: a chamada de IA devolve uma mensagem
+  de erro clara, apresentada em linha no chat.
+- **Fornecedor em baixo**: o mesmo - o erro renderiza o estado
+  HTTP da API do fornecedor.
+- **Falha na análise de JSON do avaliador**: um avanço
+  determinístico de +1 entra em ação (limitado ao passo 7),
+  com `fallback_used: true` registado para que uma auditoria
+  futura possa identificar modelos que têm dificuldades com
+  o formato.
+- **Streaming abortado a meio da resposta**: a resposta parcial
+  é guardada; a próxima mensagem continua a partir daí.
+- **Resposta de IA obsoleta ou estranha**: termine a sessão,
+  dê-lhe uma avaliação baixa, recomece. A heurística de mudança
+  de método apresentará um método diferente se o padrão persistir.

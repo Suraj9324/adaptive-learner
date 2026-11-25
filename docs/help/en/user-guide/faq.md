@@ -1,0 +1,247 @@
+# FAQ
+
+## Is my data safe?
+
+In **Local mode** your browser stores your data on your own
+device (in IndexedDB and localStorage), among other things your
+progress, imported chats and your settings, including API keys
+and the GitHub token; no server run by the operator is involved.
+Others get parts of it only when a feature needs them, for
+example your AI provider when you use the AI, or GitHub when the
+app asks for new content on its own at startup. Closing the
+browser tab doesn't delete this data; clearing the site data in
+the browser removes it from your device. If you share the
+device, anyone with access to this browser profile can read it.
+
+In **Server mode** your learning data lives in the SQLite
+database the FastAPI backend manages. Whatever lesson progress
+and voice recordings are created offline wait in this browser
+until the app transfers them; how much waits at most and what
+happens to the rest is described under
+[Backup and restore](../features/backup.md). API keys are
+encrypted at rest with Fernet in
+`~/.config/adaptive_learner/secrets.yaml`, and for each provider
+a backup copy of the API key that last worked is stored in the
+database, also encrypted. The encryption key is generated on
+first start and kept in `~/.config/adaptive_learner/secret.key`;
+you do not have to set anything. To supply your own key
+instead, set `ADAPTIVE_LEARNER_SECRET_KEY` (or `secret_key:` in
+`secrets.yaml`) before the first start.
+
+Neither mode sends telemetry, analytics, or your messages to
+any third party other than the AI provider you've chosen. In a
+learning session that provider receives:
+
+- the system instruction, with your learning project's topic and
+  goal, a profile hint (your preferred learning method and its
+  weight), your completed lessons with their results, the lesson
+  and step you are on, your recent mistakes (each with your
+  answer, the correct one and how often you made it) and the
+  language the AI should reply in; a session started from an
+  imported chat carries that chat's analysis and transcript
+  instead of your learning progress;
+- your messages and the AI's earlier replies in the session;
+- as with every request, among other things, your IP address and
+  your API key.
+
+Your XP and badges are not part of this. Other AI features also
+send data to your provider, for example the analysis of an
+imported chat. The [AI content check](ai-validation.md) sends
+the cards of the set it checks (for each card its identifier,
+front, back and notes). The AI review before sharing sends only
+those of your lessons that you share, and of those, among other
+things, the cards, the texts of the steps and the exercises
+(task and wrong answer options). Both also send the set's source
+language, target language and level. Whatever you write yourself
+into this content goes along and can itself be personal. The
+[privacy policy](../legal/privacy.md) lists every AI request.
+
+## Do I need an API key?
+
+Yes for AI sessions. The app uses **bring-your-own-key** for
+every supported provider: Anthropic Claude, OpenAI GPT and
+Google Gemini, plus Perplexity in server mode (the desktop app;
+the browser version cannot call Perplexity directly). Free-tier
+limits are usually enough to get started.
+
+Three places to put the key (highest priority wins): an
+`ADAPTIVE_LEARNER_<PROVIDER>_API_KEY` env var, the
+`ai.<provider>.api_key` field in
+`~/.config/adaptive_learner/secrets.yaml`, or the Settings UI
+(which saves into that same file, encrypted).
+The UI shows the per-provider source so you always know where
+your key came from.
+
+You can browse the Curriculum, take the Assessment, view your
+Dashboard, and even run the chat-history Import without an
+API key. The Session page + the analysis step + the
+AI-extraction features are the ones that need a key.
+
+## Can I use it offline?
+
+Partially. The PWA service worker caches the static assets
+(HTML, JS, CSS, icons) so the app launches without internet.
+Past sessions and Dashboard data load from local storage too,
+so reading old material works fine.
+
+**Live sessions still need internet** because the AI provider
+sits outside your browser. The Session page detects "offline"
+and shows a clear inline message rather than failing
+silently.
+
+## What does the method switch mean?
+
+When three sessions in a row show your understanding stagnant
+AND your stress high, the app surfaces a banner: "Want to try
+[other method] for the next session?". The recommendation
+prefers your second-strongest method from the assessment that
+you haven't used recently.
+
+It's a *suggestion*, not an order. You can dismiss the banner
+and continue with your current method; the banner reappears if
+the stagnation pattern continues. Method switches are
+recorded in the `method_switches` table and surface in the
+Progress page distribution.
+
+## What is auto-loop?
+
+When a session reaches step 7 (Integrate) and the
+topic-transition evaluator judges the topic integrated AND
+recommends continuing, a fresh cycle starts automatically
+with a new subtopic. Up to 5 cycles per session (runaway
+protection). The chat history renders dashed-border "Cycle N"
+cards at each transition. The end-of-session rating dialog
+summarises the multi-cycle journey when `cycle_count > 1`.
+
+Desktop app only: in the browser version the session stays at step 7,
+and the session page says so. End the session there and start a new
+one.
+
+## Can I export my data?
+
+Yes, in these ways, among others:
+
+- **Backup**: Settings > Data > Backup and export > Create
+  Backup. Downloads an `.alb` backup file; you can create a backup
+  in both storage modes. Your API keys are not included in it; how
+  to transfer them is described on the [Settings](settings.md) page
+  in the section "Encrypted key export (.alk)". Further examples of
+  what a backup does not contain are on the
+  [Backup and restore](../features/backup.md) page.
+- **Progress / Session / Curriculum reports**: Settings > Data >
+  Backup and export > Export. Markdown + PDF (browser print-to-PDF).
+- **Anki .apkg**: review AI-extracted flashcards on the
+  `/anki` page, accept the ones you like, click Export. The
+  file works directly in Anki desktop.
+- **NotebookLM ZIP**: from the Progress page, download a
+  structured ZIP (summary + vocabulary + rules + errors +
+  flashcards + sessions) formatted for NotebookLM's source
+  upload.
+
+## What's the voice feature?
+
+Three Web Speech API integrations:
+
+- **Text-to-Speech** on AI replies + Assessment results - a
+  ▶ button next to each speaks it aloud, language-matched.
+- **Speech-to-Text** on the Session input - a 🎤 button
+  captures your voice and populates the textarea with
+  interim transcripts before send.
+- **Pronunciation Practice** for language projects - visit
+  `/pronunciation`, the AI generates a target phrase, you
+  speak, and a judge AI scores similarity + suggests
+  improvements.
+
+Voice toggles live in Settings > Learning > Reading aloud and
+dictation. The area hides itself in browsers that don't support the
+API.
+
+## What's the chat-history import?
+
+The Import page (`/import`) accepts pasted or uploaded chat
+transcripts from ChatGPT, Claude.ai (both JSON bulk export
+and single-conversation Markdown export), Gemini, and
+arbitrary Markdown. The analyzer extracts your topic,
+weaknesses, error patterns, recommended method, vocabulary
+(for language conversations), and a suggested curriculum.
+One click seeds a Curriculum + starts a targeted session
+from the analysis.
+
+The Claude.ai per-conversation Markdown export is a
+validated import case - the parser ships with full timestamp
+extraction + role boundary preservation for that format.
+
+## Sync between devices?
+
+Not yet. The app cannot sync your data between devices yet: so
+far you cannot pair a device, and without pairing, sync exchanges
+no data. What you see under Settings > Data > Sync depends on the
+storage mode:
+
+- In Local mode this area shows no controls, but instead the
+  notice "Only available with the desktop app." The browser
+  version always uses Local mode, also as an installed web app;
+  in the desktop app the same notice appears as long as it is set
+  to Local mode (Settings > General > Storage mode: "Local
+  (Browser)"). However, the desktop app does not sync yet either
+  (see the next point).
+- In the desktop app's Server mode (Settings > General >
+  Storage mode: "Server") this area shows fields for host and port
+  and the button "Generate pairing code". Clicking it shows a
+  pairing link, a QR code and a button for copying the link. But
+  no device can redeem this link yet, not even through the QR
+  code; so a second device cannot be paired with it so far.
+
+As long as sync is not available, you move your data to another
+device with a backup, though not all of it. Among other things, a
+backup does not contain your API keys; how to transfer the API
+keys is described on the [Settings](settings.md) page in the
+section "Encrypted key export (.alk)". Further examples of what a
+backup does not contain are on the
+[Backup and restore](../features/backup.md) page.
+
+## How is this different from ChatGPT?
+
+ChatGPT is a chat interface to a single model. Adaptive
+Learner is a *structured learning system* that uses an AI
+under the hood but adds:
+
+1. **A 6-method × 7-step matrix** of bespoke system prompts.
+2. **Per-turn step evaluation** - a second AI call judges
+   readiness and may move you forward / back.
+3. **Auto-loop into new cycles** when the topic is
+   integrated.
+4. **A profile** of your learning preferences from the
+   12-question assessment.
+5. **Long-term tracking** - ProgressCommits, streak heatmap,
+   XP, badges, time-per-step charts. ChatGPT forgets when
+   you close the tab.
+6. **Provider freedom** - Anthropic, OpenAI, or Gemini, plus
+   Perplexity in server mode.
+7. **Local-first option** - in local mode your browser stores,
+   among other things, progress, statistics and settings; others
+   get parts of them only when a feature needs them. The app
+   contacts servers when a feature needs it, for example GitHub
+   for content (for that it also syncs connected repositories on
+   its own at start-up), your AI provider, and GitHub when you
+   share something or open an error report there. The
+   [privacy policy](../legal/privacy.md) describes which cases
+   these are and what is transferred.
+
+## What if the AI goes wrong?
+
+The system fails visibly:
+
+- **Wrong API key**: the AI call returns a clear error
+  message, surfaced inline in the chat.
+- **Provider down**: same - the error renders the HTTP
+  status from the provider's API.
+- **JSON parse failure from the evaluator**: a deterministic
+  +1 advance kicks in (capped at step 7), with
+  `fallback_used: true` recorded so a future audit can spot
+  models that struggle with the format.
+- **Streaming aborted mid-response**: the partial reply is
+  saved; the next message picks up from there.
+- **Stale or weird AI response**: end the session, give it a
+  low rating, retake. The method-switch heuristic will
+  surface a different method if the pattern persists.

@@ -1,0 +1,151 @@
+name: Kohäsions-Check
+
+on:
+  # No `paths:` filter (#2643): both gate jobs are REQUIRED status checks on
+  # develop, and a path-filtered workflow never starts on out-of-scope PRs,
+  # which would leave the required contexts pending forever. Instead the
+  # `changes` job detects in-scope files and the gate jobs skip their steps
+  # cheaply (ci.yml `changes` pattern, #1617/#1658; reference
+  # implementation: complexity-check.yml after #2642).
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  changes:
+    name: Detect cohesion-relevant changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          # The former `on.paths` list, plus the gate scripts themselves and
+          # this workflow — a script or workflow edit must run the gates.
+          filters: |
+            code:
+              - "**.py"
+              - "**.ts"
+              - "**.tsx"
+              - "**.js"
+              - "**.jsx"
+              - "**.css"
+              - ".filesize-whitelist"
+              - ".filesize-baseline"
+              - ".css-size-baseline"
+              - ".dead-classnames-baseline"
+              - ".unstyled-classnames-baseline"
+              - "scripts/check-file-sizes.sh"
+              - "scripts/check-css-size.sh"
+              - "scripts/check-dead-classnames.py"
+              - ".github/workflows/cohesion-check.yml"
+
+  file-size-check:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUN_GATE: ${{ needs.changes.outputs.code == 'true' }}
+    steps:
+      - name: Fail closed if change detection failed
+        # Gate test contract #2083 point 3: "I could not check" must never
+        # report green. If `changes` errored, outputs are empty and every
+        # step below would skip — a fail-open. Refuse.
+        if: needs.changes.result != 'success'
+        run: |
+          echo "change detection did not succeed (result: ${{ needs.changes.result }}) — failing closed"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN_GATE == 'true'
+
+      - name: Dateigrößen prüfen
+        if: env.RUN_GATE == 'true'
+        run: |
+          chmod +x scripts/check-file-sizes.sh
+          scripts/check-file-sizes.sh
+
+      - name: CSS-Zufluss-Stopp (global.css darf nicht wachsen, #1467)
+        if: env.RUN_GATE == 'true'
+        run: |
+          chmod +x scripts/check-css-size.sh
+          scripts/check-css-size.sh
+
+      - name: Out of scope — reporting success without running
+        # Gate test contract #2083 point 4: say WHAT was (not) measured.
+        if: env.RUN_GATE != 'true'
+        run: echo "No cohesion-relevant files in this PR (see the 'Detect cohesion-relevant changes' job) — file-size + css-size gates skipped by scope, context reports success."
+
+  # Usage-side referential-integrity gate (#1491): classNames used in TSX
+  # but defined nowhere (no CSS rule, no emitted Tailwind utility). Needs
+  # the generated build CSS as the Tailwind oracle, so this job sets up
+  # node + builds the frontend before running the check.
+  dead-classnames-check:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUN_GATE: ${{ needs.changes.outputs.code == 'true' }}
+    steps:
+      - name: Fail closed if change detection failed
+        # Same #2083 point 3 guard as file-size-check above.
+        if: needs.changes.result != 'success'
+        run: |
+          echo "change detection did not succeed (result: ${{ needs.changes.result }}) — failing closed"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN_GATE == 'true'
+
+      # Node 24 stays the RUNTIME (Vite build); Bun is the package manager +
+      # script runner (#1492 Phase 1). No npm cache on setup-node — the bun
+      # install cache below replaces it. #1506: this job still used npm +
+      # the deleted package-lock.json after the Bun migration and failed on
+      # every PR at the setup-node cache step.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: env.RUN_GATE == 'true'
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: env.RUN_GATE == 'true'
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        if: env.RUN_GATE == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        if: env.RUN_GATE == 'true'
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend (Tailwind oracle)
+        if: env.RUN_GATE == 'true'
+        working-directory: frontend
+        run: VITE_STORAGE_MODE=dexie bun run build
+
+      - name: Tote Klassennamen prüfen (#1491)
+        if: env.RUN_GATE == 'true'
+        run: python3 scripts/check-dead-classnames.py
+
+      # Render-unstyled archetype gate (#1892): a className whose tokens are
+      # ALL dead. Build-independent (dead oracle = .dead-classnames-baseline),
+      # so it needs no build -- runs here to sit beside its sibling gate.
+      - name: Ungestylte className-Attribute prüfen (#1892)
+        if: env.RUN_GATE == 'true'
+        run: python3 scripts/check-dead-classnames.py --unstyled
+
+      - name: Out of scope — reporting success without running
+        # Gate test contract #2083 point 4: say WHAT was (not) measured.
+        if: env.RUN_GATE != 'true'
+        run: echo "No cohesion-relevant files in this PR (see the 'Detect cohesion-relevant changes' job) — dead-classnames + unstyled-classnames gates skipped by scope, context reports success."

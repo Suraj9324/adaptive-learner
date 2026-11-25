@@ -1,0 +1,802 @@
+languages:
+  - code: de
+    name: Deutsch
+    default: true
+  - code: en
+    name: English
+  - code: es
+    name: Español
+  - code: fr
+    name: Français
+  - code: el
+    name: Ελληνικά
+  - code: pt
+    name: Português
+  - code: tr
+    name: Türkçe
+  - code: ja
+    name: 日本語
+
+# Phase 11 (v0.8.0) - Full documentation tree.
+#
+# Top-level sections:
+#   - Home (landing page)
+#   - User Guide / Benutzerhandbuch - for learners using the app
+#   - Concept / Konzept - the pedagogical thinking
+#   - Developer Docs / Entwickler-Dokumentation - for contributors
+#   - API Reference / API-Referenz - for integrators
+#
+# Only the MkDocs build reads this file: scripts/generate_mkdocs_nav.py
+# regenerates mkdocs.yml's nav (German titles) and the nav_translations of
+# every other built locale from it. The app does not read it; its help
+# drawer shows the glossary from backend/config/help (#3798).
+
+navigation:
+  - title:
+      de: Installation
+      en: Installation
+      es: Instalación
+      fr: Installation
+      el: Εγκατάσταση
+      pt: Instalação
+      tr: Kurulum
+      ja: インストール
+    children:
+      - title:
+          de: Docker Desktop installieren
+          en: Install Docker Desktop
+          es: Instalar Docker Desktop
+          fr: Installer Docker Desktop
+          el: Εγκατάσταση Docker Desktop
+          pt: Instalar o Docker Desktop
+          tr: Docker Desktop kurulumu
+          ja: Docker Desktop のインストール
+        slug: install/docker-desktop
+      - title:
+          de: Desktop-Launcher starten
+          en: Start the desktop launcher
+          es: Iniciar el launcher de escritorio
+          fr: Démarrer le launcher de bureau
+          el: Εκκίνηση του Desktop-Launcher
+          pt: Iniciar o launcher de desktop
+          tr: Masaüstü launcher'ı başlatma
+          ja: デスクトップランチャーの起動
+        slug: install/launcher
+      - title:
+          de: Den Port ändern
+          en: Changing the port
+          es: Cambiar el puerto
+          fr: Changer de port
+          el: Αλλαγή θύρας
+          pt: Mudar a porta
+          tr: Bağlantı noktasını değiştirme
+          ja: ポートの変更
+        slug: install/changing-the-port
+  - title:
+      de: Benutzerhandbuch
+      en: User Guide
+      es: Guía del usuario
+      fr: Guide de l'utilisateur
+      el: Οδηγός χρήσης
+      pt: Guia do usuário
+      tr: Kullanıcı kılavuzu
+      ja: ユーザーガイド
+    children:
+      - title:
+          de: Erste Schritte
+          en: Getting started
+          es: Primeros pasos
+          fr: Premiers pas
+          el: Ξεκινώντας
+          pt: Primeiros passos
+          tr: Başlarken
+          ja: はじめに
+        slug: user-guide/getting-started
+      - title:
+          de: App-Tutorial
+          en: App tutorial
+          es: Tutorial de la app
+          fr: Tutoriel de l'app
+          el: Οδηγός εφαρμογής
+          pt: Tutorial do app
+          tr: Uygulama eğitimi
+          ja: アプリチュートリアル
+        slug: user-guide/app-tutorial
+      - title:
+          de: Navigation
+          en: Navigation
+          es: Navegación
+          fr: Navigation
+          el: Πλοήγηση
+          pt: Navegação
+          tr: Gezinme
+          ja: ナビゲーション
+        slug: user-guide/navigation
+      - title:
+          de: Onboarding
+          en: Onboarding
+          es: Introducción
+          fr: Intégration
+          el: Εισαγωγή
+          pt: Integração
+          tr: Başlangıç kurulumu
+          ja: オンボーディング
+        slug: user-guide/onboarding
+      - title:
+          de: Lerntyp-Test
+          en: Assessment
+          es: Evaluación
+          fr: Évaluation
+          el: Αξιολόγηση
+          pt: Avaliação
+          tr: Değerlendirme
+          ja: 評価
+        slug: user-guide/assessment
+      - title:
+          de: Lern-Session
+          en: Learning session
+          es: Sesión de aprendizaje
+          fr: Session d'apprentissage
+          el: Συνεδρία μάθησης
+          pt: Sessão de aprendizagem
+          tr: Öğrenme oturumu
+          ja: 学習セッション
+        slug: user-guide/learning-session
+      - title:
+          de: Lektionen und Wiederholungen
+          en: Lessons and reviews
+          es: Lecciones y repasos
+          fr: Leçons et révisions
+          el: Μαθήματα και επαναλήψεις
+          pt: Lições e revisões
+          tr: Dersler ve tekrarlar
+          ja: レッスンと復習
+        slug: user-guide/lessons
+      - title:
+          de: Meine Lektionen
+          en: My Lessons
+          es: Mis lecciones
+          fr: Mes leçons
+          el: Τα μαθήματά μου
+          pt: Minhas lições
+          tr: Derslerim
+          ja: マイレッスン
+        slug: user-guide/my-lessons
+      - title:
+          de: Lernpfad
+          en: Learning Path
+          es: Ruta de aprendizaje
+          fr: Parcours d'apprentissage
+          el: Μαθησιακή διαδρομή
+          pt: Caminho de aprendizagem
+          tr: Öğrenme yolu
+          ja: 学習パス
+        slug: user-guide/learning-path
+      - title:
+          de: Dashboard
+          en: Dashboard
+          es: Panel
+          fr: Tableau de bord
+          el: Πίνακας ελέγχου
+          pt: Painel
+          tr: Panel
+          ja: ダッシュボード
+        slug: user-guide/dashboard
+      - title:
+          de: Curriculum
+          en: Curriculum
+          es: Currículo
+          fr: Curriculum
+          el: Πρόγραμμα σπουδών
+          pt: Currículo
+          tr: Müfredat
+          ja: カリキュラム
+        slug: user-guide/curriculum
+      - title:
+          de: Fortschritt
+          en: Progress
+          es: Progreso
+          fr: Progression
+          el: Πρόοδος
+          pt: Progresso
+          tr: İlerleme
+          ja: 進捗
+        slug: user-guide/progress
+      - title:
+          de: Einstellungen
+          en: Settings
+          es: Configuración
+          fr: Paramètres
+          el: Ρυθμίσεις
+          pt: Configurações
+          tr: Ayarlar
+          ja: 設定
+        slug: user-guide/settings
+      - title:
+          de: Lob und Belohnungen
+          en: Praise and celebrations
+          es: Elogios y celebraciones
+          fr: Encouragements et célébrations
+          el: Έπαινος και γιορτές
+          pt: Elogios e celebrações
+          tr: Övgü ve kutlamalar
+          ja: 称賛とお祝い
+        slug: user-guide/celebrations
+      - title:
+          de: Tägliche Missionen
+          en: Daily missions
+          es: Misiones diarias
+          fr: Missions quotidiennes
+          el: Καθημερινές αποστολές
+          pt: Missões diárias
+          tr: Günlük görevler
+          ja: デイリーミッション
+        slug: user-guide/missions
+      - title:
+          de: KI-Inhaltsprüfung
+          en: AI content check
+          es: Verificación de contenido con IA
+          fr: Vérification de contenu par IA
+          el: Έλεγχος περιεχομένου με AI
+          pt: Verificação de conteúdo por IA
+          tr: Yapay zekâ ile içerik denetimi
+          ja: AIコンテンツチェック
+        slug: user-guide/ai-validation
+      - title:
+          de: FAQ
+          en: FAQ
+          es: Preguntas frecuentes
+          fr: FAQ
+          el: Συχνές ερωτήσεις
+          pt: Perguntas frequentes
+          tr: SSS
+          ja: よくある質問
+        slug: user-guide/faq
+
+  - title:
+      de: Features
+      en: Features
+      es: Funciones
+      fr: Fonctionnalités
+      el: Λειτουργίες
+      pt: Funcionalidades
+      tr: Özellikler
+      ja: 機能
+    children:
+      - title:
+          de: Feature-Übersicht
+          en: Feature overview
+          es: Resumen de funciones
+          fr: Aperçu des fonctionnalités
+          el: Επισκόπηση λειτουργιών
+          pt: Visão geral das funcionalidades
+          tr: Özelliklere genel bakış
+          ja: 機能の概要
+        slug: features/overview
+      - title:
+          de: Content Browser
+          en: Content browser
+          es: Explorador de contenido
+          fr: Explorateur de contenu
+          el: Περιήγηση περιεχομένου
+          pt: Explorador de conteúdo
+          tr: İçerik tarayıcı
+          ja: コンテンツブラウザ
+        slug: features/content-browser
+      - title:
+          de: Inhalte entdecken
+          en: Discover content
+          es: Descubrir contenido
+          fr: Découvrir du contenu
+          el: Ανακάλυψη περιεχομένου
+          pt: Descobrir conteúdo
+          tr: İçerik keşfet
+          ja: コンテンツを探す
+        slug: features/discover
+      - title:
+          de: KI-Übungsgenerierung
+          en: AI exercise generation
+          es: Generación de ejercicios con IA
+          fr: Génération d'exercices par IA
+          el: Δημιουργία ασκήσεων με AI
+          pt: Geração de exercícios por IA
+          tr: Yapay zekâ ile alıştırma üretimi
+          ja: AI演習生成
+        slug: features/ai-exercise-generation
+      - title:
+          de: Mehrere Content-Repositories
+          en: Multiple content repositories
+          es: Varios repositorios de contenido
+          fr: Plusieurs dépôts de contenu
+          el: Πολλαπλά αποθετήρια περιεχομένου
+          pt: Múltiplos repositórios de conteúdo
+          tr: Birden çok içerik deposu
+          ja: 複数のコンテンツリポジトリ
+        slug: features/content-repos
+      - title:
+          de: Backup und Wiederherstellung
+          en: Backup and restore
+          es: Copia de seguridad y restauración
+          fr: Sauvegarde et restauration
+          el: Αντίγραφο ασφαλείας και επαναφορά
+          pt: Backup e restauração
+          tr: Yedekleme ve geri yükleme
+          ja: バックアップと復元
+        slug: features/backup
+      - title:
+          de: Arcade
+          en: Arcade
+          es: Arcade
+          fr: Arcade
+          el: Arcade
+          pt: Arcade
+          tr: Arcade
+          ja: アーケード
+        slug: features/arcade
+      - title:
+          de: Set-Abschluss-Übersicht
+          en: Set-completion review
+          es: Resumen de finalización de set
+          fr: Bilan de fin de set
+          el: Επισκόπηση ολοκλήρωσης σετ
+          pt: Revisão de conclusão de set
+          tr: Set tamamlama incelemesi
+          ja: セット完了レビュー
+        slug: features/set-summary
+
+  - title:
+      de: Konzept
+      en: Concept
+      es: Concepto
+      fr: Concept
+      el: Έννοια
+      pt: Conceito
+      tr: Kavram
+      ja: コンセプト
+    children:
+      - title:
+          de: Philosophie
+          en: Philosophy
+          es: Filosofía
+          fr: Philosophie
+          el: Φιλοσοφία
+          pt: Filosofia
+          tr: Felsefe
+          ja: 理念
+        slug: concept/philosophy
+      - title:
+          de: Die sechs Methoden
+          en: The six methods
+          es: Los seis métodos
+          fr: Les six méthodes
+          el: Οι έξι μέθοδοι
+          pt: Os seis métodos
+          tr: Altı yöntem
+          ja: 6つのメソッド
+        slug: concept/six-methods
+      - title:
+          de: Der Sieben-Schritt-Zyklus
+          en: The seven-step cycle
+          es: El ciclo de siete pasos
+          fr: Le cycle en sept étapes
+          el: Ο κύκλος επτά βημάτων
+          pt: O ciclo de sete passos
+          tr: Yedi adımlı döngü
+          ja: 7ステップのサイクル
+        slug: concept/seven-steps
+      - title:
+          de: Tracking
+          en: Tracking
+          es: Seguimiento
+          fr: Suivi
+          el: Παρακολούθηση
+          pt: Acompanhamento
+          tr: Takip
+          ja: トラッキング
+        slug: concept/tracking
+      - title:
+          de: Werkzeuge
+          en: Tools
+          es: Herramientas
+          fr: Outils
+          el: Εργαλεία
+          pt: Ferramentas
+          tr: Araçlar
+          ja: ツール
+        slug: concept/tools
+
+  - title:
+      de: Entwickler-Dokumentation
+      en: Developer docs
+      es: Documentación para desarrolladores
+      fr: Documentation développeur
+      el: Τεκμηρίωση προγραμματιστή
+      pt: Documentação do desenvolvedor
+      tr: Geliştirici belgeleri
+      ja: 開発者ドキュメント
+    children:
+      - title:
+          de: Onboarding
+          en: Onboarding
+          es: Onboarding
+          fr: Onboarding
+          el: Onboarding
+          pt: Onboarding
+          tr: Onboarding
+          ja: オンボーディング
+        slug: developer/onboarding
+      - title:
+          de: Tore, Ratchets und Zweigschutz
+          en: Gates, ratchets, and branch protection
+          es: Puertas, trinquetes y protección de rama
+          fr: Barrières, cliquets et protection de branche
+          el: Πύλες, καστάνιες και προστασία κλάδου
+          pt: Portões, catracas e proteção de branch
+          tr: Kapılar, cırcırlar ve dal koruması
+          ja: ゲート、ラチェット、ブランチ保護
+        slug: developer/gates-and-ratchets
+      - title:
+          de: Architektur
+          en: Architecture
+          es: Arquitectura
+          fr: Architecture
+          el: Αρχιτεκτονική
+          pt: Arquitetura
+          tr: Mimari
+          ja: アーキテクチャ
+        slug: developer/architecture
+      - title:
+          de: Setup
+          en: Setup
+          es: Configuración inicial
+          fr: Installation
+          el: Εγκατάσταση
+          pt: Configuração
+          tr: Kurulum
+          ja: セットアップ
+        slug: developer/setup
+      - title:
+          de: Plugin-Leitfaden
+          en: Plugin guide
+          es: Guía de plugins
+          fr: Guide des plugins
+          el: Οδηγός προσθέτων
+          pt: Guia de plugins
+          tr: Eklenti kılavuzu
+          ja: プラグインガイド
+        slug: developer/plugin-guide
+      - title:
+          de: Storage-Layer
+          en: Storage layer
+          es: Capa de almacenamiento
+          fr: Couche de stockage
+          el: Επίπεδο αποθήκευσης
+          pt: Camada de armazenamento
+          tr: Depolama katmanı
+          ja: ストレージレイヤー
+        slug: developer/storage-layer
+      - title:
+          de: Datenmodell
+          en: Data model
+          es: Modelo de datos
+          fr: Modèle de données
+          el: Μοντέλο δεδομένων
+          pt: Modelo de dados
+          tr: Veri modeli
+          ja: データモデル
+        slug: developer/data-model
+      - title:
+          de: Theme-System
+          en: Theme system
+          es: Sistema de temas
+          fr: Système de thèmes
+          el: Σύστημα θεμάτων
+          pt: Sistema de temas
+          tr: Tema sistemi
+          ja: テーマシステム
+        slug: developer/themes
+      - title:
+          de: Lektionen + SRS
+          en: Lessons + SRS
+          es: Lecciones + SRS
+          fr: Leçons + SRS
+          el: Μαθήματα + SRS
+          pt: Lições + SRS
+          tr: Dersler + SRS
+          ja: レッスン + SRS
+        slug: developer/lessons-and-srs
+      - title:
+          de: KI-Integration
+          en: AI integration
+          es: Integración de IA
+          fr: Intégration de l'IA
+          el: Ενσωμάτωση AI
+          pt: Integração de IA
+          tr: Yapay zekâ entegrasyonu
+          ja: AI統合
+        slug: developer/ai-integration
+      - title:
+          de: Testen
+          en: Testing
+          es: Pruebas
+          fr: Tests
+          el: Δοκιμές
+          pt: Testes
+          tr: Test
+          ja: テスト
+        slug: developer/testing
+      - title:
+          de: Belohnungs-Schicht
+          en: Celebration layer
+          es: Capa de celebración
+          fr: Couche de célébration
+          el: Επίπεδο γιορτής
+          pt: Camada de celebração
+          tr: Kutlama katmanı
+          ja: お祝いレイヤー
+        slug: developer/celebrations
+      - title:
+          de: Tägliche Missionen
+          en: Daily missions
+          es: Misiones diarias
+          fr: Missions quotidiennes
+          el: Καθημερινές αποστολές
+          pt: Missões diárias
+          tr: Günlük görevler
+          ja: デイリーミッション
+        slug: developer/missions
+      - title:
+          de: Deployment
+          en: Deployment
+          es: Despliegue
+          fr: Déploiement
+          el: Ανάπτυξη
+          pt: Implantação
+          tr: Dağıtım
+          ja: デプロイ
+        slug: developer/deployment
+      - title:
+          de: i18n
+          en: i18n
+          es: i18n
+          fr: i18n
+          el: i18n
+          pt: i18n
+          tr: i18n
+          ja: i18n
+        slug: developer/i18n
+      - title:
+          de: Lektionsinhalte erstellen
+          en: Authoring lesson content
+          es: Crear contenido de lecciones
+          fr: Création de contenu de leçon
+          el: Δημιουργία περιεχομένου μαθημάτων
+          pt: Criar conteúdo de lições
+          tr: Ders içeriği oluşturma
+          ja: レッスンコンテンツの作成
+        slug: developer/authoring-content
+      - title:
+          de: Neuen Aufgabentyp hinzufügen
+          en: Adding a new exercise type
+          es: Añadir un tipo de ejercicio
+          fr: Ajouter un type d'exercice
+          el: Προσθήκη νέου τύπου άσκησης
+          pt: Adicionar um tipo de exercício
+          tr: Yeni alıştırma türü ekleme
+          ja: 新しい演習タイプの追加
+        slug: developer/adding-exercise-type
+      - title:
+          de: Lektionsformat-Referenz
+          en: Lesson format reference
+          es: Referencia del formato de lección
+          fr: Référence du format de leçon
+          el: Αναφορά μορφής μαθήματος
+          pt: Referência do formato de lição
+          tr: Ders biçimi başvurusu
+          ja: レッスン形式リファレンス
+        slug: developer/lesson-format-reference
+      - title:
+          de: Release-Prozess
+          en: Release workflow
+          es: Flujo de publicación
+          fr: Processus de publication
+          el: Ροή έκδοσης
+          pt: Fluxo de lançamento
+          tr: Yayın süreci
+          ja: リリースワークフロー
+        slug: developer/release
+
+  - title:
+      de: Für Content-Ersteller
+      en: For content creators
+      es: Para creadores de contenido
+      fr: Pour les créateurs de contenu
+      el: Για δημιουργούς περιεχομένου
+      pt: Para criadores de conteúdo
+      tr: İçerik oluşturanlar için
+      ja: コンテンツ作成者向け
+    children:
+      - title:
+          de: Überblick
+          en: Overview
+          es: Visión general
+          fr: Vue d'ensemble
+          el: Επισκόπηση
+          pt: Visão geral
+          tr: Genel bakış
+          ja: 概要
+        slug: content-creation/overview
+      - title:
+          de: Mentor-Modus
+          en: Mentor mode
+          es: Modo mentor
+          fr: Mode mentor
+          el: Λειτουργία μέντορα
+          pt: Modo mentor
+          tr: Mentor modu
+          ja: メンターモード
+        slug: content-creation/mentor-mode
+      - title:
+          de: Content-Repos
+          en: Content repos
+          es: Repositorios de contenido
+          fr: Dépôts de contenu
+          el: Αποθετήρια περιεχομένου
+          pt: Repositórios de conteúdo
+          tr: İçerik depoları
+          ja: コンテンツリポジトリ
+        slug: content-creation/content-repos
+      - title:
+          de: Buchempfehlungen
+          en: Book recommendations
+          es: Recomendaciones de libros
+          fr: Recommandations de livres
+          el: Προτάσεις βιβλίων
+          pt: Recomendações de livros
+          tr: Kitap önerileri
+          ja: 書籍の推薦
+        slug: content-creation/books
+
+  - title:
+      de: Architektur
+      en: Architecture
+      es: Arquitectura
+      fr: Architecture
+      el: Αρχιτεκτονική
+      pt: Arquitetura
+      tr: Mimari
+      ja: アーキテクチャ
+    children:
+      - title:
+          de: Design-Tokens
+          en: Design tokens
+          es: Tokens de diseño
+          fr: Jetons de design
+          el: Design tokens
+          pt: Tokens de design
+          tr: Tasarım token'ları
+          ja: デザイントークン
+        slug: architecture/design-tokens
+      - title:
+          de: Sync
+          en: Sync
+          es: Sincronización
+          fr: Synchronisation
+          el: Συγχρονισμός
+          pt: Sincronização
+          tr: Senkronizasyon
+          ja: 同期
+        slug: architecture/sync
+
+  - title:
+      de: API-Referenz
+      en: API reference
+      es: Referencia de la API
+      fr: Référence de l'API
+      el: Αναφορά API
+      pt: Referência da API
+      tr: API başvurusu
+      ja: APIリファレンス
+    children:
+      - title:
+          de: Übersicht
+          en: Overview
+          es: Visión general
+          fr: Vue d'ensemble
+          el: Επισκόπηση
+          pt: Visão geral
+          tr: Genel bakış
+          ja: 概要
+        slug: api/overview
+      - title:
+          de: Alle Endpoints
+          en: All endpoints
+          es: Todos los endpoints
+          fr: Tous les endpoints
+          el: Όλα τα endpoints
+          pt: Todos os endpoints
+          tr: Tüm endpoint'ler
+          ja: 全エンドポイント
+        slug: api/endpoints
+      - title:
+          de: Core-Endpoints
+          en: Core endpoints
+          es: Endpoints principales
+          fr: Endpoints principaux
+          el: Βασικά endpoints
+          pt: Endpoints principais
+          tr: Temel endpoint'ler
+          ja: コアエンドポイント
+        slug: api/core-endpoints
+      - title:
+          de: Plugin-Endpoints
+          en: Plugin endpoints
+          es: Endpoints de plugins
+          fr: Endpoints des plugins
+          el: Endpoints προσθέτων
+          pt: Endpoints de plugins
+          tr: Eklenti endpoint'leri
+          ja: プラグインエンドポイント
+        slug: api/plugin-endpoints
+      - title:
+          de: Modelle
+          en: Models
+          es: Modelos
+          fr: Modèles
+          el: Μοντέλα
+          pt: Modelos
+          tr: Modeller
+          ja: モデル
+        slug: api/models
+      - title:
+          de: Hooks
+          en: Hooks
+          es: Hooks
+          fr: Hooks
+          el: Hooks
+          pt: Hooks
+          tr: Hooks
+          ja: フック
+        slug: api/hooks
+
+  - title:
+      de: Rechtliches
+      en: Legal
+      es: Aviso legal
+      fr: Mentions légales
+      el: Νομικά
+      pt: Informação legal
+      tr: Yasal bilgiler
+      ja: 法的情報
+    children:
+      - title:
+          de: Impressum
+          en: Legal notice
+          es: Aviso legal
+          fr: Mentions légales
+          el: Στοιχεία εκδότη
+          pt: Ficha técnica
+          tr: Künye
+          ja: 運営者情報
+        slug: legal/imprint
+      - title:
+          de: Datenschutzerklärung
+          en: Privacy policy
+          es: Política de privacidad
+          fr: Politique de confidentialité
+          el: Πολιτική απορρήτου
+          pt: Política de privacidade
+          tr: Gizlilik politikası
+          ja: プライバシーポリシー
+        slug: legal/privacy
+
+  - title:
+      de: Changelog
+      en: Changelog
+      es: Changelog
+      fr: Changelog
+      el: Changelog
+      pt: Changelog
+      tr: Changelog
+      ja: 変更履歴
+    slug: changelog

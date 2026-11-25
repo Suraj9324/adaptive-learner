@@ -1,0 +1,74 @@
+# E2E fixtures
+
+Binary/text fixtures consumed by the Playwright smoke specs.
+Keep this directory small; reviewers need to understand each
+byte on disk.
+
+## minimal-book.bgb
+
+Minimum valid AdaptiveLearner backup archive: one book with one
+chapter, no assets. Used by `smoke/import-wizard-bgb.spec.ts`.
+
+Regenerate with:
+
+```bash
+python3 e2e/fixtures/regen_minimal_bgb.py
+```
+
+The generator script is committed alongside so the fixture is
+reproducible without a AdaptiveLearner backend running.
+
+## explanation-post-answer.lesson.json
+
+Reference lesson for the post-answer `explanation` field (engine schema
+1.13, #2991): one theory step, one multiple_choice exercise WITH an
+authored Markdown explanation (rule, word-by-word gloss, examples,
+typical mistake), one WITHOUT. Hand-written, Spanish A1 for German
+speakers. Served through a page.route-mocked content repo by
+`dexie/exercise-explanation.spec.ts` and the feature screenshot
+`exercise-explanation/falsche-antwort`.
+
+## matching-long-word.lesson.json
+
+Reference lesson for a matching tile whose word is wider than the tile
+(#3174): the "Sprachebenen zuordnen" pairs of alc-psychology lesson 32
+(`sets/de/psych-intro/lessons/32-kognition-vertieft.json`), the content the
+bug was reported from. The right tile "kleinste bedeutungsunterscheidende
+Lauteinheit" carries a 25-character word that overflows a 375px tile
+unless it hyphenates or wraps. One theory step, one matching exercise,
+domain `psychology` (German on both sides). Served through a
+page.route-mocked content repo by the feature screenshots
+`matching-animation/matching-long-word` and
+`matching-animation/matching-long-word-resolved`.
+
+## ordering-review.lesson.json
+
+Reference lesson for the ordering review after a wrong answer (#3260):
+the "Der Ablauf eines Absendens" step of alc-programming React 19 lesson 01
+(`sets/de/react-19/lessons/01-actions-useactionstate.json`), one
+`ext:al-ordering` exercise with five steps, declared in the lesson's own
+`requires_extensions` (the root and set manifests carry none, as in the real repo).
+One theory step, one ordering exercise, domain
+`programming` (German on both sides). The bundled set has no ordering
+exercise. Served through a page.route-mocked content repo by the feature
+screenshot `ordering-review/falsche-reihenfolge`, which places the first
+two steps swapped and checks in practice mode.
+
+## remote-media.lesson.json
+
+Reference lesson for content from another server (#3803): one theory step
+with a Markdown image from `example.com`, one multiple_choice exercise, and
+`resources` with a YouTube video and an article. The app loads none of it:
+the image renders as a link, the video card shows a local placeholder.
+Hand-written, German knowledge content. Served through a page.route-mocked
+content repo by the feature screenshots `content-privacy/bild-als-link` and
+`content-privacy/video-karte`.
+
+## evaluation-pilot-control.lesson.json
+
+The control lesson of the evaluation pilot, byte-identical to
+`sets/de/evaluation-pilot-control/lessons/01-hauptstadt-quiz-kontrolle.json`
+in `adaptive-learner-content-test`: ten capitals, six multiple_choice and
+four select clozes. e7 (Sweden) and e8 (Norway) carry each other's answer
+as a distractor, the case of #3752. Served through a page.route-mocked
+content repo by `webkit/select-cloze-tap.spec.ts`.

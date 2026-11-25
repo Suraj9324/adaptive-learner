@@ -1,0 +1,449 @@
+/**
+ * Blank-exercise factory + validation for the extension-authoring wizard
+ * (#1852). Editors 1+2: ``ext:al-categorization`` + ``ext:al-error-correction``;
+ * editors 3+4: ``ext:al-reading-comprehension`` + ``ext:al-graded-quiz``.
+ *
+ * Validation REUSES the shipped per-type payload validators (the exact rules
+ * the renderers + load guard already enforce) rather than re-implementing
+ * them. The blank starts are deliberately invalid so the wizard gate keeps a
+ * half-filled extension exercise out of the review step until the author
+ * completes it.
+ *
+ * @example
+ * ```ts
+ * const ex = createBlankExtensionExercise(CATEGORIZATION_EXT_TYPE, newExtensionExerciseId());
+ * const issue = validateExtensionExercise(ex); // {valid: false, code: "prompt"}
+ * if (issue.valid) onSave(normalizeExtensionExercise(ex));
+ * ```
+ */
+
+import {
+    CATEGORIZATION_EXT_TYPE,
+    categorizationPayloadErrors,
+} from "../payload/categorization";
+import {
+    ERROR_CORRECTION_EXT_TYPE,
+    errorCorrectionPayloadErrors,
+} from "../payload/error-correction";
+import {
+    READING_COMPREHENSION_EXT_TYPE,
+    readingComprehensionPayloadErrors,
+    type RcQuestion,
+} from "../payload/reading-comprehension";
+import {
+    GRADED_QUIZ_EXT_TYPE,
+    gradedQuizPayloadErrors,
+    type GqQuestion,
+} from "../payload/graded-quiz";
+import {DICTATION_EXT_TYPE, dictationPayloadErrors} from "../payload/dictation";
+import {explanationTooLong, normalizeExplanation} from "./exercise-edit";
+import {
+    IMAGE_DESCRIPTION_EXT_TYPE,
+    imageDescriptionPayloadErrors,
+} from "../payload/image-description";
+import {
+    SPEAK_AND_RECORD_EXT_TYPE,
+    speakAndRecordPayloadErrors,
+} from "../payload/speak-and-record";
+import {ORDERING_EXT_TYPE, orderingPayloadErrors} from "../payload/ordering";
+import {PARSONS_EXT_TYPE, parsonsPayloadErrors} from "../payload/parsons";
+import {HOTSPOT_EXT_TYPE, hotspotPayloadErrors} from "../payload/hotspot";
+import type {ContentLessonExercise} from "../../../storage/types";
+import {createIdFactory} from "./id-factory";
+
+export {
+    CATEGORIZATION_EXT_TYPE,
+    ERROR_CORRECTION_EXT_TYPE,
+    READING_COMPREHENSION_EXT_TYPE,
+    GRADED_QUIZ_EXT_TYPE,
+    DICTATION_EXT_TYPE,
+    IMAGE_DESCRIPTION_EXT_TYPE,
+    SPEAK_AND_RECORD_EXT_TYPE,
+    ORDERING_EXT_TYPE,
+    PARSONS_EXT_TYPE,
+    HOTSPOT_EXT_TYPE,
+};
+
+/** The extension exercise types the wizard can author (#1852, editors 1-4;
+ *  #1887 added dictation, editor 5; #2095 added image-description, editor 6;
+ *  #2817 added speak-and-record, editor 7 - deliberately UNGRADED, so it
+ *  carries no ``accept`` field and no conversion target). */
+export const EXTENSION_WIZARD_TYPES = [
+    CATEGORIZATION_EXT_TYPE,
+    ERROR_CORRECTION_EXT_TYPE,
+    READING_COMPREHENSION_EXT_TYPE,
+    GRADED_QUIZ_EXT_TYPE,
+    DICTATION_EXT_TYPE,
+    IMAGE_DESCRIPTION_EXT_TYPE,
+    SPEAK_AND_RECORD_EXT_TYPE,
+    ORDERING_EXT_TYPE,
+    PARSONS_EXT_TYPE,
+    HOTSPOT_EXT_TYPE,
+] as const;
+
+export type ExtensionWizardType = (typeof EXTENSION_WIZARD_TYPES)[number];
+
+/** The reserved prefix of every extension exercise type (``ext:<vendor>-<name>``).
+ *  An exercise whose ``type`` starts with it is opaque to the core schema and
+ *  MUST be declared in the lesson's ``requires_extensions`` (#1895). */
+export const EXTENSION_TYPE_PREFIX = "ext:";
+
+/**
+ * True when ``type`` is an extension exercise type (``ext:`` namespace), as
+ * opposed to a core {@link GeneratableType}. The single predicate every build
+ * + validation path uses so "is this an extension?" is decided in one place.
+ *
+ * @example
+ * isExtensionType("ext:al-dictation"); // true
+ * isExtensionType("matching");         // false
+ */
+export function isExtensionType(type: string): boolean {
+    return type.startsWith(EXTENSION_TYPE_PREFIX);
+}
+
+/** A sub-question shape shared by reading-comprehension + graded-quiz. The
+ *  wizard keeps BOTH ``options`` and ``accept`` present so a type switch never
+ *  loses data; normalization drops the branch the chosen type does not use. */
+export interface WizardSubQuestion {
+    prompt: string;
+    type: "multiple_choice" | "free_text";
+    options: {text: string; correct: boolean}[];
+    accept: string[];
+    points?: number;
+    partial_credit?: boolean;
+}
+
+/**
+ * Machine code identifying which rule an extension exercise draft failed.
+ * App-neutral on purpose (#1862): the kit reports WHAT is wrong, the app maps
+ * the code to a localized message (see ``edit-error-keys.ts``). ``prompt`` is
+ * the shared pre-check; the others match the wizard extension type.
+ */
+export type ExtensionEditCode =
+    | "prompt"
+    | "explanation"
+    | "categorization"
+    | "error_correction"
+    | "reading_comprehension"
+    | "graded_quiz"
+    | "dictation"
+    | "image_description"
+    | "speak_and_record"
+    | "ordering"
+    | "parsons"
+    | "hotspot";
+
+/** Result of validating an extension exercise draft: whether it is saveable
+ *  and, when not, the machine {@link ExtensionEditCode} of the failed rule. */
+export interface ExtensionEditIssue {
+    valid: boolean;
+    code: ExtensionEditCode | null;
+}
+
+const ok: ExtensionEditIssue = {valid: true, code: null};
+
+function fail(code: ExtensionEditCode): ExtensionEditIssue {
+    return {valid: false, code};
+}
+
+const wizardExtensionIds = createIdFactory("ex-ext");
+
+/** Unique id for a wizard-authored extension exercise. Backed by a default
+ *  {@link IdFactory}; inject {@link createIdFactory} for an isolated
+ *  sequence (#1862). */
+export function newExtensionExerciseId(): string {
+    return wizardExtensionIds.next();
+}
+
+/** A deliberately-invalid blank sub-question (no correct option / no accept
+ *  entry yet), optionally carrying graded-quiz points. */
+export function blankSubQuestion(withPoints: boolean): WizardSubQuestion {
+    const base: WizardSubQuestion = {
+        prompt: "",
+        type: "multiple_choice",
+        options: [
+            {text: "", correct: false},
+            {text: "", correct: false},
+        ],
+        accept: [],
+    };
+    return withPoints ? {...base, points: 1, partial_credit: false} : base;
+}
+
+const BLANK_PAYLOAD: Record<ExtensionWizardType, () => unknown> = {
+    [CATEGORIZATION_EXT_TYPE]: () => ({
+        categories: [
+            {name: "", items: []},
+            {name: "", items: []},
+        ],
+    }),
+    [ERROR_CORRECTION_EXT_TYPE]: () => ({tokens: ["", ""], error_index: 0, accept: []}),
+    [READING_COMPREHENSION_EXT_TYPE]: () => ({
+        passage: "",
+        questions: [blankSubQuestion(false)],
+    }),
+    [GRADED_QUIZ_EXT_TYPE]: () => ({
+        pass_threshold: 60,
+        questions: [blankSubQuestion(true)],
+    }),
+    [DICTATION_EXT_TYPE]: () => ({audio: "", accept: []}),
+    [IMAGE_DESCRIPTION_EXT_TYPE]: () => ({image: "", accept: []}),
+    [SPEAK_AND_RECORD_EXT_TYPE]: () => ({sentence: ""}),
+    [ORDERING_EXT_TYPE]: () => ({items: ["", ""]}),
+    [PARSONS_EXT_TYPE]: () => ({
+        lines: [
+            {code: "", indent: 0},
+            {code: "", indent: 0},
+        ],
+    }),
+    [HOTSPOT_EXT_TYPE]: () => ({
+        src: "",
+        zones: [
+            {shape: "rect", coords: {x: 10, y: 10, width: 20, height: 20}},
+            {shape: "circle", coords: {cx: 70, cy: 70, radius: 15}},
+        ],
+    }),
+};
+
+/**
+ * Build an EMPTY extension exercise of ``extType`` (deliberately invalid
+ * until filled). Same ``ContentLessonExercise`` shape a real one has: the
+ * type-specific data lives under ``ext_payload``.
+ */
+export function createBlankExtensionExercise(
+    extType: ExtensionWizardType,
+    id: string,
+): ContentLessonExercise {
+    return {
+        id,
+        type: extType,
+        prompt: "",
+        card_ids: [],
+        distractors: [],
+        ext_payload: BLANK_PAYLOAD[extType](),
+    } as ContentLessonExercise;
+}
+
+/** Per-type payload-validity check: true when ``ex``'s ``ext_payload``
+ *  satisfies the type's shipped payload validator. Categorization also
+ *  enforces a wizard-level non-empty-category-name rule the shipped
+ *  validator doesn't (uniqueness is enough for the load guard; an
+ *  unnamed bucket renders as a blank label in the wizard). Keyed by
+ *  {@link ExtensionWizardType} so a dispatch table replaces the former
+ *  if-cascade — keeps ``validateExtensionExercise``'s own cyclomatic
+ *  complexity flat as more extensions gain wizard authoring. */
+const VALIDATE_EXTENSION_PAYLOAD: Record<
+    ExtensionWizardType,
+    (ex: ContentLessonExercise) => boolean
+> = {
+    [CATEGORIZATION_EXT_TYPE]: (ex) => {
+        const named = categorizationCategories(ex).every(
+            (bucket) => bucket.name.trim().length > 0,
+        );
+        return categorizationPayloadErrors(ex).length === 0 && named;
+    },
+    [ERROR_CORRECTION_EXT_TYPE]: (ex) => errorCorrectionPayloadErrors(ex).length === 0,
+    [READING_COMPREHENSION_EXT_TYPE]: (ex) =>
+        readingComprehensionPayloadErrors(ex).length === 0,
+    [GRADED_QUIZ_EXT_TYPE]: (ex) => gradedQuizPayloadErrors(ex).length === 0,
+    [DICTATION_EXT_TYPE]: (ex) => dictationPayloadErrors(ex).length === 0,
+    [IMAGE_DESCRIPTION_EXT_TYPE]: (ex) => imageDescriptionPayloadErrors(ex).length === 0,
+    [SPEAK_AND_RECORD_EXT_TYPE]: (ex) => speakAndRecordPayloadErrors(ex).length === 0,
+    [ORDERING_EXT_TYPE]: (ex) => orderingPayloadErrors(ex).length === 0,
+    [PARSONS_EXT_TYPE]: (ex) => parsonsPayloadErrors(ex).length === 0,
+    [HOTSPOT_EXT_TYPE]: (ex) => hotspotPayloadErrors(ex).length === 0,
+};
+
+/** The {@link ExtensionEditCode} reported when a type's payload check
+ *  fails — the counterpart lookup to {@link VALIDATE_EXTENSION_PAYLOAD}. */
+const EXTENSION_EDIT_CODE_BY_TYPE: Record<ExtensionWizardType, ExtensionEditCode> = {
+    [CATEGORIZATION_EXT_TYPE]: "categorization",
+    [ERROR_CORRECTION_EXT_TYPE]: "error_correction",
+    [READING_COMPREHENSION_EXT_TYPE]: "reading_comprehension",
+    [GRADED_QUIZ_EXT_TYPE]: "graded_quiz",
+    [DICTATION_EXT_TYPE]: "dictation",
+    [IMAGE_DESCRIPTION_EXT_TYPE]: "image_description",
+    [SPEAK_AND_RECORD_EXT_TYPE]: "speak_and_record",
+    [ORDERING_EXT_TYPE]: "ordering",
+    [PARSONS_EXT_TYPE]: "parsons",
+    [HOTSPOT_EXT_TYPE]: "hotspot",
+};
+
+/**
+ * Validate an extension exercise draft for the inline editor. Checks the
+ * common prompt, then delegates to the shipped payload validator via the
+ * per-type dispatch table above. Returns the first failure (as a machine
+ * {@link ExtensionEditCode}) or ``{valid: true}``. A type without a wizard
+ * editor (not in the table) is never blocked here.
+ */
+export function validateExtensionExercise(
+    ex: ContentLessonExercise,
+): ExtensionEditIssue {
+    if (ex.prompt.trim().length < 1) return fail("prompt");
+    if (explanationTooLong(ex)) return fail("explanation");
+    const isValid = VALIDATE_EXTENSION_PAYLOAD[ex.type as ExtensionWizardType];
+    if (!isValid) return ok;
+    return isValid(ex) ? ok : fail(EXTENSION_EDIT_CODE_BY_TYPE[ex.type as ExtensionWizardType]);
+}
+
+function trimmedNonEmpty(values: string[] | undefined): string[] {
+    return (values ?? []).map((v) => v.trim()).filter((v) => v.length > 0);
+}
+
+function categorizationCategories(
+    ex: ContentLessonExercise,
+): {name: string; items: string[]}[] {
+    const payload = ex.ext_payload as
+        | {categories?: {name: string; items: string[]}[]}
+        | undefined;
+    return payload?.categories ?? [];
+}
+
+/** Clean one sub-question: trim the prompt + drop the unused branch (mc keeps
+ *  non-empty-text options, free_text keeps non-empty accepts). Points are
+ *  carried through only for graded-quiz. */
+function normalizeSubQuestion(
+    question: WizardSubQuestion,
+    withPoints: boolean,
+): RcQuestion | GqQuestion {
+    const prompt = question.prompt.trim();
+    const common =
+        question.type === "multiple_choice"
+            ? {
+                  options: (question.options ?? [])
+                      .map((o) => ({text: o.text.trim(), correct: o.correct === true}))
+                      .filter((o) => o.text.length > 0),
+              }
+            : {accept: trimmedNonEmpty(question.accept)};
+    const base = {prompt, type: question.type, ...common};
+    if (!withPoints) return base as RcQuestion;
+    return {
+        ...base,
+        points: Number.isFinite(question.points) ? (question.points as number) : 1,
+        ...(question.type === "multiple_choice" && question.partial_credit
+            ? {partial_credit: true}
+            : {}),
+    } as GqQuestion;
+}
+
+function normalizeSubQuestions(
+    ex: ContentLessonExercise,
+    withPoints: boolean,
+): (RcQuestion | GqQuestion)[] {
+    const payload = ex.ext_payload as {questions?: WizardSubQuestion[]} | undefined;
+    return (payload?.questions ?? []).map((q) => normalizeSubQuestion(q, withPoints));
+}
+
+/** Per-type ``ext_payload`` normalizer. Keyed by the wizard type so the
+ *  cascade lives in a dispatch table (one small function per type) rather than
+ *  one growing if-chain — each entry stays individually testable + low
+ *  complexity as more types are adopted. */
+type ExtensionPayloadNormalizer = (ex: ContentLessonExercise) => unknown;
+
+const NORMALIZE_EXTENSION_PAYLOAD: Record<
+    ExtensionWizardType,
+    ExtensionPayloadNormalizer
+> = {
+    [CATEGORIZATION_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {categories?: {name: string; items: string[]}[]}
+            | undefined;
+        const categories = (payload?.categories ?? [])
+            .map((c) => ({name: c.name.trim(), items: trimmedNonEmpty(c.items)}))
+            .filter((c) => c.name.length > 0 && c.items.length > 0);
+        return {categories};
+    },
+    [ERROR_CORRECTION_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {tokens?: string[]; error_index?: number; accept?: string[]}
+            | undefined;
+        const tokens = (payload?.tokens ?? []).map((t) => t.trim());
+        const rawIndex = payload?.error_index ?? 0;
+        const error_index = Math.min(
+            Math.max(0, Math.trunc(rawIndex)),
+            Math.max(0, tokens.length - 1),
+        );
+        return {tokens, error_index, accept: trimmedNonEmpty(payload?.accept)};
+    },
+    [READING_COMPREHENSION_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as {passage?: string} | undefined;
+        return {
+            passage: (payload?.passage ?? "").trim(),
+            questions: normalizeSubQuestions(ex, false),
+        };
+    },
+    [GRADED_QUIZ_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as {pass_threshold?: number} | undefined;
+        return {
+            pass_threshold: payload?.pass_threshold,
+            questions: normalizeSubQuestions(ex, true),
+        };
+    },
+    [DICTATION_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {audio?: string; accept?: string[]}
+            | undefined;
+        return {
+            audio: (payload?.audio ?? "").trim(),
+            accept: trimmedNonEmpty(payload?.accept),
+        };
+    },
+    [IMAGE_DESCRIPTION_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {image?: string; accept?: string[]}
+            | undefined;
+        return {
+            image: (payload?.image ?? "").trim(),
+            accept: trimmedNonEmpty(payload?.accept),
+        };
+    },
+    [SPEAK_AND_RECORD_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {sentence?: string; audio?: string}
+            | undefined;
+        const sentence = (payload?.sentence ?? "").trim();
+        const audio = (payload?.audio ?? "").trim();
+        return audio.length > 0 ? {sentence, audio} : {sentence};
+    },
+    [ORDERING_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as {items?: string[]} | undefined;
+        return {items: trimmedNonEmpty(payload?.items)};
+    },
+    [PARSONS_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {lines?: {code: string; indent: number}[]; language?: string}
+            | undefined;
+        const lines = (payload?.lines ?? [])
+            .map((line) => ({code: line.code.trim(), indent: Math.max(0, line.indent)}))
+            .filter((line) => line.code.length > 0);
+        const language = (payload?.language ?? "").trim();
+        return language.length > 0 ? {lines, language} : {lines};
+    },
+    [HOTSPOT_EXT_TYPE]: (ex) => {
+        const payload = ex.ext_payload as
+            | {src?: string; zones?: unknown[]}
+            | undefined;
+        return {src: (payload?.src ?? "").trim(), zones: payload?.zones ?? []};
+    },
+};
+
+/**
+ * Normalize a validated extension draft before it is committed: trim the
+ * prompt + payload strings, drop empty categories/items/accepts/options.
+ * ``error_correction`` tokens are POSITIONAL (``error_index`` points into
+ * them), so they are trimmed in place, never dropped. A type without a
+ * wizard normalizer keeps its payload untouched (only the prompt is trimmed).
+ */
+export function normalizeExtensionExercise(
+    ex: ContentLessonExercise,
+): ContentLessonExercise {
+    const prompt = ex.prompt.trim();
+    const normalizePayload =
+        NORMALIZE_EXTENSION_PAYLOAD[ex.type as ExtensionWizardType];
+    if (!normalizePayload) return normalizeExplanation({...ex, prompt});
+    return normalizeExplanation({
+        ...ex,
+        prompt,
+        ext_payload: normalizePayload(ex),
+    } as ContentLessonExercise);
+}

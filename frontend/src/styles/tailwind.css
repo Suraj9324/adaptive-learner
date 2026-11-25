@@ -1,0 +1,194 @@
+/*
+ * Tailwind CSS v4 entry point (Phase A — additive install).
+ *
+ * PREFLIGHT IS INTENTIONALLY NOT IMPORTED.
+ *
+ * Adaptive Learner predates Tailwind. Its global.css + per-component
+ * styles were authored against browser defaults that Tailwind's
+ * preflight reset would silently change app-wide (heading sizes, list
+ * bullets, body/fieldset margins, button font inheritance). Pulling in
+ * preflight during Phase A would alter the look of every page that
+ * touches an un-styled element. The one reset that genuinely matters
+ * everywhere — ``* { box-sizing: border-box }`` — is already declared
+ * in global.css, so utility classes and shadcn/ui components work
+ * without preflight.
+ *
+ * We therefore import ONLY the theme (design-token) and utilities
+ * layers. Re-introducing a scoped preflight is a deliberate Phase B+
+ * decision, not an accident of the default import. See
+ * docs/development/tailwind-migration.md.
+ *
+ * CASCADE-LAYER ORDER (EXP-044 Tranche 0, #1485).
+ *
+ * Two invariants hold at once, and the order below encodes both:
+ *
+ *   1. Anything UNLAYERED in global.css still wins over every Tailwind
+ *      layer. This is the Phase-A guarantee that keeps the Foundation
+ *      block (tokens / reset / focus baseline) and the Third-Party-DOM
+ *      overrides (ProseMirror, xyflow, QR overlay, highlight.js) styling
+ *      library-rendered DOM without a utility escalation. Those blocks
+ *      stay unlayered by design and are NOT affected by the layers here.
+ *
+ *   2. The ``legacy`` layer is declared BEFORE ``components`` and
+ *      ``utilities``, so once the component-debt block in global.css is
+ *      wrapped tranche-by-tranche into ``@layer legacy { ... }`` (Tranche
+ *      2), a Tailwind utility on the SAME element wins over the wrapped
+ *      legacy rule. That is what makes "migrate when touched" safe and
+ *      lets the inline crutches (#1458/#1476/#1479) fall. Later-declared
+ *      layer = stronger; ``legacy`` is intentionally early = weakest of
+ *      the three app layers.
+ *
+ * Tranche 0 only DECLARES ``legacy`` — nothing is wrapped into it yet, so
+ * an empty layer changes no rendered pixel. The declaration must precede
+ * the first layered content (the imports below) so the order is fixed
+ * before any rule lands in a layer.
+ */
+@layer theme, base, legacy, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/*
+ * Package-consumed utilities (#2587, root cause of the `min-h-4` finding).
+ *
+ * Tailwind v4 detects content automatically, but its automatic detection
+ * NEVER descends into ``node_modules`` (it honours .gitignore, and
+ * node_modules is always ignored). Our ``@astrapi69/*-react`` packages are
+ * "headless-styled": they ship NO CSS of their own and render app-styled
+ * classNames plus plain Tailwind utilities, expecting THIS project's build
+ * to emit them (docs/development/package-classname-consumers.md).
+ *
+ * Without the lines below, a utility used ONLY by a package is silently not
+ * generated, and the element renders without it. That was invisible for a
+ * long time for the worst possible reason: every OTHER package utility
+ * (``rounded-app``, ``bg-accent-hover``, ``text-accent-foreground``, ...)
+ * happened to be used somewhere in ``frontend/src`` as well, so it was
+ * emitted for an unrelated reason. The packages were styled by COINCIDENCE,
+ * not by construction - and ``min-h-4`` (used by no file under
+ * ``frontend/src``) was the single spot where the coincidence ran out.
+ *
+ * ``@source`` is scanned explicitly and overrides the gitignore exclusion,
+ * which is exactly what this needs. Keep this list in lockstep with
+ * ``PACKAGE_CONSUMER_FILES`` in ``scripts/check-dead-classnames.py`` - the
+ * gate proves the classNames have rules, these lines make the utilities
+ * exist. Pinned by ``package-source-scan.test.ts``.
+ */
+@source "../../node_modules/@astrapi69/ai-key-vault-react/dist/**/*.js";
+@source "../../node_modules/@astrapi69/pwa-update-react/dist/**/*.js";
+
+/*
+ * Theme integration (Phase A / commit C2).
+ *
+ * Tailwind v4 is configured CSS-first via @theme, not via a v3-style
+ * tailwind.config.ts (the @tailwindcss/vite plugin does not auto-load a
+ * JS config). ``@theme inline`` is the key: each token below maps a
+ * Tailwind utility onto one of our EXISTING CSS variables and is NOT
+ * re-emitted as a :root variable, so the generated utility reads e.g.
+ * ``background-color: var(--bg-primary)`` directly. Because those vars
+ * are redefined per ``[data-theme]`` in styles/themes/theme-*.css, every
+ * Tailwind utility recolors automatically when the theme switches across
+ * all 6 themes (light / dark / ocean / forest / high-contrast / sepia).
+ * Tailwind CONSUMES our token system; it does not replace it.
+ *
+ * Utility names follow Tailwind's ``{prefix}-{token}`` convention:
+ *   --color-bg-primary  -> bg-bg-primary / text-bg-primary / from-bg-primary
+ *   --color-accent      -> bg-accent / text-accent / border-accent
+ *   --color-accent-fg   -> text-accent-fg / bg-accent-fg
+ *   --radius-app        -> rounded-app
+ *   --font-sans/mono    -> font-sans / font-mono
+ */
+@theme inline {
+  /* Backgrounds */
+  --color-bg-primary: var(--bg-primary);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-elevated: var(--bg-elevated);
+
+  /* Foregrounds / text */
+  --color-fg-primary: var(--fg-primary);
+  --color-fg-secondary: var(--fg-secondary);
+  --color-fg-muted: var(--fg-muted);
+
+  /* Accent / interactive */
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+
+  /* Status */
+  --color-success: var(--success);
+  --color-error: var(--error);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+
+  /* Borders */
+  --color-border: var(--border-primary);
+  --color-border-subtle: var(--border-subtle);
+
+  /* Layout tokens */
+  --radius-app: var(--radius-md, 8px);
+
+  /*
+   * shadcn/ui semantic-token bridge (Phase B / B1).
+   *
+   * shadcn components reference semantic Tailwind utilities
+   * (bg-primary, text-primary-foreground, bg-background, bg-card,
+   * bg-popover, bg-secondary, bg-muted, text-muted-foreground,
+   * bg-accent [a hover surface], bg-destructive, border-input,
+   * ring-ring, ...). Map each onto our themed vars so every shadcn
+   * component recolors across all 6 themes by construction. ``inline``
+   * means these read the runtime var directly, so a [data-theme] switch
+   * recolors shadcn components with the rest of the page.
+   *
+   *   - primary      = brand accent (the main CTA colour)
+   *   - background/foreground/card/popover = our surface + text vars
+   *   - secondary/muted = subtle surface; muted-foreground = muted text
+   *   - destructive  = error
+   *   - input/ring   = border / brand accent
+   *   - ``--color-accent`` (brand) above is left UNCHANGED; shadcn's own
+   *     ``accent`` (a muted hover surface) therefore resolves to the
+   *     brand tint. This is the one token the migration guide flags for
+   *     a deliberate visual call (see the PR notes); ``accent-foreground``
+   *     keeps text on that hover surface legible.
+   */
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-fg);
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--fg-primary);
+  --color-card: var(--bg-surface);
+  --color-card-foreground: var(--fg-primary);
+  --color-popover: var(--bg-elevated);
+  --color-popover-foreground: var(--fg-primary);
+  --color-secondary: var(--bg-secondary);
+  --color-secondary-foreground: var(--fg-primary);
+  --color-muted: var(--bg-secondary);
+  --color-muted-foreground: var(--fg-muted);
+  --color-accent-foreground: var(--accent-fg);
+  --color-destructive: var(--error);
+  --color-destructive-foreground: var(--fg-inverse);
+  --color-input: var(--border-primary);
+  --color-ring: var(--accent);
+
+  /*
+   * No --font-sans / --font-mono mapping is needed. global.css already
+   * declares those exact variable names (Tailwind's own font namespace)
+   * unlayered, so it wins the cascade over Tailwind's layered default and
+   * the ``font-sans`` / ``font-mono`` utilities resolve to our stacks
+   * automatically. Re-declaring them here would only emit a redundant
+   * self-referential ``--font-sans: var(--font-sans)``.
+   */
+}
+
+/*
+ * Safe-area utilities (#1410).
+ *
+ * ``pb-safe`` is THE one place bottom-anchored action bars get their iOS
+ * home-indicator clearance from: ``max()`` keeps the regular ``--space-3``
+ * token padding wherever ``env(safe-area-inset-bottom)`` is 0 (desktop,
+ * Android, iOS with no inset) and grows to the inset on notched iPhones —
+ * landscape (~21px) AND portrait (~34px) — so the bar's controls are never
+ * half-buried under the system home-indicator band. Prefer this utility
+ * over ad-hoc ``pb-[max(...,env(...))]`` arbitrary values in new code.
+ */
+@utility pb-safe {
+  padding-bottom: max(var(--space-3), env(safe-area-inset-bottom, 0px));
+}

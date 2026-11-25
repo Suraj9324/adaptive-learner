@@ -1,0 +1,49 @@
+@import "./legacy/00-head.css";
+@import "./legacy/01-base.css";
+@import "./legacy/03-landing.css";
+@import "./legacy/04-onboarding.css";
+@import "./legacy/05-assessment.css";
+@import "./legacy/06-dashboard.css";
+@import "./legacy/07-session.css";
+@import "./legacy/08-qr-scanner.css";
+@import "./legacy/09-rating.css";
+@import "./legacy/10-settings.css";
+@import "./legacy/11-progress.css";
+@import "./legacy/12-navigation.css";
+@import "./legacy/13-lesson-header.css";
+@import "./legacy/14-celebration.css";
+@import "./legacy/15-milestone.css";
+@import "./legacy/16-feedback-intensity.css";
+@import "./legacy/17-curriculum.css";
+@import "./legacy/18-recent-sessions.css";
+@import "./legacy/20-diff-highlight.css";
+@import "./legacy/21-answer-animations.css";
+@import "./legacy/23-mobile-polish.css";
+@import "./legacy/24-lesson-mode-nav.css";
+@import "./legacy/25-export-section.css";
+@import "./legacy/27-multi-cycle-summary.css";
+@import "./legacy/28-model-picker.css";
+@import "./legacy/29-backup-compare.css";
+@import "./legacy/30-editor.css";
+@import "./legacy/31-gamification.css";
+@import "./legacy/32-badges.css";
+@import "./legacy/33-streaks.css";
+@import "./legacy/34-anki.css";
+@import "./legacy/36-read-aloud.css";
+@import "./legacy/37-pronunciation.css";
+@import "./legacy/38-notebooklm.css";
+@import "./legacy/39-motion-catchall.css";
+@import "./legacy/40-api-key-validation.css";
+@import "./legacy/41-analysis-loading.css";
+@import "./legacy/42-learning-path.css";
+@import "./legacy/43-mascot.css";
+
+/* Mobile: reserve scroll space at the bottom for the fixed BottomTabBar so
+   page content is never hidden behind it (#2786 restore of the #1512-removed
+   reservation; layout spacing, not a themeable surface). The bar is
+   md:hidden, so the padding only applies on the same small viewports. */
+@media (max-width: 767px) {
+  body.has-bottom-nav #root {
+    padding-bottom: 4rem;
+  }
+}

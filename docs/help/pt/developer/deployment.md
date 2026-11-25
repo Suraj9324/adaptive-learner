@@ -1,0 +1,177 @@
+<!-- Translation: AI-generated, pending native review -->
+
+# Implementação
+
+Quatro modos de implementação são incluídos:
+
+| Modo | Onde | Backend | Chamadas de IA | Fonte de chave |
+|---|---|---|---|---|
+| Desenvolvimento local | `make dev` | FastAPI em :18001 | Lado do servidor | env / secrets.yaml / BD |
+| GitHub Pages | `astrapi69.github.io/adaptive-learner/` | Nenhum (Dexie) | Direto do navegador | BD (IndexedDB) |
+| Launcher de desktop | Binário PyInstaller (baseado em Docker) | FastAPI num contentor Docker | Lado do servidor | `.env` (gerado automaticamente) / Interface de Definições |
+| Docker | Docker Compose self-host | FastAPI em contentor | Lado do servidor | env / Interface de Definições |
+
+## Desenvolvimento local
+
+```bash
+make dev
+```
+
+Inicia o backend (FastAPI + uvicorn `--reload`) na porta 18001 e o
+frontend (servidor de desenvolvimento Vite) na porta 15174 em
+paralelo. Prima Ctrl-C uma vez para parar ambos.
+
+O proxy Vite do frontend redireciona `/api/*` para o backend, por
+isso o frontend usa sempre `/api` como URL base - sem necessidade
+de configuração CORS para desenvolvimento local.
+
+Para modo em segundo plano:
+
+```bash
+make dev-bg     # desanexado
+make dev-down   # parar
+```
+
+## GitHub Pages (apenas Dexie)
+
+`.github/workflows/deploy-gh-pages.yml` compila o frontend com:
+
+- `VITE_BASE="/adaptive-learner/"` - prefixo de cada URL de
+  recurso para o caminho de Pages por repositório.
+- `VITE_STORAGE_MODE="dexie"` - fixa o DexieStorage como modo
+  padrão.
+- `VITE_API_BASE=""` - sem backend para apontar.
+
+O workflow corre em cada push para `main` e em despacho manual.
+Após a compilação, copia `dist/index.html` para `dist/404.html`
+para o fallback do roteador SPA, depois usa
+`actions/upload-pages-artifact@v5` + `actions/deploy-pages@v5`
+para publicar.
+
+O GitHub Pages não deixa um site definir os seus próprios cabeçalhos
+HTTP, por isso a compilação de Pages traz a sua própria política:
+`frontend/index.html` define por `<meta>` uma Content-Security-Policy
+que limita as imagens e os media a poucas fontes, por exemplo a
+própria origem e `https://raw.githubusercontent.com` (o valor exato
+está no ficheiro), além da política de referrer `no-referrer`. O
+modo API envia os mesmos `img-src`/`media-src` como cabeçalhos
+(`backend/app/frontend_static.py`). Se uma funcionalidade carregar
+imagens ou media de um host que a política não indica, o navegador
+bloqueia-o, tanto na compilação de Pages como no modo API. Antes do
+upload, `scripts/check_external_hosts.py` procura recursos de
+terceiros no site de documentação compilado.
+
+O URL do site é `https://astrapi69.github.io/adaptive-learner/`.
+Os utilizadores com domínio personalizado adicionam um ficheiro
+`CNAME` em `frontend/public/` com o nome de domínio; o
+encaminhamento de Pages com reconhecimento de domínio do GitHub
+trata do resto.
+
+## Docker Compose (pilha completa)
+
+```bash
+make prod        # docker compose up -d
+make prod-down   # docker compose down
+```
+
+`docker-compose.prod.yml` inclui **um único serviço, `app`**
+(um só contentor desde #2058 - não há nginx nem contentor de
+frontend separado):
+
+- **FastAPI (imagem Python 3.12)** serve TANTO os statics do
+  frontend compilado COMO `/api/*`, na porta interna
+  `${ADAPTIVE_LEARNER_BACKEND_PORT:-8000}`.
+- Porta publicada no host:
+  `${ADAPTIVE_LEARNER_BIND_ADDRESS:-127.0.0.1}:${ADAPTIVE_LEARNER_PUBLIC_PORT:-8501}` -
+  loopback por omissão.
+- **Um volume com nome `adaptive-learner-data`** em `/app/data`
+  que sobrevive a reconstruções do contentor.
+
+`install.sh` e `install.ps1` são os instaladores curl-pipe para
+utilizadores finais - descarregam um arquivo de lançamento com
+etiqueta, configuram `ADAPTIVE_LEARNER_SECRET_KEY` e executam
+`docker compose up`.
+
+Os instaladores são regenerados no momento do lançamento a partir
+de `install.sh.template` / `install.ps1.template` mais a versão
+do `backend/pyproject.toml` (ver `scripts/sync_versions.py`). Não
+edite os ficheiros gerados diretamente.
+
+## Configuração para produção
+
+Quatro coisas importam para produção:
+
+1. **`ADAPTIVE_LEARNER_SECRET_KEY`**: deve ser uma chave Fernet
+   estável. Gere uma vez, guarde-a num local seguro (HashiCorp
+   Vault, AWS Secrets Manager, um `.env` selado). Perdê-la
+   significa que todas as chaves de API encriptadas ficam
+   ilegíveis. A aplicação falha imediatamente no arranque se não
+   estiver definida (sem padrão silencioso).
+2. **`ADAPTIVE_LEARNER_CORS_ORIGINS`**: lista separada por vírgulas
+   de origens permitidas. O padrão é permissivo; restrinja para
+   produção.
+3. **`ADAPTIVE_LEARNER_DEBUG`**: deixe indefinido / false em
+   produção. O modo de depuração expõe stack traces nas respostas
+   de erro.
+4. **`ADAPTIVE_LEARNER_BIND_ADDRESS`**: por omissão `127.0.0.1`,
+   pelo que a porta publicada só é acessível a partir do próprio
+   host. A aplicação não tem autenticação - só vincule `0.0.0.0`
+   deliberadamente, e apenas numa rede de confiança ou atrás da
+   sua própria camada de auth (reverse proxy com basic auth, VPN).
+
+Para contentores, as variáveis de ambiente são o canal de injeção
+idiomático. A sobreposição `~/.config/adaptive_learner/secrets.yaml`
+é para uso em desktop / launcher; também pode montá-la num
+contentor se preferir um ficheiro de configuração em vez de várias
+variáveis de ambiente.
+
+## Launcher de desktop
+
+`launcher/` é um launcher de desktop de binário único baseado em
+PyInstaller. Não é um servidor embutido: é um invólucro fino
+sobre o motor publicado `docker-app-launcher`, configurado por
+`launcher/launcher.json`. A configuração distribuída corre em
+**modo imagem** (`deployment_mode: "image"`): o launcher puxa a
+imagem de lançamento já compilada e verificada
+(`ghcr.io/astrapi69/adaptive-learner:<versão>`, fixada à versão
+da app embutida) e inicia-a como contentor Docker (por omissão
+`http://localhost:8501`), com o volume de dados
+`adaptive-learner-data` montado em `/app/data`; depois abre o
+navegador padrão do utilizador. Nada é compilado, descarregado
+como código-fonte ou extraído localmente.
+
+A cadeia de configuração completa de três camadas (YAML do projeto
+< sobreposição do utilizador < variáveis de ambiente) está
+documentada em `docs/configuration.md`.
+
+## Launcher (desktop multiplataforma)
+
+`launcher/` é um instalador de binário único baseado em
+PyInstaller. O GitHub Actions compila três binários por lançamento:
+
+- `launcher-linux.yml` → `adaptive-learner-launcher-linux`
+- `launcher-macos.yml` → `adaptive-learner-launcher-macos`
+- `launcher-windows.yml` → `adaptive-learner-launcher.exe`
+
+Cada launcher embute a versão (`__version__` literal +
+`_build_info.py` escrito pelo ficheiro de especificação no momento
+da compilação). O motor também executa uma verificação de
+atualizações em segundo plano contra a API do GitHub Releases
+(ativada com `update_check_enabled` em `launcher.json`); falha em
+silêncio perante qualquer erro para nunca bloquear o launcher.
+
+O launcher não é intencionalmente o canal de distribuição principal
+(o Docker é). Existe para utilizadores que querem uma experiência
+de "duplo clique para instalar".
+
+## Arquitetura CI/CD
+
+Cada workflow corre em isolamento; sem estado partilhado entre eles:
+
+| Workflow | Acionador | O que faz |
+|---|---|---|
+| `ci.yml` | push, pull_request | Testes + lint + tsc |
+| `coverage.yml` | agendamento diário, despacho | Cobertura HTML + xml (backend, frontend, por plugin) |
+| `release-gate.yml` | push de etiqueta | Verificação de deriva de pins de versão |
+| `deploy-gh-pages.yml` | push para main, despacho | Compilação + implementação GH Pages |
+| `launcher-{linux,macos,windows}.yml` | release: created | Compilar + anexar binário do launcher |

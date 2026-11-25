@@ -1,0 +1,527 @@
+/**
+ * Import detail page tests (Phase 12E).
+ */
+
+import "fake-indexeddb/auto";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
+
+import ImportDetail from "./ImportDetail";
+import { DerivedFeatureProvider } from "../../features/testFeatureProvider";
+import { I18nProvider } from "../../hooks/ui/useI18n";
+import { _resetDbForTests } from "../../storage/dexie/db";
+import { dexieStorage } from "../../storage/dexie-storage";
+import { _resetStorageCacheForTests } from "../../storage";
+import { _resetApiKeyStatusCacheForTests } from "../../hooks/settings/useApiKeyStatus";
+import { aiComplete } from "../../storage/ai/ai-providers";
+
+vi.mock("../../storage/ai/ai-providers", () => ({
+  aiComplete: vi.fn(),
+  resolveModel: vi.fn(() => "test-model"),
+}));
+
+const mockAiComplete = vi.mocked(aiComplete);
+
+vi.mock("../../utils/notify", () => ({
+  notify: {
+    error: vi.fn(),
+    success: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+  },
+}));
+
+beforeEach(async () => {
+  await _resetDbForTests();
+  _resetStorageCacheForTests();
+  _resetApiKeyStatusCacheForTests();
+  mockAiComplete.mockReset();
+  localStorage.clear();
+  localStorage.setItem("adaptive-learner.storage_mode", "dexie");
+  // Pin the app/UI language to German for the whole file. These tests assume
+  // a German app default (source = app language). #1457 added a
+  // navigator.language fallback for the no-saved-value path; happy-dom's
+  // default "en-US" would otherwise flip the mount default to English (and
+  // pollute the module-level i18n cache across tests).
+  vi.spyOn(navigator, "language", "get").mockReturnValue("de-DE");
+  const { IDBFactory } = await import("fake-indexeddb");
+  (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+async function setup(analyzed = false) {
+  const user = await dexieStorage.users.create({ name: "A" });
+  localStorage.setItem("adaptive-learner.user_id", user.id);
+  const conv = await dexieStorage.imports.create(user.id, {
+    source: "manual",
+    title: "Test conversation",
+    messages: [
+      { role: "user", content: "Question one" },
+      { role: "assistant", content: "Answer one" },
+    ],
+  });
+  if (analyzed) {
+    await dexieStorage.imports.saveAnalysis(conv.id, {
+      analysis_result: {
+        topic: "Test Topic",
+        user_level: "beginner",
+        summary: "A short summary.",
+        strengths: ["Clear question"],
+        weaknesses: ["Lacks detail"],
+        recommended_method: "inductive",
+        recommended_focus: "Practice more examples.",
+        suggested_curriculum: [{ title: "Lesson 1", description: "Intro", priority: 1 }],
+      },
+    });
+  }
+  return conv;
+}
+
+/**
+ * Seed a user WITH an active-provider API key so the Analyze
+ * button enables and ``runAnalysis`` proceeds past the key gate.
+ * Returns the conversation (not yet analyzed).
+ */
+async function setupWithKey() {
+  const user = await dexieStorage.users.create({ name: "A" });
+  localStorage.setItem("adaptive-learner.user_id", user.id);
+  await dexieStorage.settings.setApiKey(user.id, {
+    provider: "anthropic",
+    key: "test-key",
+  });
+  return dexieStorage.imports.create(user.id, {
+    source: "manual",
+    title: "Test conversation",
+    messages: [
+      { role: "user", content: "Question one" },
+      { role: "assistant", content: "Answer one" },
+    ],
+  });
+}
+
+function renderDetail(conversationId: string) {
+  return render(
+    <I18nProvider>
+      <DerivedFeatureProvider>
+        <MemoryRouter initialEntries={[`/import/${conversationId}`]}>
+          <Routes>
+            <Route path="/import/:conversationId" element={<ImportDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </DerivedFeatureProvider>
+    </I18nProvider>,
+  );
+}
+
+describe("ImportDetail page", () => {
+  it("renders the conversation transcript (collapsed until toggled, #240)", async () => {
+    const conv = await setup();
+    renderDetail(conv.id);
+    await waitFor(() => {
+      expect(screen.getByTestId("conversation-transcript")).toBeTruthy();
+    });
+    // #240 — the raw transcript is collapsed by default; messages
+    // appear only after the toggle is opened.
+    expect(screen.queryByTestId("msg-0")).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByTestId("msg-0").textContent).toContain("Question one");
+    expect(screen.getByTestId("msg-1").textContent).toContain("Answer one");
+  });
+
+  it("renders the analyze button when no analysis yet", async () => {
+    const conv = await setup(false);
+    renderDetail(conv.id);
+    await waitFor(() => {
+      expect(screen.getByTestId("analyze-button")).toBeTruthy();
+    });
+    // Analysis results section absent.
+    expect(screen.queryByTestId("analysis-results")).toBeNull();
+  });
+
+  it("shows language pickers; source = app language, target auto-detected", async () => {
+    // C2 — languages are set at import time. Source defaults to the
+    // app language; target is auto-detected from the (French) content.
+    const user = await dexieStorage.users.create({ name: "A" });
+    localStorage.setItem("adaptive-learner.user_id", user.id);
+    const conv = await dexieStorage.imports.create(user.id, {
+      source: "manual",
+      title: "Französisch lernen",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Wie sage ich Hallo auf Französisch? Bonjour, merci, " +
+            "être und avoir im passé composé.",
+        },
+        { role: "assistant", content: "Bonjour heißt Hallo, merci danke." },
+      ],
+    });
+    renderDetail(conv.id);
+    await waitFor(() => {
+      expect(screen.getByTestId("import-language-pickers")).toBeTruthy();
+    });
+    // shadcn/Radix Select: the chosen value renders as the
+    // trigger's text (no native .value). Source shows a real
+    // language (not the placeholder); target shows detected French.
+    expect(screen.getByTestId("import-source-language")).not.toHaveTextContent(
+      /Select a language/i,
+    );
+    expect(screen.getByTestId("import-target-language")).toHaveTextContent(/French/);
+  });
+
+  it("persists a language change onto the import record", async () => {
+    const user = await dexieStorage.users.create({ name: "A" });
+    localStorage.setItem("adaptive-learner.user_id", user.id);
+    const conv = await dexieStorage.imports.create(user.id, {
+      source: "manual",
+      title: "Chat",
+      messages: [
+        { role: "user", content: "Bonjour merci passé être avoir" },
+        { role: "assistant", content: "oui" },
+      ],
+    });
+    const ue = userEvent.setup();
+    renderDetail(conv.id);
+    const target = await screen.findByTestId("import-target-language");
+    await ue.click(target);
+    await ue.click(await screen.findByRole("option", { name: "Spanish (es)" }));
+    await waitFor(async () => {
+      const reread = await dexieStorage.imports.get(conv.id);
+      expect(reread.target_language).toBe("es");
+    });
+  });
+
+  it("renders analysis results when conversation is analyzed", async () => {
+    const conv = await setup(true);
+    renderDetail(conv.id);
+    await waitFor(() => {
+      expect(screen.getByTestId("analysis-results")).toBeTruthy();
+    });
+    // #234 — the topic now also renders in the page <h1>; scope to the
+    // analysis-results region so this asserts the Topic card specifically.
+    const results = screen.getByTestId("analysis-results");
+    expect(within(results).getByText("Test Topic")).toBeTruthy();
+    expect(screen.getByText("Clear question")).toBeTruthy();
+    expect(screen.getByText("Lacks detail")).toBeTruthy();
+    expect(screen.getByTestId("create-curriculum-button")).toBeTruthy();
+    expect(screen.getByTestId("start-session-button")).toBeTruthy();
+  });
+
+  it("shows error state for unknown conversation id", async () => {
+    renderDetail("bogus-id");
+    await waitFor(() => {
+      expect(screen.getByTestId("import-detail-error")).toBeTruthy();
+    });
+  });
+
+  it("shows fallback notice when analysis used fallback", async () => {
+    const user = await dexieStorage.users.create({ name: "A" });
+    localStorage.setItem("adaptive-learner.user_id", user.id);
+    const conv = await dexieStorage.imports.create(user.id, {
+      source: "manual",
+      title: "Fallback",
+      messages: [{ role: "user", content: "X" }],
+    });
+    await dexieStorage.imports.saveAnalysis(conv.id, {
+      analysis_result: {
+        topic: "Fallback",
+        summary: "Could not parse.",
+        fallback_used: true,
+      },
+    });
+    renderDetail(conv.id);
+    await waitFor(() => {
+      expect(screen.getByTestId("analysis-fallback-notice")).toBeTruthy();
+    });
+  });
+
+  it("shows the loading indicator + spinner while analysis runs", async () => {
+    const conv = await setupWithKey();
+    // aiComplete never resolves within the test window — keeps
+    // the loading state on screen for assertions.
+    mockAiComplete.mockReturnValue(new Promise<string>(() => {}));
+    renderDetail(conv.id);
+    const button = await waitFor(() => {
+      const b = screen.getByTestId("analyze-button") as HTMLButtonElement;
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(screen.getByTestId("analysis-loading")).toBeTruthy();
+    });
+    expect(screen.getByTestId("analyze-spinner")).toBeTruthy();
+    expect(screen.getByTestId("cancel-analysis-button")).toBeTruthy();
+    // "1/3" is locale-independent (both EN "Step 1/3" and DE
+    // "Schritt 1/3"); the I18nProvider default locale varies.
+    expect(screen.getByTestId("analysis-phase").textContent).toContain("1/3");
+    expect((screen.getByTestId("analyze-button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("cancel aborts the analysis and returns to the pre-analysis state", async () => {
+    const conv = await setupWithKey();
+    // Reject with an AbortError when the signal fires. Mirror real
+    // fetch: if the signal is ALREADY aborted by the time the call
+    // is made (the cancel click can land before runAnalysis reaches
+    // aiComplete), reject immediately — an "abort" listener added
+    // after the fact would never fire and the promise would hang.
+    mockAiComplete.mockImplementation(
+      (opts) =>
+        new Promise<string>((_resolve, reject) => {
+          const fail = () => reject(new DOMException("aborted", "AbortError"));
+          if (opts.signal?.aborted) {
+            fail();
+            return;
+          }
+          opts.signal?.addEventListener("abort", fail);
+        }),
+    );
+    renderDetail(conv.id);
+    const button = await waitFor(() => {
+      const b = screen.getByTestId("analyze-button") as HTMLButtonElement;
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+    fireEvent.click(button);
+    const cancel = await waitFor(() => screen.getByTestId("cancel-analysis-button"));
+    fireEvent.click(cancel);
+    // Loading panel disappears, no results, no inline error,
+    // button is enabled again. A generous timeout keeps this
+    // deterministic under heavy parallel-suite CPU load (the
+    // abort -> reject -> re-render chain is fast but can exceed
+    // the 1s default when the machine is saturated).
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId("analysis-loading")).toBeNull();
+      },
+      { timeout: 5000 },
+    );
+    expect(screen.queryByTestId("analysis-results")).toBeNull();
+    expect(screen.queryByTestId("analysis-error-inline")).toBeNull();
+    expect((screen.getByTestId("analyze-button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("does not dial the provider when unmounted mid-flight (#1739)", async () => {
+    const conv = await setupWithKey();
+    mockAiComplete.mockResolvedValue(JSON.stringify({ topic: "T", summary: "S" }));
+    const view = renderDetail(conv.id);
+    const button = await waitFor(() => {
+      const b = screen.getByTestId("analyze-button") as HTMLButtonElement;
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+    // Defer the settings read so the unmount lands while runAnalysis
+    // is still suspended on the storage await — the exact window in
+    // which the release-gate unhandled rejection occurred. Installed
+    // only now: the button-enable path above needs the real read.
+    let releaseSettings: (() => void) | null = null;
+    const realGet = dexieStorage.settings.get.bind(dexieStorage.settings);
+    const settingsSpy = vi
+      .spyOn(dexieStorage.settings, "get")
+      .mockImplementation(async (userId: string) => {
+        await new Promise<void>((resolve) => {
+          releaseSettings = resolve;
+        });
+        return realGet(userId);
+      });
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(releaseSettings).not.toBeNull();
+    });
+    view.unmount();
+    releaseSettings!();
+    // Give the suspended continuation room to (wrongly) proceed.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(mockAiComplete).not.toHaveBeenCalled();
+    settingsSpy.mockRestore();
+  });
+
+  it("shows a friendly inline error when the analysis throws", async () => {
+    const conv = await setupWithKey();
+    mockAiComplete.mockResolvedValue(JSON.stringify({ topic: "T", summary: "S" }));
+    // Force the persist step to throw so runAnalysis hits the
+    // inline-error branch (provider parse failures collapse to a
+    // fallback instead and are covered separately).
+    const saveSpy = vi
+      .spyOn(dexieStorage.imports, "saveAnalysis")
+      .mockRejectedValue(new Error("disk full"));
+    renderDetail(conv.id);
+    const button = await waitFor(() => {
+      const b = screen.getByTestId("analyze-button") as HTMLButtonElement;
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(screen.getByTestId("analysis-error-inline")).toBeTruthy();
+    });
+    // Locale-agnostic: a non-empty friendly message is present
+    // (exact wording depends on the I18nProvider default locale).
+    expect((screen.getByTestId("analysis-error-inline").textContent ?? "").length).toBeGreaterThan(
+      0,
+    );
+    // Button re-enabled, loading panel gone.
+    expect(screen.queryByTestId("analysis-loading")).toBeNull();
+    expect((screen.getByTestId("analyze-button") as HTMLButtonElement).disabled).toBe(false);
+    saveSpy.mockRestore();
+  });
+});
+
+/**
+ * Short-Circuit 1 (UI): startOrResumeSession() — when an active session
+ * exists the "Continue session" click only navigates (no start()); with no
+ * active session it calls start() WITH the imported_conversation_id FK.
+ * Pins the UI half of the imported-session resume path.
+ */
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="loc">{loc.pathname + loc.search}</div>;
+}
+
+async function seedAnalysedConvWithProject() {
+  const user = await dexieStorage.users.create({ name: "A", language: "en" });
+  localStorage.setItem("adaptive-learner.user_id", user.id);
+  await dexieStorage.settings.setApiKey(user.id, { provider: "anthropic", key: "k" });
+  const project = await dexieStorage.users.projects.create(user.id, {
+    topic: "T",
+    goal: "G",
+    timeframe: "1w",
+    daily_minutes: 10,
+  });
+  localStorage.setItem("adaptive-learner.project_id", project.id);
+  const conv = await dexieStorage.imports.create(user.id, {
+    source: "manual",
+    title: "Test conversation",
+    messages: [
+      { role: "user", content: "Question one" },
+      { role: "assistant", content: "Answer one" },
+    ],
+  });
+  await dexieStorage.imports.saveAnalysis(conv.id, {
+    analysis_result: {
+      topic: "Test Topic",
+      user_level: "beginner",
+      summary: "A short summary.",
+      strengths: ["Clear question"],
+      weaknesses: ["Lacks detail"],
+      recommended_method: "inductive",
+      recommended_focus: "Practice more.",
+      suggested_curriculum: [{ title: "Lesson 1", description: "Intro", priority: 1 }],
+    },
+  });
+  return { userId: user.id, projectId: project.id, conv };
+}
+
+function renderDetailWithSessionRoute(conversationId: string) {
+  return render(
+    <I18nProvider>
+      <DerivedFeatureProvider>
+        <MemoryRouter initialEntries={[`/import/${conversationId}`]}>
+          <Routes>
+            <Route path="/import/:conversationId" element={<ImportDetail />} />
+            <Route path="/session" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </DerivedFeatureProvider>
+    </I18nProvider>,
+  );
+}
+
+describe("ImportDetail: Short-Circuit 1 (startOrResumeSession)", () => {
+  it("active session exists: click navigates to ?session=<id>, start() NOT called", async () => {
+    const { projectId, conv } = await seedAnalysedConvWithProject();
+    // Pre-create an ACTIVE session linked to this conversation.
+    const active = await dexieStorage.session.start({
+      project_id: projectId,
+      lang: "en",
+      imported_conversation_id: conv.id,
+    });
+    const startSpy = vi.spyOn(dexieStorage.session, "start");
+
+    renderDetailWithSessionRoute(conv.id);
+
+    const btn = await screen.findByTestId("continue-session-button");
+    await userEvent.click(btn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("loc").textContent).toBe(
+        `/session?session=${active.session.id}`,
+      );
+    });
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it("no active session: click calls start() with imported_conversation_id", async () => {
+    const { conv } = await seedAnalysedConvWithProject();
+    const startSpy = vi.spyOn(dexieStorage.session, "start");
+
+    renderDetailWithSessionRoute(conv.id);
+
+    const btn = await screen.findByTestId("start-session-button");
+    await userEvent.click(btn);
+
+    await waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+    expect(startSpy.mock.calls[0][0]).toMatchObject({
+      imported_conversation_id: conv.id,
+    });
+  });
+});
+
+function renderDetailWithProgressRoute(conversationId: string) {
+  return render(
+    <I18nProvider>
+      <DerivedFeatureProvider>
+        <MemoryRouter initialEntries={[`/import/${conversationId}`]}>
+          <Routes>
+            <Route path="/import/:conversationId" element={<ImportDetail />} />
+            <Route path="/progress" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </DerivedFeatureProvider>
+    </I18nProvider>,
+  );
+}
+
+describe("ImportDetail: curriculum navigation (#3659)", () => {
+  it("creating a curriculum opens it on the paths tab", async () => {
+    const conv = await setup(true);
+    const createSpy = vi.spyOn(dexieStorage.curricula, "create");
+
+    renderDetailWithProgressRoute(conv.id);
+    await userEvent.click(await screen.findByTestId("create-curriculum-button"));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+    const created = await createSpy.mock.results[0].value;
+    await waitFor(() => {
+      expect(screen.getByTestId("loc").textContent).toBe(
+        `/progress?tab=paths&curriculum=${created.id}`,
+      );
+    });
+  });
+
+  it("an existing curriculum opens on the paths tab without a second create", async () => {
+    const conv = await setup(true);
+    const userId = localStorage.getItem("adaptive-learner.user_id") as string;
+    const curriculum = await dexieStorage.curricula.create(userId, {
+      title: "Linked",
+      imported_conversation_id: conv.id,
+    });
+    const createSpy = vi.spyOn(dexieStorage.curricula, "create");
+
+    renderDetailWithProgressRoute(conv.id);
+    await userEvent.click(await screen.findByTestId("goto-curriculum-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("loc").textContent).toBe(
+        `/progress?tab=paths&curriculum=${curriculum.id}`,
+      );
+    });
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+});

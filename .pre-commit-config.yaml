@@ -1,0 +1,149 @@
+# Pre-commit hooks. Installed by contributors with:
+#
+#     cd backend && poetry run pre-commit install
+#
+# Run manually on every tracked file:
+#
+#     poetry run pre-commit run --all-files
+#
+# Skeleton state (Phase 1A): only the formatter / linter hooks plus
+# the plugin-lockfile-pairing hook stay. The Bibliogon-era custom
+# hooks (roadmap archival reminder, help-meta completeness, notify-
+# error coverage, theme-token completeness, module-state audit) are
+# gone with their scripts; re-introduce alongside the artifacts they
+# guard once the new domain has them.
+
+# #3800 - the vendored Mermaid release the docs site serves
+# (docs/help/assets/javascripts/mermaid-<version>.min.js, ~3.6 MB, minified
+# third-party code) is excluded from every hook: whitespace and end-of-file
+# fixers would rewrite it, and scripts/verify_mermaid_blocks.mjs pins it by
+# hash to the npm release.
+exclude: ^docs/help/assets/javascripts/mermaid-[0-9.]+\.min\.js(\.LICENSE\.txt)?$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+        # The cross-language parity goldens are asserted BYTE-FOR-BYTE
+        # against ``buildLearningContext`` output, which has no trailing
+        # newline. Appending one here would break the parity test, so this
+        # hook must not touch them (#797 fixtures).
+        exclude: ^tests/fixtures/learning-context-parity/.*\.txt$
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        # mkdocs.yml uses pymdownx Python-tag constructors
+        # (``!!python/name:material.extensions.emoji.twemoji``) that
+        # PyYAML's safe_load cannot resolve. mkdocs's own loader
+        # handles them; check-yaml is a syntax-only gate, so the
+        # exclude is the right scope-narrowing fix rather than
+        # weakening every YAML file with ``--unsafe``.
+        exclude: ^mkdocs\.yml$
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+        # docs/review/ holds deliberately large, generated review artifacts
+        # (e.g. the combined i18n export 100-all.md, ~1.4 MB). They are text,
+        # reviewed once, and exempt from the accidental-large-blob guard. CI's
+        # file-size-check only scans source (py/ts/js), so .md is unaffected there.
+        exclude: ^docs/review/.*\.md$
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.6
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^backend/app/
+      - id: ruff-format
+        files: ^backend/app/
+      # #3658: the plugins carry no ruff config of their own, so from the
+      # repo root ruff would fall back to its defaults (line length 88).
+      # --config points them at the backend's, which CI applies by running
+      # from backend/; isort's known-first-party there keeps both import
+      # orders equal.
+      - id: ruff-check
+        name: ruff check (plugins)
+        args: [--fix, --config=backend/pyproject.toml]
+        files: ^plugins/
+      - id: ruff-format
+        name: ruff format (plugins)
+        args: [--config=backend/pyproject.toml]
+        files: ^plugins/
+
+  - repo: local
+    hooks:
+      # ESLint (#222). Runs the whole frontend/src from the frontend dir
+      # (flat config resolves from cwd, not per-file). No --max-warnings
+      # here so the existing warning backlog doesn't block commits — it
+      # fails only on the blocking ERROR rules (rules-of-hooks, jsx-key,
+      # parse errors). The warning ratchet ceiling is enforced in CI.
+      - id: eslint
+        name: ESLint (frontend)
+        entry: bash -c 'cd frontend && npx eslint src/'
+        language: system
+        files: ^frontend/src/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # #3657: checks the lock against the pyproject (poetry check --lock)
+      # instead of the staging, so it also checks in CI (--all-files, nothing
+      # staged). Its own environment brings the poetry that wrote the locks.
+      - id: plugin-lock-paired-with-pyproject
+        name: each plugin poetry.lock matches its pyproject.toml
+        entry: python scripts/check_plugin_lock_paired.py
+        language: python
+        additional_dependencies: ["poetry==2.4.1"]
+        files: ^plugins/adaptive-learner-plugin-[^/]+/(pyproject\.toml|poetry\.lock)$
+        pass_filenames: true
+        require_serial: true
+        stages: [pre-commit]
+
+      # Issue #47 — keep the README CONTENT-STATS block in lock-step
+      # with the content repo. Fires only when README.md is staged;
+      # skips (exit 0) when the content repo isn't checked out locally.
+      # The authoritative gate is the CI job (fresh content checkout).
+      - id: validate-bundled-content
+        name: Validate content repo stats in README
+        entry: python scripts/validate_bundled_content.py --write-readme
+        language: python
+        additional_dependencies: ["pyyaml>=6"]
+        pass_filenames: false
+        files: ^README\.md$
+        stages: [pre-commit]
+
+      - id: i18n-script-sanity
+        name: i18n script-sanity lint (real umlauts, native scripts, #1755)
+        entry: python scripts/verify_i18n_scripts.py
+        language: python
+        additional_dependencies: ["pyyaml>=6"]
+        pass_filenames: false
+        files: ^backend/config/(i18n/(de|el|hi)|help/[a-z]+\.de)\.yaml$
+        stages: [pre-commit]
+
+      - id: docs-hygiene
+        name: docs hygiene (umlaut-substitute ratchet + exploration-index orphans)
+        # The umlaut detector is manuscript-tools' whole-word ascii-umlauts rule
+        # (#2311), a FOREIGN-TOOL ORACLE - so NO --auto-lower here: a fall could
+        # be a real reduction OR the list shrinking under a version bump, and the
+        # count alone cannot tell (gate contract point 5). A rise fails; a genuine
+        # reduction is banked deliberately via `make verify-docs-hygiene-raise`.
+        # The version is pinned exactly so the number is anchored (condition 1).
+        entry: python scripts/verify_docs_hygiene.py
+        language: python
+        additional_dependencies: ["manuscript-tools==0.11.0"]
+        pass_filenames: false
+        files: ^(docs/.*\.md|docs/\.docs-hygiene-baseline\.json|scripts/verify_docs_hygiene\.py)$
+        stages: [pre-commit]
+
+      - id: doc-refs
+        name: doc references exist (make targets, repo paths, constants)
+        # --auto-lower banks a fall (an error counter, never a budget); a rise
+        # always fails. Same shape as docs-hygiene: the write makes pre-commit
+        # re-run so the lowered baseline rides this commit (#2254).
+        entry: python scripts/verify_doc_refs.py --auto-lower
+        language: python
+        pass_filenames: false
+        files: ^(docs/.*\.md|\.claude/rules/.*\.md|CLAUDE\.md|docs/\.doc-refs-baseline\.json|scripts/verify_doc_refs\.py|Makefile)$
+        stages: [pre-commit]

@@ -1,0 +1,136 @@
+# Yedekleme ve geri yükleme
+
+Adaptive Learner, tüm öğrenme durumunu tek bir dosyaya yedekleyebilir
+ve başka bir cihazda, yeni bir kurulumda ya da bir tarayıcı
+değişikliğinden sonra geri yükleyebilir. Her şeyi **Ayarlar >
+Veri** altında bulursun.
+
+<!-- TODO: Ekran görüntüsü - Ayarlar > Veri, "Yedek oluştur" ve "Geri yükle" düğmeleriyle -->
+
+---
+
+## Yedekte ne var
+
+Bir yedek, **eksiksiz bir snapshot'tır**: tüm veri tabloları
+(öğrenme projeleri, oturumlar, ders ilerlemesi, öğe düzeyinde
+hatalar, XP/Streak/Badge ile gamification, görevler, Anki kartları,
+notlar ve daha fazlası) **artı indirdiğin İçerik Setlerin**.
+
+**Bunlar da dahil:** bağlı içerik repository'leri, kullanılan
+davetler ve Learning Repository'nin açık olup olmadığı.
+Tarayıcı modunda yapay zekâ içerik denetimlerinin sonuçları da yedeğe
+girer, böylece "Yapay zekâ denetimli" rozeti korunur.
+
+**Dahil olmayanlar** arasında örneğin şunlar var:
+
+- özel bir repository'nin erişim token'ı (geri yüklemeden sonra yeniden
+  gir);
+- cihaza ait olan Learning Repository klasörü;
+- sunucu modunda, ders ilerlemesi ve ses kayıtlarından çevrimdışıyken
+  oluşup henüz sunucuya ulaşmamış olanlar;
+- önbellekteki arama dizinleri ve medya listeleri, otomatik yedeğin
+  sayacı ve LAN eşitlemesinin konumu.
+
+Buna karşılık, otomatik yedeğin açık olup olmadığını belirten ayar
+yedeğe girer. Sunucu modunda uygulama, çevrimdışıyken oluşanları bu
+tarayıcıda tutar: ders ilerlemesi ve ses kayıtlarındaki en fazla 50
+değişiklik; daha fazlası birikirse en eskileri silinir. Uygulama
+açıkken bağlantı geri geldiğinde ya da bağlantıyla yapılan bir sonraki
+başlatmada bunları kendiliğinden aktarır. Çevrimdışıyken oluşanlardan
+yedeğe yalnızca sunucuya zaten ulaşmış olanlar girer; bu yüzden sunucu
+modunda yedeği ancak uygulama çevrimdışı öğrenmenin ardından yeniden
+bağlantıyla çalışıp değişiklikleri aktarabildikten sonra oluştur, daha
+önce değil.
+
+Dışa aktarmadan önce uygulama, kaydetmeden önce neyin yedekleneceğini
+görmen için bölüm başına veri kümesi sayılarıyla bir **"Yedeğin
+şunları içeriyor…"** önizlemesi gösterir.
+
+---
+
+## Yedek oluşturma
+
+1. **Ayarlar > Veri**'yi aç.
+2. **Yedek oluştur**'a bas.
+3. Yalnızca tarayıcı modunda, File System Access API üzerinden
+   doğrudan bir kayıt konumu seçebilirsin ("Diske kaydet"); tarayıcı
+   bunu desteklemiyorsa uygulama dosyayı bunun yerine indirir.
+
+**Otomatik yedek:** İsteğe bağlı olarak uygulama, hiçbir zaman
+yedeksiz kalmaman için son snapshot'lardan oluşan döngüsel bir halka
+tutar.
+
+---
+
+## Geri yükleme
+
+1. **Ayarlar > Veri > Geri yükle**.
+2. Yedek dosyasını seç.
+3. Uygulama her tabloyu içe aktarır ve neyin yüklendiğini tam olarak
+   görmen için **tablo başına bir özete** (eklendi / güncellendi /
+   atlandı) yukarı kaydırır.
+
+İçe aktarmada bir şey ters giderse, kendiliğinden kaybolmayan
+**kalıcı bir hata uyarısı** (Toast) görünür - böylece hiçbir hatayı
+gözden kaçırmazsın. Geliştirici modunda (Ayarlar > Tanılama ve destek), mesaj bir
+GitHub Issue için teknik ayrıntıları içerir.
+
+Aynı ders hem bu cihazda hem yedekte varsa ikisi birleştirilir:
+Tamamlanmış bir ders, bu tamamlamadan sonra yeniden
+başlatılmadıysa tamamlanmış olarak kalır. Devam eden iki dersten
+daha ileri gitmiş olan korunur. İki tarafın denemeleri, en iyi
+sonucu ve deneme geçmişi korunur.
+
+---
+
+## Cross-Identity içe aktarma
+
+Aynı cihazda aynı kullanıcı olmana **gerek yoktur**.
+
+- **Boş bir cihazda** yedeği en iyisi hemen başlangıçta içe aktarırsın
+  (bkz. "İlk girişte yedek"). Uygulama o zaman yedekteki profili devralır.
+- **Daha önce profil oluşturduğun bir cihazda** yedeği Ayarlar > Veri
+  üzerinden içe aktarabilirsin. Yedek başka bir profile aitse, onay
+  penceresi bunu içe aktarmadan önce söyler. Yedekteki ilerleme o zaman
+  **aktif profiline** atanır ve seninkiyle birleştirilir: ders ilerlemesi,
+  hatalar, turlar, ses kayıtları, projeler ve geçmiş eklenir, kendi
+  ilerlemen korunur. XP, Streak ve ayarlar yedekten alınır. Aktif profilin
+  aktif kalır; ikinci bir profil oluşturulmaz.
+
+---
+
+## İlk girişte yedek
+
+Uygulamayı yeniden başlattığında (ya da bir cihazda ilk kez)
+Adaptive Learner, boş bir durumla başlamak yerine mevcut bir yedeği
+yüklemeyi aktif olarak önerir. Böylece bir cihaz veya tarayıcı
+değişikliğinden sonra öğrenme akışına hemen geri dönersin.
+
+---
+
+## Her iki depolama modu
+
+Yedekleme ve geri yükleme **her iki** depolama modunda da çalışır -
+sunucu (API) ve yalnızca tarayıcı (Dexie/IndexedDB). Yedek bir
+**`.alb` dosyasıdır** - veri tablolarını, localStorage anlık
+görüntüsünü ve içerik setlerini bir araya getiren bir ZIP arşivi.
+`.alb` dosyaları tüm yedek içe aktarma noktalarında kabul edilir
+(Ayarlar > Veri ve Tehlike bölgesi). Tek bir JSON dosyasından oluşan
+eski yedekler de sorunsuz içe aktarılır.
+
+Uygulamanın daha yeni bir sürümünden gelen bir yedek, bu sürümün
+tanıdığı her şeyle geri yüklenir ve ardından bir bildirim nelerin
+atlandığını söyler. Biçimi çok yeni olduğu ya da sürümü
+okunamadığı için bu sürümün okuyamadığı bir yedek içe aktarılmaz
+ve bir mesaj nedenini açıklar.
+
+!!! note "Gizlilik"
+    Yedek tamamen senin elinde kalır. Yalnızca koyduğun yere
+    kaydedilir - hiçbir şey bir sunucuya gönderilmez.
+
+---
+
+## İlgili sayfalar
+
+- [Ayarlar](../user-guide/settings.md) - tüm veri eylemlerine genel bakış
+- [Birden Çok İçerik Repository'si](content-repos.md) - bağlı repolar ve kullanılan davetler yedekle birlikte taşınır

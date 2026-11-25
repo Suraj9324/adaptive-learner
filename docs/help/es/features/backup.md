@@ -1,0 +1,146 @@
+# Copia de seguridad y restauración
+
+Adaptive Learner puede guardar todo tu estado de aprendizaje en un
+único archivo y restaurarlo en otro dispositivo, en una
+instalación nueva o tras cambiar de navegador. Encuentras todo en
+**Ajustes → Datos**.
+
+<!-- TODO: Captura de pantalla - Ajustes → Datos con los botones "Crear copia de seguridad" y "Restaurar" -->
+
+---
+
+## Qué contiene la copia de seguridad
+
+Una copia de seguridad es un **snapshot completo**: todas las tablas
+de datos (proyectos de aprendizaje, sesiones, progreso de
+lecciones, errores a nivel de elemento, gamificación con
+XP/racha/insignias, misiones, tarjetas de Anki, notas y más)
+**más tus conjuntos de contenido descargados**.
+
+**También incluidos:** los repositorios de contenido conectados, las
+invitaciones canjeadas y si el Learning Repository está activado.
+En el modo navegador también se incluyen los resultados de tus
+revisiones de contenido con IA, así que la insignia "Revisado por IA"
+se conserva.
+
+**No se incluyen**, por ejemplo:
+
+- el token de acceso de un repositorio privado (vuelve a introducirlo
+  tras restaurar);
+- la carpeta del Learning Repository, que pertenece al dispositivo;
+- en modo servidor, el progreso de lecciones y las grabaciones de voz
+  que se hicieron sin conexión y aún no han llegado al servidor;
+- los índices de búsqueda y las listas de medios en caché, el contador
+  de la copia automática y la posición de la sincronización LAN.
+
+En cambio, el ajuste que indica si la copia automática está activada sí
+se incluye. En modo servidor, la app guarda en este navegador lo que se
+genera sin conexión: hasta 50 cambios en el progreso de lecciones y en
+las grabaciones de voz; si se acumulan más, se descartan los más
+antiguos. Los transfiere por sí sola cuando vuelve la conexión mientras
+la app está abierta, o en el siguiente inicio con conexión. De lo que se
+genera sin conexión, solo entra en la copia de seguridad lo que ya ha
+llegado al servidor; por eso, en modo servidor, no crees una copia de
+seguridad hasta que la app haya estado de nuevo en marcha con conexión
+después de aprender sin conexión y haya podido transferir los cambios.
+
+Antes de exportar, la app muestra una vista previa **"Tu copia de
+seguridad contiene…"** con recuentos de registros por área, para
+que veas antes de guardar qué se está respaldando.
+
+---
+
+## Crear una copia de seguridad
+
+1. Abre **Ajustes → Datos**.
+2. Pulsa **Crear copia de seguridad**.
+3. En modo navegador puro puedes elegir directamente una
+   ubicación de guardado mediante la API File System Access
+   ("Guardar en disco"); si el navegador no lo admite, la app
+   descarga el archivo en su lugar.
+
+**Copia de seguridad automática:** opcionalmente, la app mantiene
+un anillo rotativo con los últimos snapshots, para que nunca te
+quedes sin respaldo.
+
+---
+
+## Restaurar
+
+1. **Ajustes → Datos → Restaurar**.
+2. Selecciona el archivo de copia de seguridad.
+3. La app importa cada tabla y desplaza hacia arriba hasta un
+   **resumen por tabla** (añadido / actualizado / omitido), para
+   que veas exactamente qué se ha cargado.
+
+Si algo sale mal durante la importación, aparece un **aviso de
+error persistente** (toast) que no desaparece por sí solo, de modo
+que no se te pase ningún error. En modo desarrollador (Ajustes >
+Diagnóstico y soporte), el mensaje incluye los detalles técnicos para abrir un
+issue en GitHub.
+
+Si la misma lección está en este dispositivo y en la copia, ambas
+se combinan: una lección completada sigue completada, salvo que se
+haya reiniciado después de esa finalización. De dos lecciones en
+curso se conserva la que llegó más lejos. Se conservan los
+intentos, el mejor resultado y el historial de intentos de ambos
+lados.
+
+---
+
+## Importación entre identidades
+
+**No** tienes que ser el mismo usuario en el mismo dispositivo.
+
+- **En un dispositivo vacío**, lo mejor es importar la copia de seguridad
+  justo al empezar (ver "Copia de seguridad al primer inicio de sesión").
+  La app adopta entonces el perfil de la copia de seguridad.
+- **En un dispositivo en el que ya creaste un perfil**, puedes importar la
+  copia de seguridad en Ajustes > Datos. Si pertenece a otro perfil, el
+  diálogo de confirmación te lo dice antes de importar. El progreso de la
+  copia de seguridad se asigna entonces a tu **perfil activo** y se combina
+  con el tuyo: se añaden el progreso de las lecciones, los errores, las
+  rondas, las grabaciones, los proyectos y el historial, y tu propio
+  progreso se mantiene. La XP, la racha y los ajustes se toman de la copia
+  de seguridad. Tu perfil activo sigue activo; no se crea un segundo perfil.
+
+---
+
+## Copia de seguridad al primer inicio de sesión
+
+Cuando reinicias la app (o la abres por primera vez en un
+dispositivo), Adaptive Learner te ofrece activamente cargar una
+copia de seguridad existente en lugar de empezar con un estado
+vacío. Así, tras cambiar de dispositivo o de navegador, vuelves de
+inmediato a tu flujo de aprendizaje.
+
+---
+
+## Ambos modos de almacenamiento
+
+La copia de seguridad y la restauración funcionan en **ambos**
+modos de almacenamiento: servidor (API) y navegador puro
+(Dexie/IndexedDB). La copia de seguridad es un **archivo `.alb`**: un
+archivo ZIP que reúne las tablas de datos, la instantánea de
+localStorage y los conjuntos de contenido. Los archivos `.alb` se
+aceptan en todos los puntos de importación de copias de seguridad
+(Ajustes > Datos y la Zona de peligro). Las copias antiguas en un
+único archivo JSON se siguen importando sin problemas.
+
+Una copia de una versión más reciente de la app se restaura con
+todo lo que conoce esta versión, y después un aviso indica qué se
+omitió. Una copia que esta versión no puede leer, porque su
+formato es demasiado nuevo o su versión no se puede leer, no se
+importa, y un mensaje explica el motivo.
+
+!!! note "Privacidad"
+    La copia de seguridad queda por completo en tus manos. Solo se
+    guarda allí donde tú la coloques: no se envía nada a ningún
+    servidor.
+
+---
+
+## Páginas relacionadas
+
+- [Ajustes](../user-guide/settings.md) - todas las acciones de datos de un vistazo
+- [Varios repositorios de contenido](content-repos.md) - los repos conectados y las invitaciones canjeadas viajan con la copia

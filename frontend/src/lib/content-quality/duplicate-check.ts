@@ -1,0 +1,47 @@
+/**
+ * CQV-03 duplicate check (EXP-032) — flag cards within the same set that
+ * are the same question (e.g. the same vocabulary card copied into two
+ * lessons).
+ *
+ * Pure + deterministic. Cards are normalised (lowercase, German digraphs
+ * expanded, diacritics folded, whitespace collapsed) on ``front`` + ``back``
+ * and grouped; any group with more than one member yields exact-match
+ * pairs (``similarity = 1.0``). Only EXACT normalised matches are reported,
+ * so merely-similar cards never trigger a false positive.
+ *
+ * @example
+ * checkDuplicates([
+ *   { id: "a", front: "el gato", back: "die Katze" },
+ *   { id: "b", front: "El Gato", back: "die Katze" },
+ * ])
+ * // -> [{ card_id_a: "a", card_id_b: "b", similarity: 1 }]
+ */
+
+import { normalizeForDuplicate } from "./normalize";
+import type { DuplicateFinding, QualityCard } from "./types";
+
+/** Group cards by normalised front+back and emit exact-duplicate pairs. */
+export function checkDuplicates(
+  cards: readonly QualityCard[],
+): DuplicateFinding[] {
+  const groups = new Map<string, string[]>();
+  for (const card of cards) {
+    const key = `${normalizeForDuplicate(card.front)}\u0000${normalizeForDuplicate(
+      card.back ?? "",
+    )}`;
+    // An entirely-empty card carries no question — never a "duplicate".
+    if (key === "\u0000") continue;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(card.id);
+    else groups.set(key, [card.id]);
+  }
+  const findings: DuplicateFinding[] = [];
+  for (const ids of groups.values()) {
+    if (ids.length < 2) continue;
+    // Anchor each later duplicate to the first occurrence.
+    for (let i = 1; i < ids.length; i++) {
+      findings.push({ card_id_a: ids[0], card_id_b: ids[i], similarity: 1 });
+    }
+  }
+  return findings;
+}

@@ -1,0 +1,92 @@
+/**
+ * HintSettingsControl — Settings → Learning control for the exercise
+ * hint system (#590): a master enable toggle and the per-hint XP cost.
+ *
+ * Persists via the localStorage helpers in ``lib/hints/hintPref`` (same
+ * pattern as the feedback/sound controls). Per the feature-state policy
+ * the XP-cost input stays visible but disabled when hints are off,
+ * rather than vanishing.
+ */
+
+import {useState} from "react";
+
+import {useI18n} from "../../../../hooks/ui/useI18n";
+import FormHint from "../../../../shared/forms/FormHint";
+import {SettingsSection} from "../../SettingsSection";
+import {
+    MAX_HINT_XP_COST,
+    clampHintXpCost,
+    readHintXpCost,
+    readHintsEnabled,
+    setHintXpCost,
+    setHintsEnabled,
+} from "../../../../lib/hints/hintPref";
+
+export default function HintSettingsControl() {
+    const {t} = useI18n();
+    const [enabled, setEnabled] = useState(() => readHintsEnabled());
+    const [cost, setCost] = useState(() => readHintXpCost());
+
+    const handleEnabled = (next: boolean) => {
+        setEnabled(next);
+        setHintsEnabled(next);
+    };
+    const handleCost = (raw: string) => {
+        const next = clampHintXpCost(Number(raw));
+        setCost(next);
+        setHintXpCost(next);
+    };
+
+    return (
+        <SettingsSection
+            title={t("settings.section_hints", "Hints")}
+            testid="settings-section-hints"
+        >
+            <label className="flex items-center justify-between gap-2">
+                <span className="flex flex-col gap-0.5">
+                    <span className="text-[0.95rem] font-medium">
+                        {t(
+                            "settings.hints_enabled",
+                            "Show hints during exercises",
+                        )}
+                    </span>
+                    <FormHint as="span">
+                        {t(
+                            "settings.hints_enabled_desc",
+                            "Offer a staged hint button on each exercise.",
+                        )}
+                    </FormHint>
+                </span>
+                <input
+                    type="checkbox"
+                    className="m-0 size-4 flex-none p-0"
+                    data-testid="settings-hints-toggle"
+                    checked={enabled}
+                    onChange={(e) => handleEnabled(e.target.checked)}
+                />
+            </label>
+            <label className="flex flex-col gap-2">
+                <span className="flex flex-col gap-0.5">
+                    <span className="text-[0.95rem] font-medium">
+                        {t("settings.hint_xp_cost", "XP cost per hint")}
+                    </span>
+                    <FormHint as="span">
+                        {t(
+                            "settings.hint_xp_cost_desc",
+                            "Shown on the hint button. Set to 0 for free hints.",
+                        )}
+                    </FormHint>
+                </span>
+                <input
+                    type="number"
+                    min={0}
+                    max={MAX_HINT_XP_COST}
+                    value={cost}
+                    disabled={!enabled}
+                    onChange={(e) => handleCost(e.target.value)}
+                    data-testid="settings-hint-xp-cost"
+                />
+            </label>
+        </SettingsSection>
+    );
+}

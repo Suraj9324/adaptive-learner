@@ -1,0 +1,343 @@
+/**
+ * P1 offline parity — localStorage snapshot capture/apply + secrets
+ * exclusion + backward-compatibility.
+ */
+
+import {afterEach, beforeEach, describe, expect, it} from "vitest";
+
+import {
+    applyLocalStorageSnapshot,
+    captureLocalStorageSnapshot,
+    isExcludedLocalStorageKey,
+    rehomeLocalStorageSnapshot,
+    withLocalStorageSnapshot,
+} from "./localStorageSnapshot";
+import {buildAlbBytes, parseAlbBytes} from "./albContainer";
+import type {BackupPayload} from "../../types/domain";
+
+beforeEach(() => localStorage.clear());
+afterEach(() => localStorage.clear());
+
+describe("captureLocalStorageSnapshot", () => {
+    it("captures namespaced user keys", () => {
+        localStorage.setItem("adaptive-learner.theme", "ocean");
+        localStorage.setItem("adaptive-learner.contributions", '[{"id":"x"}]');
+        localStorage.setItem("adaptive-learner.voice.tts_enabled", "true");
+
+        const snap = captureLocalStorageSnapshot();
+
+        expect(snap["adaptive-learner.theme"]).toBe("ocean");
+        expect(snap["adaptive-learner.contributions"]).toBe('[{"id":"x"}]');
+        expect(snap["adaptive-learner.voice.tts_enabled"]).toBe("true");
+    });
+
+    it("carries the avatar-frame state (#2850 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.avatar.frames",
+            '{"u1":{"selected":"gold","purchased":["star"]}}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.avatar.frames"]).toBe(
+            '{"u1":{"selected":"gold","purchased":["star"]}}',
+        );
+    });
+
+    it("carries the arcade-unlock state (#2887 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.arcade.unlocks",
+            '{"u1":{"selected":"memory","purchased":["snake"]}}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.arcade.unlocks"]).toBe(
+            '{"u1":{"selected":"memory","purchased":["snake"]}}',
+        );
+    });
+
+    it("carries the dismissed Weitermachen rows (#3023 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.continue-dismissed",
+            '{"owner/repo::fr-a1":"2026-06-03T10:00:00Z"}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.continue-dismissed"]).toBe(
+            '{"owner/repo::fr-a1":"2026-06-03T10:00:00Z"}',
+        );
+    });
+
+    it("carries the arcade-ticket state (#2889 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.arcade.tickets",
+            '{"u1":{"tickets":3,"milestones":[3,7]}}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.arcade.tickets"]).toBe(
+            '{"u1":{"tickets":3,"milestones":[3,7]}}',
+        );
+    });
+
+    it("carries the mascot-variant state (#2861 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.mascot.variants",
+            '{"u1":{"selected":"wald","purchased":["gold"]}}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.mascot.variants"]).toBe(
+            '{"u1":{"selected":"wald","purchased":["gold"]}}',
+        );
+    });
+
+    it("carries the avatar photo stash (#2862 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem(
+            "adaptive-learner.avatar.photo-stash",
+            '{"u1":"data:image/jpeg;base64,AAA"}',
+        );
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.avatar.photo-stash"]).toBe(
+            '{"u1":"data:image/jpeg;base64,AAA"}',
+        );
+    });
+
+    it("carries the diagnostics + developer configuration (#2785 pin: never drift into the exclusion list)", () => {
+        localStorage.setItem("adaptive-learner.developer_mode", "true");
+        localStorage.setItem("adaptive-learner.vv_diag", "1");
+        localStorage.setItem("adaptive-learner.vv_diag_panel", "0");
+        localStorage.setItem(
+            "adaptive-learner.vv_diag_log",
+            '[{"kind":"tap","ts":1,"fix":"off"}]',
+        );
+
+        const snap = captureLocalStorageSnapshot();
+
+        expect(snap["adaptive-learner.developer_mode"]).toBe("true");
+        expect(snap["adaptive-learner.vv_diag"]).toBe("1");
+        expect(snap["adaptive-learner.vv_diag_panel"]).toBe("0");
+        expect(snap["adaptive-learner.vv_diag_log"]).toBe(
+            '[{"kind":"tap","ts":1,"fix":"off"}]',
+        );
+    });
+
+    it("excludes secret keys (tokens, api keys, passwords)", () => {
+        localStorage.setItem("adaptive-learner.github_token", "ghp_secret");
+        localStorage.setItem(
+            "adaptive-learner.content_repo_token::owner/repo",
+            "tok",
+        );
+        localStorage.setItem("adaptive-learner.some_api_key", "sk-secret");
+        localStorage.setItem("adaptive-learner.theme", "dark");
+
+        const snap = captureLocalStorageSnapshot();
+
+        expect(snap).not.toHaveProperty("adaptive-learner.github_token");
+        expect(snap).not.toHaveProperty(
+            "adaptive-learner.content_repo_token::owner/repo",
+        );
+        expect(snap).not.toHaveProperty("adaptive-learner.some_api_key");
+        expect(snap["adaptive-learner.theme"]).toBe("dark");
+    });
+
+    it("carries the mobile nav-position preference (#2786 pin, lessons #2053)", () => {
+        localStorage.setItem("adaptive-learner.nav_position", "bottom");
+        const snap = captureLocalStorageSnapshot();
+        expect(snap["adaptive-learner.nav_position"]).toBe("bottom");
+    });
+
+    it.each([
+        "adaptive-learner.sync-queue",
+        "adaptive-learner.search_index::astrapi69/adaptive-learner-content",
+        "adaptive-learner.media-resources",
+        "adaptive-learner.auto_backup_session_counter",
+        "adaptive-learner.auto_backup_last_at",
+        "adaptive-learner.sync.last_sync_at",
+    ])("excludes the device-local %s (#3429)", (key) => {
+        localStorage.setItem(key, "x");
+        expect(captureLocalStorageSnapshot()).not.toHaveProperty([key]);
+    });
+
+    it("carries the auto-backup preference itself (#3429: only its bookkeeping stays home)", () => {
+        localStorage.setItem("adaptive-learner.auto_backup_enabled", "true");
+        expect(captureLocalStorageSnapshot()["adaptive-learner.auto_backup_enabled"]).toBe("true");
+    });
+
+    it("excludes the device-local storage_mode key", () => {
+        localStorage.setItem("adaptive-learner.storage_mode", "dexie");
+        expect(captureLocalStorageSnapshot()).not.toHaveProperty(
+            "adaptive-learner.storage_mode",
+        );
+    });
+
+    it("ignores non-namespaced (third-party) keys", () => {
+        localStorage.setItem("some-other-app.token", "x");
+        localStorage.setItem("adaptive-learner.language", "de");
+
+        const snap = captureLocalStorageSnapshot();
+
+        expect(snap).not.toHaveProperty("some-other-app.token");
+        expect(snap["adaptive-learner.language"]).toBe("de");
+    });
+});
+
+describe("applyLocalStorageSnapshot", () => {
+    it("writes keys and overwrites existing values (backup is source of truth)", () => {
+        localStorage.setItem("adaptive-learner.theme", "light");
+
+        const applied = applyLocalStorageSnapshot({
+            "adaptive-learner.theme": "forest",
+            "adaptive-learner.feedback.intensity": "enthusiastic",
+        });
+
+        expect(applied).toBe(2);
+        expect(localStorage.getItem("adaptive-learner.theme")).toBe("forest");
+        expect(localStorage.getItem("adaptive-learner.feedback.intensity")).toBe(
+            "enthusiastic",
+        );
+    });
+
+    it("re-applies the exclusion filter (a smuggled secret is never written)", () => {
+        const applied = applyLocalStorageSnapshot({
+            "adaptive-learner.github_token": "ghp_injected",
+            "adaptive-learner.theme": "sepia",
+        });
+
+        expect(applied).toBe(1);
+        expect(localStorage.getItem("adaptive-learner.github_token")).toBeNull();
+        expect(localStorage.getItem("adaptive-learner.theme")).toBe("sepia");
+    });
+
+    it("does not write back the offline queue an older backup carried (#3429)", () => {
+        const applied = applyLocalStorageSnapshot({
+            "adaptive-learner.sync-queue": '[{"id":"1","path":"/p","method":"POST","body":{}}]',
+            "adaptive-learner.hint_mode": "off",
+        });
+        expect(applied).toBe(1);
+        expect(localStorage.getItem("adaptive-learner.sync-queue")).toBeNull();
+        expect(localStorage.getItem("adaptive-learner.hint_mode")).toBe("off");
+    });
+
+    it("is a no-op for a legacy backup with no snapshot", () => {
+        localStorage.setItem("adaptive-learner.theme", "dark");
+        expect(applyLocalStorageSnapshot(undefined)).toBe(0);
+        expect(applyLocalStorageSnapshot(null)).toBe(0);
+        expect(localStorage.getItem("adaptive-learner.theme")).toBe("dark");
+    });
+});
+
+describe("roundtrip", () => {
+    it("capture -> clear -> apply restores every non-secret key", () => {
+        localStorage.setItem("adaptive-learner.contributions", '[{"id":"a"}]');
+        localStorage.setItem("adaptive-learner.contributor-name", "Aster");
+        localStorage.setItem("adaptive-learner.custom-paths", '["p1"]');
+        localStorage.setItem("adaptive-learner.github_token", "ghp_secret");
+
+        const base: {format: string; local_storage?: Record<string, string>} = {
+            format: "adaptive-learner-backup",
+        };
+        const payload = withLocalStorageSnapshot(base);
+        localStorage.clear();
+
+        const applied = applyLocalStorageSnapshot(payload.local_storage);
+
+        expect(applied).toBe(3);
+        expect(localStorage.getItem("adaptive-learner.contributions")).toBe(
+            '[{"id":"a"}]',
+        );
+        expect(localStorage.getItem("adaptive-learner.contributor-name")).toBe(
+            "Aster",
+        );
+        expect(localStorage.getItem("adaptive-learner.custom-paths")).toBe('["p1"]');
+        // The secret never round-tripped.
+        expect(localStorage.getItem("adaptive-learner.github_token")).toBeNull();
+    });
+});
+
+describe(".alb container roundtrip", () => {
+    it("preserves the local_storage block through buildAlbBytes/parseAlbBytes", () => {
+        const payload: BackupPayload = {
+            format: "adaptive-learner-backup",
+            version: "1.4.0",
+            created_at: "2026-01-01T00:00:00.000Z",
+            user_id: "user-1",
+            storage_mode: "dexie",
+            data: {users: [{id: "user-1"}]},
+            local_storage: {
+                "adaptive-learner.theme": "ocean",
+                "adaptive-learner.contributions": '[{"id":"a"}]',
+            },
+            stats: {total_records: 1, tables: {users: 1}},
+        };
+
+        const parsed = parseAlbBytes(buildAlbBytes(payload), 100 * 1024 * 1024);
+
+        expect(parsed.payload.local_storage).toEqual({
+            "adaptive-learner.theme": "ocean",
+            "adaptive-learner.contributions": '[{"id":"a"}]',
+        });
+    });
+});
+
+describe("isExcludedLocalStorageKey", () => {
+    it.each([
+        "adaptive-learner.github_token",
+        "adaptive-learner.content_repo_token::a/b",
+        "adaptive-learner.foo_api_key",
+        "adaptive-learner.my_secret",
+        "adaptive-learner.storage_mode",
+    ])("excludes %s", (key) => {
+        expect(isExcludedLocalStorageKey(key)).toBe(true);
+    });
+
+    it.each([
+        "adaptive-learner.theme",
+        "adaptive-learner.contributions",
+        "adaptive-learner.voice.tts_enabled",
+    ])("keeps %s", (key) => {
+        expect(isExcludedLocalStorageKey(key)).toBe(false);
+    });
+});
+
+describe("the device's active learner (#3785)", () => {
+    const IDENTITY = ["adaptive-learner.user_id", "adaptive-learner.project_id"];
+
+    it.each(IDENTITY)("never captures %s", (key) => {
+        localStorage.setItem(key, "learner-a");
+        expect(captureLocalStorageSnapshot()).not.toHaveProperty(key);
+    });
+
+    it.each(IDENTITY)("never applies %s from a backup that carries it", (key) => {
+        localStorage.setItem(key, "learner-a");
+        applyLocalStorageSnapshot({[key]: "learner-b", "adaptive-learner.theme": "ocean"});
+        expect(localStorage.getItem(key)).toBe("learner-a");
+        expect(localStorage.getItem("adaptive-learner.theme")).toBe("ocean");
+    });
+
+    it.each(["adaptive-learner.user_ids_seen", "adaptive-learner.project_id_hint"])(
+        "keeps the neighbouring key %s (exact match, no substring)",
+        (key) => {
+            expect(isExcludedLocalStorageKey(key)).toBe(false);
+        },
+    );
+});
+
+describe("rehomeLocalStorageSnapshot (#3785)", () => {
+    it("moves values keyed by the backup's learner to the local learner", () => {
+        const snapshot = {
+            "adaptive-learner.avatar.frames": '{"u-b":{"selected":"gold","purchased":["star"]}}',
+            "adaptive-learner.theme": "ocean",
+        };
+        expect(rehomeLocalStorageSnapshot(snapshot, "u-b", "u-a")).toEqual({
+            "adaptive-learner.avatar.frames": '{"u-a":{"selected":"gold","purchased":["star"]}}',
+            "adaptive-learner.theme": "ocean",
+        });
+    });
+
+    it.each([
+        ["same learner", "u-a"],
+        ["unknown owner", null],
+    ])("returns the snapshot unchanged: %s", (_name, source) => {
+        const snapshot = {"adaptive-learner.avatar.frames": '{"u-a":{}}'};
+        expect(rehomeLocalStorageSnapshot(snapshot, source, "u-a")).toBe(snapshot);
+    });
+
+    it.each([undefined, null])("passes a legacy backup without snapshot through (%s)", (snapshot) => {
+        expect(rehomeLocalStorageSnapshot(snapshot, "u-b", "u-a")).toBe(snapshot);
+    });
+});

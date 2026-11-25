@@ -1,0 +1,92 @@
+name: Manual-plan automation
+
+# Automated manual-test-plan suite (#616): the manual QA sessions
+# (onboarding, learning flow, content/repos, settings/backup, mobile, a11y,
+# shortcuts) as Playwright specs against the GitHub-Pages-shape dexie build.
+#
+# Like the Dexie-smoke gate (#552), this is expensive and rarely PR-relevant,
+# so it runs OUT of the per-PR loop: a daily schedule + release branches +
+# manual dispatch. It is ALSO aggregated into `make release-test`, so no
+# release ships without it passing.
+
+on:
+  schedule:
+    # Daily at 04:00 UTC (after the dexie-smoke cron, sharing the off-peak slot).
+    - cron: "0 4 * * *"
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  manual-automation:
+    name: Manual-plan E2E automation
+    runs-on: ubuntu-latest
+    # Official Playwright image so Chromium + the headless shell are pre-baked
+    # (no cdn.playwright.dev download). Pin the tag to the @playwright/test
+    # version in e2e/bun.lock (1.61.1); bump both together.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --user 1001
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The image ships Node 22; install 24 to match the repo's engines.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      # NOT oven-sh/setup-bun here: it unpacks the Bun zip with `unzip`,
+      # which the Playwright noble image does not ship, and the job runs as
+      # --user 1001 (no apt). The npm distribution of Bun carries the binary
+      # as a plain npm tarball (no unzip), installed to a user-writable
+      # prefix (#1530).
+      - name: Install Bun 1.4.2 (npm; image lacks unzip for setup-bun)
+        run: |
+          npm install --global --prefix "$HOME/.bun-npm" bun@1.4.2
+          echo "$HOME/.bun-npm/bin" >> "$GITHUB_PATH"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock', 'e2e/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Install e2e deps
+        working-directory: e2e
+        run: bun install --frozen-lockfile
+
+      # NO `playwright install`: the browsers are baked into the container.
+      # These two commands mirror `make test-manual-automation` verbatim
+      # (the noble image has no `make`); keep them in lock-step with the target.
+      - name: Build dexie frontend
+        working-directory: frontend
+        run: VITE_STORAGE_MODE=dexie bun run build
+
+      - name: Manual-plan automation
+        working-directory: e2e
+        run: npx playwright test --config=playwright.manual.config.ts
+
+      # #3427 - a spec that cannot reach its surface skips at runtime; the
+      # budget keeps a broken path from turning into a green night.
+      - name: Runtime skip budget (#3427)
+        if: success() || failure()
+        run: python3 scripts/check_e2e_skip_budget.py --suite manual-automation --report e2e/test-results/manual-automation.json
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manual-automation-report
+          path: |
+            e2e/playwright-report-manual
+            e2e/test-results
+          retention-days: 14

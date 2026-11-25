@@ -1,0 +1,864 @@
+#!/usr/bin/env python3
+"""Documentation drift verifier for Adaptive Learner.
+
+Stdlib only (tomllib, json, re, pathlib, subprocess, argparse). No pip
+deps -- this script must run with a bare ``python3`` in CI before any
+project venv exists.
+
+After every release the documentation drifts: version badges, plugin
+counts, test counts, feature lists, help pages, mkdocs nav, i18n
+catalogs and theme tokens all go stale. This verifier catches that
+drift BEFORE a release ships.
+
+Severity model (matches the Bibliogon precedent):
+
+  FAIL  Hard contract with no false positives on a correct repo.
+        Blocks the release. Exit code 1.
+  WARN  Real signal, but heuristic or count-based -- a wrong FAIL
+        here would block a correct state. Advisory only. Exit code 0.
+
+A missing BASIS is a FAIL, never a WARN (#2287). If a check's input is
+absent -- no theme files, no mkdocs.yml, no en.json, an unparseable
+catalog -- the check could not RUN, and "I could not check" must never
+print as "nothing is wrong" (quality-checks.md "Gate test contract",
+point 3). The distinction is whether the check RAN, not how severe its
+finding would have been: a heuristic's FINDINGS stay WARN, but the
+heuristic failing to run is a FAIL. Every set-scanning check also emits a
+report.note with the size of the set it examined, so "0 findings" and "0
+inputs examined" cannot print the same green (gate contract, point 4).
+
+Exit codes:
+  0  clean (no FAIL findings; WARN findings may be present)
+  1  drift found (at least one FAIL finding)
+  2  the verifier itself could not run (missing canonical source, ...)
+
+Usage:
+  python3 scripts/verify_docs.py            # run every check
+  python3 scripts/verify_docs.py --check version,plugins
+  python3 scripts/verify_docs.py --list     # list registered checks
+  python3 scripts/verify_docs.py --fix      # best-effort auto-fix
+  python3 scripts/verify_docs.py --test-counts   # also run pytest/vitest
+                                                 # collection (slow)
+
+``--fix`` is BEST EFFORT and never silently corrupts docs: only
+mechanically-safe drift (version badges, counts, the test-total
+arithmetic, i18n sync) is rewritten. Anything that needs human
+writing (stale dated prose, missing help pages, feature lists) is
+flagged, never edited.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+FAIL = "FAIL"
+WARN = "WARN"
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Finding:
+    severity: str
+    check: str
+    message: str
+    fixed: bool = False
+
+
+@dataclass
+class Report:
+    findings: list[Finding] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def fail(self, check: str, message: str, fixed: bool = False) -> None:
+        self.findings.append(Finding(FAIL, check, message, fixed))
+
+    def warn(self, check: str, message: str, fixed: bool = False) -> None:
+        self.findings.append(Finding(WARN, check, message, fixed))
+
+    def note(self, message: str) -> None:
+        self.notes.append(message)
+
+    @property
+    def fail_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == FAIL and not f.fixed)
+
+    @property
+    def warn_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == WARN and not f.fixed)
+
+    @property
+    def fixed_count(self) -> int:
+        return sum(1 for f in self.findings if f.fixed)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def canonical_version() -> str:
+    """Read the single source of truth from backend/pyproject.toml."""
+    pyproject = REPO / "backend" / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    return data["tool"]["poetry"]["version"]
+
+
+def plugin_count() -> int:
+    """Count shipped plugin packages on disk."""
+    return len(list((REPO / "plugins").glob("adaptive-learner-plugin-*")))
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def replace_group(text: str, pattern: str, value: str) -> tuple[str, int]:
+    """Replace capture group 1 of the first match with ``value``.
+
+    Returns ``(new_text, n_replacements)``. Used by --fix to swap a
+    stale token in place without disturbing the surrounding text.
+    """
+    flags = re.DOTALL if "(?s)" not in pattern else 0
+
+    def repl(match: re.Match) -> str:
+        whole = match.group(0)
+        # Replace only the captured slice, anchored at its position
+        # inside the match so identical substrings elsewhere are safe.
+        start = match.start(1) - match.start(0)
+        end = match.end(1) - match.start(0)
+        return whole[:start] + value + whole[end:]
+
+    return re.subn(pattern, repl, text, count=1, flags=flags)
+
+
+# ---------------------------------------------------------------------------
+# Check: version consistency  (FAIL)
+# ---------------------------------------------------------------------------
+
+# Each entry: (relative path, regex with one version capture group,
+# human label, fixable).  "fixable" is False when the version is
+# embedded in dated/phase prose that --fix must not naively rewrite.
+#
+# The fixable display sites come from scripts/version_display_sites.py -
+# the SAME list sync_versions.py rewrites on a bump (#2179), so the
+# writer and this checker cannot know different sites.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The i18n coverage check lives in its own module (#2287/#2362) so this
+# verifier stays under the cohesion file-size gate; re-exported here so the
+# CHECKS registry and the tests keep importing it from ``verify_docs``.
+from generate_api_reference import check_api_reference  # noqa: E402
+from testplan_ids import check as testplan_id_check  # noqa: E402
+from verify_docs_feature_completeness import changelog_versions  # noqa: E402
+from verify_docs_feature_completeness import (  # noqa: E402
+    check_feature_completeness as _check_feature_completeness,
+)
+from verify_docs_feature_shots import check_feature_shots  # noqa: E402,F401
+from verify_docs_help_changelog import check_help_changelog as _check_help_changelog  # noqa: E402
+from verify_docs_help_terms import check_help_terms  # noqa: E402
+from verify_docs_i18n import check_i18n  # noqa: E402,F401
+from verify_docs_locale_coverage import check_locale_coverage  # noqa: E402
+from verify_docs_privacy_promises import check_privacy_promises  # noqa: E402
+from verify_docs_strong_emphasis import check_strong_emphasis  # noqa: E402
+from verify_docs_test_counts import check_test_counts  # noqa: E402,F401
+from verify_docs_third_party import check_docs_third_party  # noqa: E402
+from version_display_sites import VERSION_DISPLAY_SITES  # noqa: E402
+
+VERSION_TARGETS = [(rel, pattern, label, True) for rel, pattern, label in VERSION_DISPLAY_SITES] + [
+    # CLAUDE.md deliberately carries NO inline version since the #2071
+    # condensation: it points at backend/pyproject.toml as the canonical
+    # source, so there is nothing here to compare. The test-count line
+    # (checked separately below) still carries a vX.Y.Z baseline label.
+    ("docs/ROADMAP.md", r"Current state: \*\*v(\d+\.\d+\.\d+)", "ROADMAP.md header", False),
+    ("docs/backlog.md", r"State: \*\*post v(\d+\.\d+\.\d+)", "backlog.md header", False),
+]
+
+
+def check_version(report: Report, fix: bool) -> None:
+    canonical = canonical_version()
+    for rel, pattern, label, fixable in VERSION_TARGETS:
+        path = REPO / rel
+        if not path.exists():
+            report.fail("version", f"{label}: file {rel} is missing")
+            continue
+        text = read(path)
+        match = re.search(pattern, text)
+        if not match:
+            report.fail("version", f"{label}: no version string found in {rel} (pattern drift)")
+            continue
+        found = match.group(1)
+        if found == canonical:
+            continue
+        if fix and fixable:
+            new_text, n = replace_group(text, pattern, canonical)
+            if n:
+                path.write_text(new_text, encoding="utf-8")
+                report.fail("version", f"{label}: {found} -> {canonical} (auto-fixed)", fixed=True)
+                continue
+        if fixable:
+            report.fail("version", f"{label}: says v{found}, canonical is v{canonical}")
+        else:
+            # Dated-prose headers (ROADMAP.md / backlog.md) carry the version
+            # inside a hand-written "Current state" narrative, so --fix must
+            # not naively rewrite them. release-workflow.md Step 11 updates
+            # these as post-release documentation, so a mismatch during the
+            # release cut is a reminder (WARN), not a release-blocking FAIL --
+            # the version is still hard-gated on the README/CLAUDE badges and
+            # the required changelog file.
+            report.warn(
+                "version",
+                f"{label}: says v{found}, canonical is v{canonical} "
+                "(dated-prose header -- refresh by hand as post-release documentation)",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Check: plugin count  (FAIL)
+# ---------------------------------------------------------------------------
+
+PLUGIN_COUNT_TARGETS = [
+    ("CLAUDE.md", r"## Plugins \((\d+) shipped\)", "CLAUDE.md plugin header"),
+    ("README.md", r"(?m)^(\d+) plugins, all under", "README plugin count"),
+    ("README-de.md", r"(?m)^(\d+) Plugins, alle unter", "README-de plugin count"),
+]
+
+
+def check_plugins(report: Report, fix: bool) -> None:
+    actual = plugin_count()
+    for rel, pattern, label in PLUGIN_COUNT_TARGETS:
+        path = REPO / rel
+        if not path.exists():
+            report.fail("plugins", f"{label}: file {rel} is missing")
+            continue
+        text = read(path)
+        match = re.search(pattern, text)
+        if not match:
+            report.fail("plugins", f"{label}: no plugin count found in {rel} (pattern drift)")
+            continue
+        stated = int(match.group(1))
+        if stated == actual:
+            continue
+        if fix:
+            new_text, n = replace_group(text, pattern, str(actual))
+            if n:
+                path.write_text(new_text, encoding="utf-8")
+                report.fail("plugins", f"{label}: {stated} -> {actual} (auto-fixed)", fixed=True)
+                continue
+        report.fail("plugins", f"{label}: says {stated}, {actual} plugin dirs on disk")
+
+
+# ---------------------------------------------------------------------------
+# Check: feature completeness  (WARN, heuristic; scripts/verify_docs_feature_completeness.py)
+# ---------------------------------------------------------------------------
+
+
+def check_feature_completeness(report: Report) -> None:
+    """WARN when README.md seems not to mention a recently shipped feature."""
+    _check_feature_completeness(report, repo=REPO, read=read)
+
+
+# ---------------------------------------------------------------------------
+# Check: stale date references  (WARN)
+# ---------------------------------------------------------------------------
+
+# Today is derived from the latest changelog release date so the check
+# needs no wall-clock (keeps it deterministic in CI).
+DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+STALE_SCAN = ["README.md", "README-de.md", "CLAUDE.md", "docs/ROADMAP.md", "docs/backlog.md"]
+
+
+def _latest_release_month() -> tuple[int, int]:
+    versions = changelog_versions(REPO)
+    if not versions:
+        return (2026, 5)
+    _, path = versions[-1]
+    m = re.search(r"\*\*Released?\*\*:?\s*(20\d{2})-(\d{2})-(\d{2})", read(path)) or re.search(
+        r"Released?:?\s*(20\d{2})-(\d{2})-(\d{2})", read(path)
+    )
+    if m:
+        return (int(m[1]), int(m[2]))
+    return (2026, 5)
+
+
+def check_stale_dates(report: Report) -> None:
+    year, month = _latest_release_month()
+    # "More than 2 months old" relative to the latest release.
+    cutoff = year * 12 + month - 2
+
+    for rel in STALE_SCAN:
+        path = REPO / rel
+        if not path.exists():
+            continue
+        stale: list[str] = []
+        for line in read(path).splitlines():
+            for ym in DATE_RE.finditer(line):
+                y, mo = int(ym[1]), int(ym[2])
+                if y * 12 + mo < cutoff:
+                    stale.append(f"{ym.group(0)}")
+        if stale:
+            uniq = sorted(set(stale))
+            shown = uniq[:6]
+            more = f" (+{len(uniq) - len(shown)} more)" if len(uniq) > len(shown) else ""
+            report.warn(
+                "stale-dates",
+                f"{rel}: current-state doc references dates older than 2 months: {', '.join(shown)}{more}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Check: CSS theme completeness  (FAIL)
+# ---------------------------------------------------------------------------
+
+THEME_VAR_RE = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.MULTILINE)
+
+
+def check_themes(report: Report, theme_dir: Path | None = None) -> None:
+    theme_dir = (
+        theme_dir if theme_dir is not None else REPO / "frontend" / "src" / "styles" / "themes"
+    )
+    files = sorted(theme_dir.glob("theme-*.css"))
+    if not files:
+        # Fail closed (#2287): no theme files means the parity check could not
+        # run at all -- "I could not check" is not "nothing is wrong".
+        report.fail(
+            "themes",
+            f"no theme-*.css files under {theme_dir} - cannot verify token parity "
+            "(basis missing; a missing input is a FAIL, not a clean pass)",
+        )
+        return
+
+    per_theme: dict[str, set[str]] = {}
+    for path in files:
+        per_theme[path.name] = set(THEME_VAR_RE.findall(read(path)))
+
+    # The expected token set is the union across all themes; any theme
+    # missing a token another theme defines is a hole that renders a
+    # legacy/fallback colour. Mirrors styles/themes/themes.test.ts.
+    expected = set().union(*per_theme.values())
+    # Report the measured set (#2287): "0 holes" and "0 themes examined"
+    # must not print the same green.
+    report.note(f"themes: checked {len(files)} theme files against a {len(expected)}-token union")
+    for name, tokens in per_theme.items():
+        missing = expected - tokens
+        if missing:
+            report.fail(
+                "themes",
+                f"{name} is missing {len(missing)} token(s) defined in sibling themes: "
+                + ", ".join(sorted(missing)[:8])
+                + (" ..." if len(missing) > 8 else ""),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Check: mkdocs nav orphans + dead links  (FAIL)
+# ---------------------------------------------------------------------------
+
+# Help-site index pages must be VERSIONLESS (#1766): the deployed front
+# pages drifted into three different stale claims (de/en v1.91.0, es/ja
+# v1.47.0, tr/el v1.20.0) because nothing gated them. Any v-prefixed
+# version-shape literal on an index page fails hard - link to the GitHub
+# Releases page instead of hardcoding a number.
+HELP_INDEX_VERSION_RE = re.compile(r"\bv\d+\.\d+(?:\.\d+)?\b")
+
+
+def check_help_index_versions(report: Report, help_dir: Path | None = None) -> None:
+    """FAIL on any vX.Y[.Z] literal in docs/help/*/index.md (#1766)."""
+    root = help_dir if help_dir is not None else REPO / "docs" / "help"
+    index_pages = sorted(root.glob("*/index.md"))
+    if not index_pages:
+        report.fail(
+            "help-index-versions",
+            f"no index pages found under {root} - cannot verify (basis missing; #2287)",
+        )
+        return
+    report.note(f"help-index-versions: scanned {len(index_pages)} index pages")
+    for page in index_pages:
+        for line_number, line in enumerate(read(page).splitlines(), start=1):
+            for match in HELP_INDEX_VERSION_RE.finditer(line):
+                report.fail(
+                    "help-index-versions",
+                    f"{page.parent.name}/index.md:{line_number}: version literal "
+                    f"{match.group(0)} (help index pages are versionless - "
+                    "link to GitHub Releases instead, #1766)",
+                )
+
+
+def check_help_changelog(
+    report: Report, help_dir: Path | None = None, canonical: str | None = None
+) -> None:
+    """FAIL when a docs/help/<locale>/changelog.md lags the canonical minor version (#3161)."""
+    _check_help_changelog(
+        report,
+        help_dir=help_dir if help_dir is not None else REPO / "docs" / "help",
+        canonical=canonical if canonical is not None else canonical_version(),
+        read=read,
+    )
+
+
+# End-user help prose must be VERSIONLESS (#1767): the help tree carried
+# ~1000 "since vX.Y" feature-provenance markers across 8 locales that
+# drift per-locale and read as noise to an end user ("since v1.35.0" on a
+# v2.x app implies a recency/optionality that is long gone). User help
+# describes the CURRENT behaviour; release provenance belongs to
+# changelog/releases/. This gate extends the #1766 index check to the
+# whole user-facing help tree.
+#
+# Out of scope (not gated here, per the #1767 scope decision):
+#   - developer/ + api/ trees: contributor/integrator reference that
+#     legitimately cites schema + hook versions (schema v1.4,
+#     ai_complete_async v1.5.0). A different audience, a different
+#     contract.
+#   - changelog.md: the per-locale "What's new" page is version-based by
+#     definition; gating it line-by-line would be absurd.
+#   - index.md: already hard-gated by check_help_index_versions above.
+#
+# Genuine exceptions (a version literal that carries real, current
+# meaning) get an inline `<!-- version-exempt: <reason> -->` marker on
+# the same line, mirroring the design-token `token-exempt:` precedent.
+HELP_PROSE_EXEMPT_DIRS = {"developer", "api"}
+HELP_PROSE_EXEMPT_FILES = {"index.md", "changelog.md"}
+VERSION_EXEMPT_RE = re.compile(r"<!--\s*version-exempt:")
+
+
+def check_help_prose_versions(report: Report, help_dir: Path | None = None) -> None:
+    """FAIL on any vX.Y[.Z] literal in user-facing docs/help prose (#1767).
+
+    Gates every ``docs/help/<locale>/**/*.md`` page except the
+    developer/ + api/ reference trees, the per-locale changelog.md, and
+    index.md (which has its own check). Lines carrying a
+    ``<!-- version-exempt: ... -->`` marker are skipped.
+    """
+    root = help_dir if help_dir is not None else REPO / "docs" / "help"
+    pages = sorted(root.glob("*/**/*.md"))
+    if not pages:
+        report.fail(
+            "help-prose-versions",
+            f"no help pages found under {root} - cannot verify (basis missing; #2287)",
+        )
+        return
+    scanned = 0
+    for page in pages:
+        rel_parts = page.relative_to(root).parts  # (locale, ...segments, file)
+        if page.name in HELP_PROSE_EXEMPT_FILES:
+            continue
+        if HELP_PROSE_EXEMPT_DIRS.intersection(rel_parts[1:-1]):
+            continue
+        scanned += 1
+        rel = page.relative_to(root).as_posix()
+        for line_number, line in enumerate(read(page).splitlines(), start=1):
+            if VERSION_EXEMPT_RE.search(line):
+                continue
+            for match in HELP_INDEX_VERSION_RE.finditer(line):
+                report.fail(
+                    "help-prose-versions",
+                    f"{rel}:{line_number}: version literal {match.group(0)} "
+                    "(end-user help is versionless - describe the current "
+                    "behaviour; release provenance belongs to the changelog, "
+                    "#1767)",
+                )
+    report.note(
+        f"help-prose-versions: scanned {scanned} prose pages (excl. developer/api/changelog/index)"
+    )
+
+
+# mkdocs.yml's docs_dir is docs/help; the nav references the German
+# variant (de/<slug>.md). mkdocs-static-i18n maps de->en, so the en/
+# tree is an i18n mirror, not separately listed. We therefore check
+# the de/ tree against the nav references.
+NAV_REF_RE = re.compile(r"(de/[\w./-]+\.md)")
+
+
+def check_mkdocs(
+    report: Report, mkdocs_path: Path | None = None, help_dir: Path | None = None
+) -> None:
+    mkdocs = mkdocs_path if mkdocs_path is not None else REPO / "mkdocs.yml"
+    help_dir = help_dir if help_dir is not None else REPO / "docs" / "help"
+    if not mkdocs.exists():
+        report.fail(
+            "mkdocs",
+            f"{mkdocs} not found - cannot verify nav orphans/dead links (basis missing; #2287)",
+        )
+        return
+    de_dir = help_dir / "de"
+    if not de_dir.exists():
+        report.fail(
+            "mkdocs",
+            f"{de_dir} not found - cannot verify nav (basis missing; #2287)",
+        )
+        return
+
+    referenced = set(NAV_REF_RE.findall(read(mkdocs)))
+    actual = {f"de/{p.relative_to(de_dir).as_posix()}" for p in de_dir.rglob("*.md")}
+    report.note(f"mkdocs: {len(actual)} de help pages vs {len(referenced)} nav references")
+
+    # Orphans: help pages on disk that no nav entry points to. They are
+    # silently unreachable from the side nav (mkdocs --strict logs this
+    # only at INFO and does NOT fail).
+    orphans = sorted(actual - referenced)
+    if orphans:
+        report.fail(
+            "mkdocs",
+            f"{len(orphans)} help page(s) on disk but not in mkdocs.yml nav: "
+            + ", ".join(orphans[:10])
+            + (" ..." if len(orphans) > 10 else "")
+            + " (add to docs/help/_meta.yaml + run make sync-mkdocs-nav)",
+        )
+
+    # Dead links: nav entries pointing at files that do not exist.
+    dead = sorted(referenced - actual)
+    if dead:
+        report.fail(
+            "mkdocs",
+            f"{len(dead)} mkdocs.yml nav entr(y/ies) point to missing file(s): "
+            + ", ".join(dead[:10])
+            + (" ..." if len(dead) > 10 else ""),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Check: help docs coverage  (parity FAIL, route mapping WARN)
+# ---------------------------------------------------------------------------
+
+ROUTE_RE = re.compile(r'path="([^"]+)"')
+# Routes that intentionally have no dedicated help page.
+_ROUTE_NO_HELP = {"/", "*"}
+# Routes whose help page EXISTS but lives under a slug the keyword heuristic
+# below cannot derive (#2944: /review/:setId is documented in
+# user-guide/lessons.md, "Review sessions"). Unlike _ROUTE_NO_HELP this is a
+# claim, not an exclusion: the mapped slug must exist in BOTH en and de,
+# otherwise the entry is stale and the check FAILS - a route must never read
+# as covered by a page that is gone.
+_ROUTE_HELP_SLUG = {
+    "/review/:setId": "user-guide/lessons",
+}
+
+
+def _help_slugs(lang: str, help_root: Path | None = None) -> set[str]:
+    base = (help_root if help_root is not None else REPO / "docs" / "help") / lang
+    if not base.exists():
+        return set()
+    return {p.relative_to(base).with_suffix("").as_posix() for p in base.rglob("*.md")}
+
+
+def check_help_coverage(
+    report: Report, help_root: Path | None = None, app_path: Path | None = None
+) -> None:
+    en = _help_slugs("en", help_root)
+    de = _help_slugs("de", help_root)
+    if not en and not de:
+        report.fail(
+            "help-coverage",
+            "no help pages found under docs/help/{en,de} - cannot verify parity "
+            "(basis missing; #2287)",
+        )
+        return
+    report.note(f"help-coverage: {len(en)} en help pages, {len(de)} de help pages")
+
+    # i18n parity: every help page must exist in both languages.
+    only_en = sorted(en - de)
+    only_de = sorted(de - en)
+    if only_en:
+        report.fail(
+            "help-coverage",
+            f"{len(only_en)} EN help page(s) with no DE counterpart: {', '.join(only_en[:8])}",
+        )
+    if only_de:
+        report.fail(
+            "help-coverage",
+            f"{len(only_de)} DE help page(s) with no EN counterpart: {', '.join(only_de[:8])}",
+        )
+
+    # Route coverage (heuristic): every navigable route should be
+    # describable from some help page. Many routes legitimately have
+    # none, so the FINDINGS stay advisory (WARN) - but if the heuristic
+    # cannot RUN because its input is gone, that is a FAIL, not silence
+    # (#2287: the distinction is whether the check ran, not how severe
+    # its finding is).
+    app = app_path if app_path is not None else REPO / "frontend" / "src" / "App.tsx"
+    if not app.exists():
+        report.fail(
+            "help-coverage",
+            f"{app} not found - cannot run route-coverage heuristic (basis missing; #2287)",
+        )
+        return
+    slug_blob = " ".join(en | de)
+    uncovered: list[str] = []
+    for route in ROUTE_RE.findall(read(app)):
+        if route in _ROUTE_NO_HELP:
+            continue
+        mapped = _ROUTE_HELP_SLUG.get(route)
+        if mapped is not None:
+            if mapped not in en or mapped not in de:
+                report.fail(
+                    "help-coverage",
+                    f"{route} is mapped to help page '{mapped}' (_ROUTE_HELP_SLUG) but that "
+                    "page is missing in en and/or de - stale mapping, a route cannot be "
+                    "declared covered by a page that is gone",
+                )
+            continue
+        # The last static (non-param) segment is the route's identity.
+        segments = [s for s in route.split("/") if s and not s.startswith(":")]
+        if not segments:
+            continue
+        keyword = segments[-1]
+        if keyword not in slug_blob:
+            uncovered.append(route)
+    if uncovered:
+        report.warn(
+            "help-coverage",
+            "routes with no obvious help page (heuristic; some may not need one): "
+            + ", ".join(sorted(set(uncovered))),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Check: manual test plan de/en parity  (FAIL)
+# ---------------------------------------------------------------------------
+
+_TESTPLAN_DE = Path("docs") / "manual-tests" / "testplan-adaptive-learner.md"
+_TESTPLAN_EN = Path("docs") / "manual-tests" / "testplan-adaptive-learner-en.md"
+
+_CHECKPOINT_RE = re.compile(r"^\s*- \[ \]")
+_SECTION_RE = re.compile(r"^### ")
+_ISSUE_REF_RE = re.compile(r"#(\d{3,5})")
+
+
+def _testplan_shape(text: str) -> tuple[int, int, dict[str, int]]:
+    """Count checkpoints, sections and issue references in one plan.
+
+    Order is deliberately NOT part of the shape: the two plans order
+    their sections differently (positions 23 to 27 as of #3065), so a
+    positional walk reports differences that are not drift.
+    """
+    checkpoints = sections = 0
+    refs: dict[str, int] = {}
+    for line in text.splitlines():
+        if _CHECKPOINT_RE.match(line):
+            checkpoints += 1
+        if _SECTION_RE.match(line):
+            sections += 1
+        for ref in _ISSUE_REF_RE.findall(line):
+            refs[ref] = refs.get(ref, 0) + 1
+    return checkpoints, sections, refs
+
+
+def check_testplan_parity(report: Report, plan_dir: Path | None = None) -> None:
+    """TESTPLAN-PFLICHT: the DE and EN manual test plans stay in sync.
+
+    #3065 found two checkpoints that existed only in the German plan,
+    by hand, because nothing checked it. The rule is binding; this is
+    its enforcement.
+    """
+    base = plan_dir if plan_dir is not None else REPO
+    de_path, en_path = base / _TESTPLAN_DE, base / _TESTPLAN_EN
+
+    for path in (de_path, en_path):
+        if not path.exists():
+            report.fail(
+                "testplan-parity",
+                f"{path} not found - cannot verify de/en parity (basis missing; #2287)",
+            )
+            return
+
+    de_text, en_text = read(de_path), read(en_path)
+    de_boxes, de_sections, de_refs = _testplan_shape(de_text)
+    en_boxes, en_sections, en_refs = _testplan_shape(en_text)
+
+    if not de_boxes and not en_boxes:
+        report.fail(
+            "testplan-parity",
+            "neither manual test plan contains a single '- [ ]' checkpoint - the "
+            "parity comparison would be vacuously true (basis missing; #2287)",
+        )
+        return
+
+    # Point 4 of the gate contract: say what was measured, so "0 findings"
+    # and "0 inputs examined" cannot print the same green.
+    report.note(
+        f"testplan-parity: de {de_boxes} checkpoints / {de_sections} sections, "
+        f"en {en_boxes} checkpoints / {en_sections} sections"
+    )
+
+    if de_boxes != en_boxes:
+        report.fail(
+            "testplan-parity",
+            f"checkpoint counts differ: de has {de_boxes}, en has {en_boxes} "
+            "- TESTPLAN-PFLICHT wants both language versions in sync",
+        )
+    if de_sections != en_sections:
+        report.fail(
+            "testplan-parity",
+            f"section counts differ: de has {de_sections}, en has {en_sections}",
+        )
+
+    only_de = sorted(set(de_refs) - set(en_refs), key=int)
+    only_en = sorted(set(en_refs) - set(de_refs), key=int)
+    if only_de:
+        report.fail(
+            "testplan-parity",
+            f"{len(only_de)} issue reference(s) cited only in the DE plan: "
+            + ", ".join("#" + r for r in only_de[:8]),
+        )
+    if only_en:
+        report.fail(
+            "testplan-parity",
+            f"{len(only_en)} issue reference(s) cited only in the EN plan: "
+            + ", ".join("#" + r for r in only_en[:8]),
+        )
+    differing = sorted(
+        (r for r in set(de_refs) & set(en_refs) if de_refs[r] != en_refs[r]), key=int
+    )
+    if differing:
+        detail = ", ".join(f"#{r} (de {de_refs[r]}, en {en_refs[r]})" for r in differing[:8])
+        report.fail(
+            "testplan-parity",
+            f"{len(differing)} issue reference(s) cited a different number of times: {detail}",
+        )
+
+    # #3274: DE and EN carry the same permanent ID for the same case.
+    _report_testplan_ids(report, "testplan-parity", base, ("TC",))
+
+
+def _report_testplan_ids(
+    report: Report, check_name: str, base: Path, prefixes: tuple[str, ...]
+) -> None:
+    """Run the checkpoint-ID gate (#3274) and fold its result into ``report``.
+
+    Every finding is a FAIL: a missing register or plan is a missing basis
+    (#2287), and an unnumbered, duplicated or cross-linked ID is exactly the
+    drift the IDs exist to prevent.
+    """
+    result = testplan_id_check(base, prefixes)
+    for note in result.notes:
+        report.note(note)
+    for finding in result.findings:
+        report.fail(check_name, finding)
+
+
+def check_testplan_ids(report: Report, plan_dir: Path | None = None) -> None:
+    """Case and suite IDs of the single-language plans and checklists (#3274, #3279).
+
+    The DE/EN main plan (TC-) is checked inside ``check_testplan_parity``,
+    because its IDs are part of the de/en contract.
+    """
+    base = plan_dir if plan_dir is not None else REPO
+    _report_testplan_ids(report, "testplan-ids", base, ("RTC", "LTC", "GTC", "OTC", "DTC", "STC"))
+
+
+# ---------------------------------------------------------------------------
+# Registry + runner
+# ---------------------------------------------------------------------------
+
+
+CHECKS = {
+    "version": lambda r, o: check_version(r, o.fix),
+    "plugins": lambda r, o: check_plugins(r, o.fix),
+    "test-counts": lambda r, o: check_test_counts(r, o.fix, o.test_counts),
+    "feature-completeness": lambda r, o: check_feature_completeness(r),
+    "stale-dates": lambda r, o: check_stale_dates(r),
+    "themes": lambda r, o: check_themes(r),
+    "mkdocs": lambda r, o: check_mkdocs(r),
+    "docs-third-party": lambda r, o: check_docs_third_party(r, REPO),
+    "help-index-versions": lambda r, o: check_help_index_versions(r),
+    "help-prose-versions": lambda r, o: check_help_prose_versions(r),
+    "help-changelog": lambda r, o: check_help_changelog(r),
+    "help-coverage": lambda r, o: check_help_coverage(r),
+    "locale-coverage": lambda r, o: check_locale_coverage(r, REPO / "docs" / "help"),
+    "help-strong-emphasis": lambda r, o: check_strong_emphasis(r, REPO / "docs" / "help"),
+    "help-terms": lambda r, o: check_help_terms(r, REPO),
+    "privacy-promises": lambda r, o: check_privacy_promises(r, REPO),
+    "testplan-parity": lambda r, o: check_testplan_parity(r),
+    "testplan-ids": lambda r, o: check_testplan_ids(r),
+    "feature-shots": lambda r, o: check_feature_shots(r),
+    "api-reference": lambda r, o: check_api_reference(r, REPO),
+    "i18n": lambda r, o: check_i18n(r, o.fix),
+}
+
+
+def run(selected: list[str], opts) -> Report:
+    report = Report()
+    for name in selected:
+        try:
+            CHECKS[name](report, opts)
+        except Exception as exc:  # a broken check must not mask the rest
+            report.fail(name, f"check raised {type(exc).__name__}: {exc}")
+    return report
+
+
+def print_report(report: Report, selected: list[str]) -> None:
+    print("Documentation verification")
+    print("=" * 60)
+    print(f"canonical version : v{canonical_version()}")
+    print(f"plugin dirs       : {plugin_count()}")
+    print(f"checks run        : {', '.join(selected)}")
+    print()
+
+    if not report.findings:
+        print("OK -- no drift found.")
+    else:
+        for f in report.findings:
+            tag = "FIXED" if f.fixed else f.severity
+            print(f"[{tag:5}] {f.check}: {f.message}")
+
+    for note in report.notes:
+        print(f"  note: {note}")
+
+    print()
+    print(
+        f"summary: {report.fail_count} FAIL, {report.warn_count} WARN"
+        + (f", {report.fixed_count} auto-fixed" if report.fixed_count else "")
+    )
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Verify Adaptive Learner documentation for drift.")
+    parser.add_argument(
+        "--check",
+        help="comma-separated subset of checks to run (default: all)",
+    )
+    parser.add_argument("--list", action="store_true", help="list registered checks and exit")
+    parser.add_argument(
+        "--fix", action="store_true", help="best-effort auto-fix of mechanical drift"
+    )
+    parser.add_argument(
+        "--test-counts",
+        dest="test_counts",
+        action="store_true",
+        help="also collect real pytest/vitest counts (slow)",
+    )
+    opts = parser.parse_args(argv)
+
+    if opts.list:
+        for name in CHECKS:
+            print(name)
+        return 0
+
+    if opts.check:
+        selected = [c.strip() for c in opts.check.split(",") if c.strip()]
+        unknown = [c for c in selected if c not in CHECKS]
+        if unknown:
+            parser.error(f"unknown check(s): {', '.join(unknown)}. Known: {', '.join(CHECKS)}")
+    else:
+        selected = list(CHECKS)
+
+    try:
+        report = run(selected, opts)
+    except Exception as exc:  # canonical source unreadable etc.
+        print(f"verifier could not run: {exc}", file=sys.stderr)
+        return 2
+
+    print_report(report, selected)
+    return 1 if report.fail_count else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

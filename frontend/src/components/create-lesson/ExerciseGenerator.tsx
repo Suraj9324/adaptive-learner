@@ -1,0 +1,706 @@
+/**
+ * Exercise generator — Step 3 of the Lesson Creator (Phase 65C).
+ *
+ * Auto-generates a config-driven mix of exercises from the cards via
+ * the shared ``generateExercises`` (the same generator the chat-
+ * analysis path uses). The user tunes the count, the type mix, and
+ * the drill direction, previews the result, reorders (@dnd-kit) or
+ * deletes individual exercises, and can regenerate.
+ *
+ * The advanced manual-exercise editor is the EXP-021 "Folge-Ausbau"
+ * (follow-on) and is intentionally not part of this step yet; the
+ * auto path is the default + only path for now.
+ */
+
+import {useEffect, useState} from "react";
+import {Sparkles, Trash2, GripVertical, Pencil, Plus} from "lucide-react";
+import {
+    DndContext,
+    type DragEndEvent,
+    KeyboardSensor,
+    PointerSensor,
+    closestCenter,
+    useSensor,
+    useSensors,
+} from "@dnd-kit/core";
+import {
+    SortableContext,
+    arrayMove,
+    sortableKeyboardCoordinates,
+    useSortable,
+    verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import {CSS} from "@dnd-kit/utilities";
+
+import {Button} from "@/components/ui/button";
+import {Input} from "@/components/ui/input";
+import {useI18n} from "../../hooks/ui/useI18n";
+import FormHint from "../../shared/forms/FormHint";
+import ExerciseEditor from "./ExerciseEditor";
+import ExtensionExerciseEditor from "./ExtensionExerciseEditor";
+import {
+    createBlankExercise,
+    createBlankExtensionExercise,
+    DICTATION_EXT_TYPE,
+    EXTENSION_WIZARD_TYPES,
+    isExtensionType,
+    newExerciseId,
+    newExtensionExerciseId,
+    validateExtensionExercise,
+    type ExerciseGenConfig,
+    type ExtensionWizardType,
+    type GeneratableType,
+} from "../../lib/exercises";
+import {exerciseTypeLabelKey} from "../../lib/content/lesson/edit-error-keys";
+import {checkExerciseDraft} from "../../lib/content/lesson/edit/exercise-draft-check";
+import {QUALITY_MINIMUMS as QUALITY} from "learn-content-engine/rules";
+import type {ContentLessonExercise} from "../../storage/types";
+
+/** #3389 - the exercise count below which "Next" is blocked. A lesson
+ *  needs one exercise to be worth saving; the engine's minimum of
+ *  ``QUALITY.minExercisesPerLesson`` gates sharing only (owner decision,
+ *  option 2), shown as a hint here and as a share row on the review step. */
+export const MIN_EXERCISES_TO_ADVANCE = 1;
+export const EXERCISE_COUNT_MIN = 5;
+export const EXERCISE_COUNT_MAX = 20;
+
+/**
+ * Coerce a raw exercise-count value onto the valid `[MIN, MAX]` band.
+ *
+ * Non-numeric or non-finite input (empty field, `"abc"`, `NaN`) falls
+ * back to the minimum; out-of-range numbers clamp to the nearest
+ * bound; fractional input rounds. This is the single guard the number
+ * input and the slider both commit through, so they can never diverge
+ * from the generator's expectations (`selectExercises` also caps with
+ * `Math.max(1, count)`).
+ */
+export function clampExerciseCount(value: number): number {
+    if (!Number.isFinite(value)) return EXERCISE_COUNT_MIN;
+    return Math.min(
+        EXERCISE_COUNT_MAX,
+        Math.max(EXERCISE_COUNT_MIN, Math.round(value)),
+    );
+}
+
+/** True iff any exercise (core or extension) is still incomplete — the
+ *  half-filled-exercise guard shared by every advance gate (#1970). */
+export function hasIncompleteExercise(
+    exercises: ContentLessonExercise[],
+    cardIds: readonly string[],
+): boolean {
+    return exercises.some((ex) =>
+        isExtensionType(ex.type)
+            ? !validateExtensionExercise(ex).valid
+            : !checkExerciseDraft(ex, cardIds).valid,
+    );
+}
+
+/** The exercise count below which "Next" is blocked, the same in create
+ *  and edit mode since #3389 (#1970 had relaxed only edit mode to 1). */
+export function minExercisesToAdvance(_editMode: boolean): number {
+    return MIN_EXERCISES_TO_ADVANCE;
+}
+
+const ALL_TYPES: GeneratableType[] = [
+    "matching",
+    "free_text",
+    "cloze",
+    "word_tiles",
+    "picture_choice",
+    "multiple_choice",
+];
+
+/** #2508 — the extension types offered in the manual picker's second group.
+ *  Dictation is excluded here because it is already the standard group's 7th
+ *  button (#1895); listing it twice would duplicate it within one picker. */
+const PICKER_EXTENSION_TYPES: ExtensionWizardType[] = EXTENSION_WIZARD_TYPES.filter(
+    (type) => type !== DICTATION_EXT_TYPE,
+);
+
+/** Short slug for a type's testid / i18n key (strips the ``ext:al-`` prefix):
+ *  ``ext:al-error-correction`` -> ``error-correction``. Mirrors ExtensionSteps. */
+function extSlug(type: string): string {
+    return type.replace("ext:al-", "");
+}
+
+/** Narrow a picked picker type to an {@link ExtensionWizardType} so the
+ *  extension blank factory is only ever called with an extension type. */
+function isWizardExtension(
+    type: GeneratableType | ExtensionWizardType,
+): type is ExtensionWizardType {
+    return (EXTENSION_WIZARD_TYPES as readonly string[]).includes(type);
+}
+
+export interface ExerciseGeneratorProps {
+    exercises: ContentLessonExercise[];
+    config: ExerciseGenConfig;
+    onConfigChange: (config: ExerciseGenConfig) => void;
+    onGenerate: () => void;
+    onReorder: (exercises: ContentLessonExercise[]) => void;
+    onDelete: (id: string) => void;
+    onUpdate: (id: string, updated: ContentLessonExercise) => void;
+    /** Append a manually-created exercise (#1849). */
+    onAdd: (exercise: ContentLessonExercise) => void;
+    /** The ids of the lesson's cards, for the inline editor's card
+     *  reference check (#3387). */
+    cardIds: readonly string[];
+    /** #1970 — hide the generate-from-cards config, the "some selected types
+     *  produced nothing" explanation, and the create-time minimum hint. Used by
+     *  the cardless (book/theory-lesson) edit flow, where there are no cards to
+     *  generate from — showing the config would mislead the editor and a
+     *  "Generate" click would wipe the loaded exercises. The exercise list +
+     *  add / edit / delete stay. */
+    hideGenerator?: boolean;
+}
+
+export default function ExerciseGenerator({
+    exercises,
+    config,
+    onConfigChange,
+    onGenerate,
+    onReorder,
+    onDelete,
+    onUpdate,
+    onAdd,
+    cardIds,
+    hideGenerator = false,
+}: ExerciseGeneratorProps) {
+    const {t} = useI18n();
+    const sensors = useSensors(
+        useSensor(PointerSensor, {activationConstraint: {distance: 5}}),
+        useSensor(KeyboardSensor, {
+            coordinateGetter: sortableKeyboardCoordinates,
+        }),
+    );
+
+    // Manual "+ Add exercise" (#1849): pick a type -> append an empty
+    // exercise of that type and open it straight in the inline editor.
+    const [picking, setPicking] = useState(false);
+    const [autoEditId, setAutoEditId] = useState<string | null>(null);
+
+    // An extension type picked here (#1895 Diktat, #2508 the rest) reuses the
+    // extension blank factory + editor, not the core ones. The core types use
+    // the core factory. The guard narrows the union so neither factory is
+    // called with the wrong type.
+    function addManual(type: GeneratableType | ExtensionWizardType) {
+        const exercise = isWizardExtension(type)
+            ? createBlankExtensionExercise(type, newExtensionExerciseId())
+            : createBlankExercise(type, newExerciseId());
+        onAdd(exercise);
+        setAutoEditId(exercise.id);
+        setPicking(false);
+    }
+
+    // Uncommitted text of the number input: lets the user clear + retype
+    // freely (a directly-clamped controlled value would fight mid-edit).
+    // Committed on blur / Enter; the slider commits `config.count`
+    // immediately and this stays in sync via the effect below.
+    const [countDraft, setCountDraft] = useState(String(config.count));
+    useEffect(() => {
+        setCountDraft(String(config.count));
+    }, [config.count]);
+
+    function commitCountDraft() {
+        const clamped = clampExerciseCount(Number(countDraft));
+        setCountDraft(String(clamped));
+        if (clamped !== config.count) {
+            onConfigChange({...config, count: clamped});
+        }
+    }
+
+    const countLabel = t(
+        "create_lesson.exercises.count_label",
+        "Number of exercises",
+    );
+
+    function toggleType(type: GeneratableType) {
+        const set = new Set(config.types);
+        if (set.has(type)) set.delete(type);
+        else set.add(type);
+        onConfigChange({...config, types: Array.from(set)});
+    }
+
+    // #1847 — after a generation, explain any SELECTED type that produced
+    // nothing (cloze/word-tiles need an example sentence; picture-choice
+    // needs card images), so a requested type is never silently dropped.
+    const producedTypes = new Set(exercises.map((e) => e.type));
+    const missingSelectedTypes =
+        exercises.length > 0
+            ? config.types.filter((type) => !producedTypes.has(type))
+            : [];
+
+    function handleDragEnd(event: DragEndEvent) {
+        const {active, over} = event;
+        if (!over || active.id === over.id) return;
+        const oldIndex = exercises.findIndex((e) => e.id === active.id);
+        const newIndex = exercises.findIndex((e) => e.id === over.id);
+        if (oldIndex < 0 || newIndex < 0) return;
+        onReorder(arrayMove(exercises, oldIndex, newIndex));
+    }
+
+    return (
+        <section
+            className="create-lesson-step flex flex-col gap-6"
+            data-testid="create-lesson-step-3"
+            aria-label={t("create_lesson.exercises.heading", "Generate exercises")}
+        >
+            <h2 className="text-xl font-semibold text-fg-primary">
+                {t("create_lesson.exercises.heading", "Generate exercises")}
+            </h2>
+
+            {/* Config — hidden in the cardless edit flow (#1970) */}
+            {!hideGenerator && (
+            <div
+                className="exercise-gen-config flex flex-col gap-4 rounded-lg border border-border bg-card p-4"
+                data-testid="exercise-gen-config"
+            >
+                <div className="flex flex-col gap-1.5">
+                    <label
+                        htmlFor="exercise-count-input"
+                        className="text-sm font-medium text-fg-primary"
+                    >
+                        {countLabel}
+                    </label>
+                    <div className="flex items-center gap-3">
+                        <input
+                            type="range"
+                            min={EXERCISE_COUNT_MIN}
+                            max={EXERCISE_COUNT_MAX}
+                            value={config.count}
+                            className="min-w-0 flex-1 accent-[var(--accent)]"
+                            data-testid="exercise-count-slider"
+                            aria-label={countLabel}
+                            onChange={(e) =>
+                                onConfigChange({
+                                    ...config,
+                                    count: Number(e.target.value),
+                                })
+                            }
+                        />
+                        <Input
+                            id="exercise-count-input"
+                            type="number"
+                            inputMode="numeric"
+                            min={EXERCISE_COUNT_MIN}
+                            max={EXERCISE_COUNT_MAX}
+                            value={countDraft}
+                            className="w-20 shrink-0 text-center"
+                            data-testid="exercise-count-input"
+                            aria-label={countLabel}
+                            onChange={(e) => setCountDraft(e.target.value)}
+                            onBlur={commitCountDraft}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") commitCountDraft();
+                            }}
+                        />
+                    </div>
+                </div>
+
+                <fieldset className="exercise-gen-types m-0 flex flex-col gap-2 border-0 p-0">
+                    <legend className="text-sm font-medium text-fg-primary">
+                        {t("create_lesson.exercises.types_label", "Exercise types")}
+                    </legend>
+                    {ALL_TYPES.map((type) => (
+                        <label key={type} className="exercise-gen-type flex items-center gap-2">
+                            <input
+                                type="checkbox"
+                                className="accent-[var(--accent)]"
+                                data-testid={`exercise-type-${type}`}
+                                checked={config.types.includes(type)}
+                                onChange={() => toggleType(type)}
+                            />
+                            {t(`create_lesson.exercises.type.${type}`, type)}
+                        </label>
+                    ))}
+                </fieldset>
+
+                <label className="form-field flex flex-col gap-1.5">
+                    <span className="text-sm font-medium text-fg-primary">
+                        {t("create_lesson.exercises.direction_label", "Direction")}
+                    </span>
+                    <select
+                        data-testid="exercise-direction"
+                        className="flex min-h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        value={config.direction}
+                        onChange={(e) =>
+                            onConfigChange({
+                                ...config,
+                                direction:
+                                    e.target
+                                        .value as ExerciseGenConfig["direction"],
+                            })
+                        }
+                    >
+                        {(["auto", "receptive", "productive", "balanced"] as const).map(
+                            (d) => (
+                                <option key={d} value={d}>
+                                    {t(`create_lesson.exercises.dir.${d}`, d)}
+                                </option>
+                            ),
+                        )}
+                    </select>
+                </label>
+
+                <div className="mt-4 flex justify-end gap-3 max-[769px]:flex-col max-[769px]:items-stretch max-[769px]:gap-2">
+                    <Button
+                        type="button"
+                        data-testid="exercise-generate"
+                        onClick={onGenerate}
+                        disabled={config.types.length === 0}
+                    >
+                        <Sparkles size={14} aria-hidden="true" />
+                        {exercises.length === 0
+                            ? t(
+                                  "create_lesson.exercises.generate",
+                                  "Auto-generate exercises",
+                              )
+                            : t("create_lesson.exercises.regenerate", "Regenerate")}
+                    </Button>
+                </div>
+            </div>
+            )}
+
+            {/* Count + minimum */}
+            <div className="exercise-gen-count flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-medium text-fg-primary" data-testid="exercise-list-count">
+                    {t("create_lesson.exercises.count", "{n} exercises").replace(
+                        "{n}",
+                        String(exercises.length),
+                    )}
+                </span>
+                {!hideGenerator &&
+                    exercises.length > 0 &&
+                    exercises.length < QUALITY.minExercisesPerLesson && (
+                        <FormHint as="span" data-testid="exercise-min-hint">
+                            {t(
+                                "create_lesson.exercises.share_min_hint",
+                                "Sharing needs at least {n} exercises",
+                            ).replace("{n}", String(QUALITY.minExercisesPerLesson))}
+                        </FormHint>
+                    )}
+            </div>
+
+            {/* Why a selected type produced nothing (#1847) */}
+            {!hideGenerator && missingSelectedTypes.length > 0 && (
+                <div
+                    className="flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3"
+                    data-testid="exercise-gen-missing"
+                    role="status"
+                >
+                    <FormHint as="p" variant="warning">
+                        {t(
+                            "create_lesson.exercises.gen_missing_intro",
+                            "Some selected types produced no exercises:",
+                        )}
+                    </FormHint>
+                    <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                        {missingSelectedTypes.map((type) => (
+                            <li
+                                key={type}
+                                className="text-sm text-fg-secondary"
+                                data-testid={`exercise-gen-missing-${type}`}
+                            >
+                                {t(
+                                    `create_lesson.exercises.gen_none.${type}`,
+                                    type,
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {/* Preview list (sortable) */}
+            <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+            >
+                <SortableContext
+                    items={exercises.map((e) => e.id)}
+                    strategy={verticalListSortingStrategy}
+                >
+                    <ul
+                        className="exercise-gen-list flex list-none flex-col gap-2 p-0"
+                        data-testid="exercise-list"
+                    >
+                        {exercises.map((ex) => (
+                            <SortableExerciseRow
+                                key={ex.id}
+                                exercise={ex}
+                                onDelete={onDelete}
+                                onUpdate={onUpdate}
+                                cardIds={cardIds}
+                                autoEdit={ex.id === autoEditId}
+                            />
+                        ))}
+                    </ul>
+                </SortableContext>
+            </DndContext>
+
+            {/* Manually add an exercise (#1849) */}
+            <div className="flex flex-col gap-2">
+                {picking ? (
+                    <div
+                        className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3"
+                        data-testid="exercise-add-picker"
+                    >
+                        <span className="text-sm font-medium text-fg-primary">
+                            {t(
+                                "create_lesson.exercises.add_heading",
+                                "Choose an exercise type",
+                            )}
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                            {ALL_TYPES.map((type) => (
+                                <Button
+                                    key={type}
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    data-testid={`exercise-add-type-${type}`}
+                                    onClick={() => addManual(type)}
+                                >
+                                    {t(
+                                        `create_lesson.exercises.type.${type}`,
+                                        type,
+                                    )}
+                                </Button>
+                            ))}
+                            {/* #1895 — Diktat (extension type) as the 7th
+                                option, alongside the six core types. */}
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                data-testid="exercise-add-type-dictation"
+                                onClick={() => addManual(DICTATION_EXT_TYPE)}
+                            >
+                                {t(
+                                    "create_lesson.extensions.type.dictation",
+                                    "Dictation",
+                                )}
+                            </Button>
+                        </div>
+
+                        {/* #2508 — the extension types as a second, labelled
+                            group so both blocks are reachable from one picker. */}
+                        <span
+                            className="mt-1 text-sm font-medium text-fg-primary"
+                            id="exercise-add-ext-group"
+                            data-testid="exercise-add-ext-group"
+                        >
+                            {t(
+                                "create_lesson.exercises.add_ext_group",
+                                "Extension types",
+                            )}
+                        </span>
+                        <div
+                            className="flex flex-wrap gap-2"
+                            role="group"
+                            aria-labelledby="exercise-add-ext-group"
+                        >
+                            {PICKER_EXTENSION_TYPES.map((type) => (
+                                <Button
+                                    key={type}
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    data-testid={`exercise-add-type-${extSlug(type)}`}
+                                    onClick={() => addManual(type)}
+                                >
+                                    {t(
+                                        `create_lesson.extensions.type.${extSlug(type)}`,
+                                        type,
+                                    )}
+                                </Button>
+                            ))}
+                        </div>
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="w-fit"
+                            data-testid="exercise-add-cancel"
+                            onClick={() => setPicking(false)}
+                        >
+                            {t("create_lesson.cancel", "Cancel")}
+                        </Button>
+                    </div>
+                ) : (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="w-fit"
+                        data-testid="exercise-add"
+                        onClick={() => setPicking(true)}
+                    >
+                        <Plus size={14} aria-hidden="true" />
+                        {t("create_lesson.exercises.add", "Add exercise")}
+                    </Button>
+                )}
+            </div>
+        </section>
+    );
+}
+
+type Translate = (key: string, fallback?: string) => string;
+
+/** A short human description of an exercise for the preview row. The
+ *  counted summaries go through the catalog (#3093); the content-bearing
+ *  ones (a sentence, the tiles, the prompt) are the exercise's own text. */
+function describeExercise(ex: ContentLessonExercise, t: Translate): string {
+    const counted = (key: string, fallback: string, n: number) =>
+        t(`create_lesson.exercises.summary.${key}`, fallback).replace("{n}", String(n));
+    switch (ex.type) {
+        case "matching":
+            return counted("pairs", "{n} pairs", ex.pairs?.length ?? 0);
+        case "cloze":
+            return ex.sentence ?? "";
+        case "word_tiles":
+            return (ex.tiles ?? []).join(" ");
+        case "picture_choice":
+            return counted("images", "{n} images", ex.images?.length ?? 0);
+        case "multiple_choice":
+            return counted("options", "{n} answer options", ex.options?.length ?? 0);
+        case "free_text":
+        default:
+            return ex.prompt;
+    }
+}
+
+interface SortableExerciseRowProps {
+    exercise: ContentLessonExercise;
+    onDelete: (id: string) => void;
+    onUpdate: (id: string, updated: ContentLessonExercise) => void;
+    cardIds: readonly string[];
+    /** Open straight in the inline editor on mount (a manually-added
+     *  exercise, #1849). */
+    autoEdit?: boolean;
+}
+
+function SortableExerciseRow({
+    exercise,
+    onDelete,
+    onUpdate,
+    cardIds,
+    autoEdit = false,
+}: SortableExerciseRowProps) {
+    const {t} = useI18n();
+    const {attributes, listeners, setNodeRef, transform, transition, isDragging} =
+        useSortable({id: exercise.id});
+    const [editing, setEditing] = useState(autoEdit);
+    // EXP-050 (#2511): a type conversion from an extension source
+    // (dictation / image-description) to a core ``free_text`` swaps the row's
+    // editor family, so it must commit to the parent (it cannot live in the
+    // ext editor's draft). This single-slot snapshot of the pre-conversion
+    // exercise lets Cancel restore it — the editor-session "original", not a
+    // conversion undo stack (EXP-050 explicitly rules that out).
+    const [preConvert, setPreConvert] = useState<ContentLessonExercise | null>(
+        null,
+    );
+    const style: React.CSSProperties = {
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.6 : 1,
+    };
+
+    function handleConvert(converted: ContentLessonExercise) {
+        setPreConvert((prev) => prev ?? exercise);
+        onUpdate(exercise.id, converted);
+    }
+    function handleSave(updated: ContentLessonExercise) {
+        onUpdate(exercise.id, updated);
+        setPreConvert(null);
+        setEditing(false);
+    }
+    function handleCancel() {
+        if (preConvert) {
+            onUpdate(exercise.id, preConvert);
+            setPreConvert(null);
+        }
+        setEditing(false);
+    }
+
+    if (editing) {
+        return (
+            <li
+                ref={setNodeRef}
+                style={style}
+                className="exercise-row is-editing flex flex-col gap-3 rounded-lg border border-border bg-card p-3"
+                data-testid={`exercise-row-${exercise.id}`}
+                data-type={exercise.type}
+            >
+                <span className="exercise-row-type w-fit rounded-md bg-bg-elevated px-2 py-0.5 text-xs font-medium text-fg-secondary">
+                    {t(exerciseTypeLabelKey(exercise.type), exercise.type)}
+                </span>
+                {/* Key on the type so a COMMITTED conversion that keeps the
+                    same editor family (ext<->ext, e.g. graded-quiz <->
+                    reading-comprehension) remounts the editor onto the converted
+                    exercise instead of keeping the old internal draft. An
+                    in-draft core conversion never changes exercise.type until
+                    Save, so this leaves it untouched. */}
+                {isExtensionType(exercise.type) ? (
+                    <ExtensionExerciseEditor
+                        key={exercise.type}
+                        exercise={exercise}
+                        onSave={handleSave}
+                        onCancel={handleCancel}
+                        allowConversion
+                        onConvert={handleConvert}
+                    />
+                ) : (
+                    <ExerciseEditor
+                        key={exercise.type}
+                        exercise={exercise}
+                        cardIds={cardIds}
+                        onSave={handleSave}
+                        onCancel={handleCancel}
+                    />
+                )}
+            </li>
+        );
+    }
+
+    return (
+        <li
+            ref={setNodeRef}
+            style={style}
+            className="exercise-row flex items-center gap-3 rounded-lg border border-border bg-card p-3"
+            data-testid={`exercise-row-${exercise.id}`}
+            data-type={exercise.type}
+        >
+            <button
+                type="button"
+                className="card-row-handle flex shrink-0 cursor-grab items-center text-fg-muted"
+                aria-label={t("create_lesson.exercises.drag", "Drag to reorder")}
+                {...attributes}
+                {...listeners}
+            >
+                <GripVertical size={16} aria-hidden="true" />
+            </button>
+            <span className="exercise-row-type shrink-0 rounded-md bg-bg-elevated px-2 py-0.5 text-xs font-medium text-fg-secondary">
+                {t(exerciseTypeLabelKey(exercise.type), exercise.type)}
+            </span>
+            <span className="exercise-row-desc muted min-w-0 flex-1 truncate text-sm text-fg-muted">{describeExercise(exercise, t)}</span>
+            <button
+                type="button"
+                className="card-row-action flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-elevated hover:text-fg-primary"
+                data-testid={`exercise-edit-${exercise.id}`}
+                aria-label={t("create_lesson.exercises.edit.edit", "Edit exercise")}
+                onClick={() => setEditing(true)}
+            >
+                <Pencil size={14} aria-hidden="true" />
+            </button>
+            <button
+                type="button"
+                className="card-row-action flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-elevated hover:text-fg-primary"
+                data-testid={`exercise-delete-${exercise.id}`}
+                aria-label={t("create_lesson.exercises.delete", "Delete exercise")}
+                onClick={() => onDelete(exercise.id)}
+            >
+                <Trash2 size={14} aria-hidden="true" />
+            </button>
+        </li>
+    );
+}

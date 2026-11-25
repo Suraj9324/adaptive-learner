@@ -1,0 +1,233 @@
+name: Launcher (macOS)
+
+# Builds the macOS .app bundle launcher and publishes a SHA256 checksum
+# next to it. Runs on:
+#   - push to develop/main when launcher/ changes (smoke build, uploads
+#     an artifact to the workflow run for download + manual verification)
+#   - pull_request touching launcher/ (same smoke build)
+#   - workflow_dispatch (on-demand smoke build)
+# Release assets are NOT attached here: the release manager takes the
+# artifacts of the GREEN main-push build of the tag commit and attaches
+# them via `gh release upload` (release-workflow.md Step 8), never a
+# rebuild (bit-drift between identical-content builds).
+#
+# Parallels launcher-windows.yml and launcher-linux.yml. The launcher
+# source code is platform-agnostic; only the spec file's BUNDLE block
+# is macOS-specific.
+#
+# arm64 only for initial D-02 (macos-15 runner = Apple Silicon; macos-14 was
+# withdrawn, #3964). Intel
+# Mac support would require universal2 builds or a separate macos-13
+# job - deferred until users request it.
+#
+# Unsigned binary: first launch requires right-click -> Open to bypass
+# Gatekeeper. Code signing requires an Apple Developer account and is
+# out of scope for the initial D-02.
+
+# green-gate-exclusion: release-racing - this build runs on the tag
+# commit's main push while the publish gate asks "is the commit green";
+# the green-gate script derives this workflow's job names into its
+# exclusion set via this marker line (#2482).
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-macos.yml"
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-macos.yml"
+  # NO release: trigger (v2.8.0 decision, Option 1): created never fires
+  # for drafts, published would re-run the chain on draft-publish and
+  # re-build a NON-bit-identical artifact (~48k bytes drift between
+  # identical-content builds) - verified one thing, shipped another.
+  # The chain runs ON DEMAND via workflow_dispatch; the release
+  # checklist carries the trigger. Foot-gun this documents: creating
+  # a release directly produces NO image and NO assets by itself.
+  workflow_dispatch:
+
+permissions:
+  # Read-only is sufficient: the only step that wrote to releases
+  # (action-gh-release attach) was removed with the dead release-event
+  # gates (#2472); the smoke build only checks out and uploads a workflow
+  # artifact. Release assets are attached out-of-band by the RM.
+  contents: read
+
+# Defensive opt-in: any JavaScript-runtime action still declaring
+# Node 20 (third-party or stragglers) is coerced to Node 24. After
+# the 2026-05-14 standard-action bumps (checkout v5, setup-python v6,
+# setup-node v5, upload-artifact v6, cache v5, configure-pages v6,
+# upload-pages-artifact v5, deploy-pages v5, softprops/action-gh-release v3)
+# every action we use natively runs on Node 24, so this is now a
+# safety net for future additions rather than an active fix.
+# Default Node 20 is removed September 16th 2026 per
+# https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: Build launcher .app bundle
+    runs-on: macos-15  # Apple Silicon (arm64)
+    defaults:
+      run:
+        working-directory: launcher
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      # #2117: the backend job caches its Poetry virtualenv (ci.yml); this one
+      # never did, so every run rebuilds pycairo/pygobject from source over
+      # the network - the exposure the retry below papers over. Keyed on the
+      # lockfile, so a dependency change still gets a clean resolve.
+      - name: Cache Poetry virtualenv (launcher)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/pypoetry/virtualenvs
+          key: poetry-launcher-macos-py3.12-${{ hashFiles('launcher/poetry.lock') }}
+          restore-keys: |
+            poetry-launcher-macos-py3.12-
+
+      # #2117: pycairo ships no wheel for this platform (17 wheels, all Windows, plus one
+      # sdist), so every run compiles it - and pygobject - from source,
+      # fetching build requirements into an isolated env. A truncated fetch
+      # anywhere in that chain surfaces as "BadZipFile / File is not a zip
+      # file" or "Cannot install build-system.requires". Seen three times in
+      # one day, twice on this job. Bounded retry, and each attempt is
+      # visible: a silent retry would hide a real, permanent breakage.
+      - name: Install launcher dependencies
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::poetry install (attempt $attempt/3)"
+            if poetry install --no-interaction --no-ansi; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::poetry install failed on attempt $attempt/3"
+            sleep $((attempt * 15))
+          done
+          echo "::error::poetry install failed three times - this is not the #2117 flake"
+          exit 1
+
+      - name: Run launcher unit tests
+        run: poetry run pytest tests/ -v
+
+      - name: Generate launcher icon from brand mark (via Pillow)
+        run: poetry run python scripts/make_icon.py
+
+      - name: Convert icon to .icns (macOS-only iconutil)
+        # adaptive-learner.ico is multi-size; make_icns.py extracts the largest
+        # frame, resamples to the standard .icns size set, and invokes
+        # iconutil. iconutil is macOS-only so this step does not run on
+        # Linux/Windows builds.
+        run: poetry run python scripts/make_icns.py
+
+      - name: Build .app bundle
+        run: poetry run pyinstaller adaptive-learner-launcher.spec --clean --noconfirm
+
+      # #2101: until now nothing ever STARTED a produced binary - the
+      # artifact was called a "smoke artifact" and was never smoked. On
+      # Apple silicon an unsigned Mach-O is SIGKILLed by the kernel
+      # ("Killed: 9") regardless of Gatekeeper, so "it built" says nothing
+      # about "it runs". --version and --verify-bundle are both handled
+      # before any Tk import, so they work on a headless runner.
+      - name: Smoke-run the built binary (#2101)
+        run: |
+          set -u
+          BIN="dist/AdaptiveLearner Launcher.app/Contents/MacOS/adaptive-learner-launcher"
+          [ -x "$BIN" ] || BIN=$(find "dist/AdaptiveLearner Launcher.app/Contents/MacOS" -type f -perm +111 | head -1)
+          echo "binary: $BIN"
+          echo "--- codesign state ---"
+          codesign -dv "$BIN" 2>&1 || echo "(unsigned)"
+          echo "--- run: --version ---"
+          if "$BIN" --version; then
+            echo "RESULT: the binary starts as built"
+          else
+            code=$?
+            echo "RESULT: the as-built binary FAILED with exit $code (137/SIGKILL = unsigned Mach-O)"
+            echo "--- retrying after an ad-hoc signature ---"
+            codesign --force --deep --sign - "dist/AdaptiveLearner Launcher.app"
+            "$BIN" --version
+            echo "RESULT: an ad-hoc signature fixes it - the build must sign"
+          fi
+          echo "--- run: --verify-bundle ---"
+          "$BIN" --verify-bundle
+
+      - name: Zip .app bundle
+        # Notarization / distribution expect the .app inside a ZIP or DMG.
+        # We ship ZIP only for initial D-02 to keep the pipeline simple.
+        run: |
+          cd dist
+          zip -r adaptive-learner-launcher-macos.zip "AdaptiveLearner Launcher.app"
+
+      # #2106: the step above proves the binary starts AS BUILT. A user
+      # runs it AS DOWNLOADED, and a downloaded file carries
+      # com.apple.quarantine - which is what Gatekeeper acts on. Command
+      # line unzip does not propagate the flag, so it is set explicitly on
+      # both the ZIP and the extracted app, read back as proof, and the
+      # system assessment is logged verbatim: that sentence is what a
+      # user's Mac decides on.
+      - name: Smoke-run the DOWNLOADED artifact (quarantined, #2106)
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/downloaded"
+          rm -rf "$WORK" && mkdir -p "$WORK"
+          cp dist/adaptive-learner-launcher-macos.zip "$WORK/"
+          cd "$WORK"
+          # The exact shape Safari writes: flags;timestamp;agent;uuid
+          xattr -w com.apple.quarantine \
+            "0083;$(printf '%x' $(date +%s));Safari;$(uuidgen)" \
+            adaptive-learner-launcher-macos.zip
+          unzip -q adaptive-learner-launcher-macos.zip
+          APP="AdaptiveLearner Launcher.app"
+          xattr -w com.apple.quarantine \
+            "0083;$(printf '%x' $(date +%s));Safari;$(uuidgen)" "$APP"
+          echo "--- proof the attribute is really set ---"
+          xattr -p com.apple.quarantine "$APP" \
+            || { echo "FAIL: quarantine attribute was not set - the test would prove nothing"; exit 1; }
+          echo "--- system assessment (spctl), verbatim ---"
+          set +e
+          spctl -a -vvv -t exec "$APP" 2>&1
+          echo "spctl verdict exit code: $?"
+          echo "--- start the quarantined app ---"
+          BIN="$APP/Contents/MacOS/adaptive-learner-launcher"
+          out=$("$BIN" --version 2>&1); code=$?
+          set -e
+          echo "$out"
+          echo "exit code: $code"
+          if [ "$code" -eq 0 ]; then
+            echo "RESULT: the DOWNLOADED (quarantined) app starts - exit 0"
+          else
+            echo "RESULT: the DOWNLOADED (quarantined) app is BLOCKED - exit $code"
+            echo "This is a finding, not a flake: a user would have to right-click > Open,"
+            echo "or clear the flag with xattr -d com.apple.quarantine. See #2106."
+            exit 1
+          fi
+
+      - name: Compute SHA256 checksum
+        run: |
+          cd dist
+          hash=$(shasum -a 256 adaptive-learner-launcher-macos.zip | awk '{print $1}')
+          echo "$hash  adaptive-learner-launcher-macos.zip" > adaptive-learner-launcher-macos.zip.sha256
+          echo "SHA256: $hash"
+
+      - name: Upload smoke artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: adaptive-learner-launcher-macos
+          path: |
+            launcher/dist/adaptive-learner-launcher-macos.zip
+            launcher/dist/adaptive-learner-launcher-macos.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,115 @@
+/**
+ * ContentHub — the single "Inhalte" destination at ``/content`` (#856).
+ *
+ * Merges the former "Meine Inhalte" (``/content``) and "Inhalte entdecken"
+ * (``/discover``) pages plus chat import into one tabbed hub:
+ *   - Entdecken     → the {@link Discover} page (find + download sets) — DEFAULT
+ *   - Meine Inhalte → the {@link Content} page (downloaded sets + repos)
+ *   - Importieren   → the {@link Import} page (chat import list)
+ *   - Erstellen     → the {@link CreateLesson} wizard (#3006)
+ *
+ * As with {@link ProgressHub} / the former DiscoverHub, the page components are
+ * embedded unchanged and only the active tab is mounted (lazy), so the active
+ * child owns the page's ``<main id="main">``. The active tab lives in the URL
+ * (``?tab=discover|my|import|create``), so ``/discover`` redirects to
+ * ``/content?tab=discover`` and ``/import`` to ``/content?tab=import`` while the
+ * deep-link route ``/content/import/:conversationId`` (ImportDetail) stays
+ * separate. ``/create-lesson`` redirects the same way (#3006), while its own
+ * deep link ``/create-lesson/edit/:source/:setId`` stays separate too. The default tab is **Entdecken** so a first-time user is guided to
+ * find content instead of landing on an empty "My content" page.
+ *
+ * The first three tab labels reuse existing, fully-translated keys
+ * (``discover.tab.discover`` / ``nav.content`` / ``discover.tab.import``); only
+ * ``content.tab.create`` is new (#3006), translated in all eleven catalogues.
+ *
+ * #3006 — the Erstellen tab REVISES the #1253 decision that put "Neue Lektion
+ * erstellen" under Importieren as "import/creation-related". Getting something
+ * that exists and making something new are different intents; nobody looks for
+ * creating under importing. Do not fold it back without revisiting #3006.
+ *
+ * #3012 — the bar itself is the shared {@link TabBar}: one behaviour for the
+ * three hubs instead of three accidental ones, compact on phones. That is what
+ * makes a FOURTH tab affordable here: at the old 32px padding / 14px type four
+ * tabs needed 451.7px and fit on no phone at all; compact they need 337.1px and
+ * fit from 375px up. At 320px they still wrap, which is the bar's defined
+ * fallback rather than an accident.
+ *
+ * The tab ORDER is user-configurable (#1378, Settings → General). The FIRST
+ * configured tab is the initial active tab when ``/content`` is opened with no
+ * ``?tab`` param; an explicit ``?tab=<id>`` deep link always wins over that.
+ */
+
+import { Suspense, lazy } from "react";
+import { useSearchParams } from "react-router";
+
+import TabBar from "../../shared/layout/TabBar";
+import { useI18n } from "../../hooks/ui/useI18n";
+import { useContentTabOrder } from "../../hooks/content/useContentTabOrder";
+import type { ContentTabId } from "../../lib/content/contentTabOrderPref";
+
+const Discover = lazy(() => import("./Discover"));
+const Content = lazy(() => import("./Content"));
+const Import = lazy(() => import("./Import"));
+const CreateLesson = lazy(() => import("../lesson/CreateLesson"));
+
+type TabId = ContentTabId;
+
+const KNOWN_TABS: readonly TabId[] = ["discover", "my", "import", "create"];
+
+/** The explicit ``?tab`` value when it names a known tab; else null. */
+function tabFromParam(raw: string | null): TabId | null {
+  return KNOWN_TABS.includes(raw as TabId) ? (raw as TabId) : null;
+}
+
+export default function ContentHub() {
+  const { t } = useI18n();
+  const [params, setParams] = useSearchParams();
+  const order = useContentTabOrder();
+
+  // Deep link wins; ``?share`` (from "Save & share" in the lesson creator,
+  // #3660) means My content; otherwise the first configured tab.
+  const active =
+    tabFromParam(params.get("tab")) ?? (params.has("share") ? "my" : order[0]);
+
+  const labels: Record<TabId, string> = {
+    discover: t("discover.tab.discover", "Discover"),
+    my: t("nav.content", "My content"),
+    import: t("discover.tab.import", "Import"),
+    // Deliberately short. The four compact tabs measure 337.1px together and
+    // fit from 375px up (#3012); the long button wording ("Neue Lektion
+    // erstellen") is several times this label's width and would wrap them
+    // again on every phone.
+    create: t("content.tab.create", "Create"),
+  };
+  const tabs = order.map((id) => ({ id, label: labels[id] }));
+
+  function selectTab(id: TabId) {
+    const next = new URLSearchParams(params);
+    // The first configured tab is the canonical ``/content`` URL, so it
+    // carries no ``?tab`` param.
+    if (id === order[0]) next.delete("tab");
+    else next.set("tab", id);
+    setParams(next, { replace: true });
+  }
+
+  return (
+    <div data-testid="content-hub">
+      <TabBar
+        tabs={tabs}
+        active={active}
+        onSelect={selectTab}
+        ariaLabel={t("nav.tab.content", "Content")}
+        testId="content-hub-tabs"
+        tabTestIdPrefix="content-tab-"
+        className="px-4 pt-3"
+      />
+
+      <Suspense fallback={null}>
+        {active === "discover" && <Discover />}
+        {active === "my" && <Content />}
+        {active === "import" && <Import />}
+        {active === "create" && <CreateLesson />}
+      </Suspense>
+    </div>
+  );
+}

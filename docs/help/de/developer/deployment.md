@@ -1,0 +1,224 @@
+# Deployment
+
+Vier Deployment-Modi:
+
+| Modus | Wo | Backend | KI-Aufrufe | Schlüssel-Quelle |
+|---|---|---|---|---|
+| Lokal-Dev | `make dev` | FastAPI auf :18001 | Serverseitig | env / secrets.yaml / DB |
+| GitHub Pages | `astrapi69.github.io/adaptive-learner/` | Keins (Dexie) | Browser-direkt | DB (IndexedDB) |
+| Desktop-Launcher | PyInstaller-Binary (Docker-basiert) | FastAPI in einem Docker-Container | Serverseitig | `.env` (autom. generiert) / Einstellungs-UI |
+| Docker | Docker-Compose-Selbst-Host | FastAPI im Container | Serverseitig | env / Einstellungs-UI |
+
+## Lokale Entwicklung
+
+```bash
+make dev
+```
+
+Startet Backend (FastAPI + uvicorn `--reload`) auf Port 18001
+und Frontend (Vite-Dev-Server) auf Port 15174 parallel.
+Ctrl-C einmal stoppt beide.
+
+Beide Ports sind konfigurierbar: `ADAPTIVE_LEARNER_PORT`
+(Backend) und `ADAPTIVE_LEARNER_FRONTEND_PORT` (Frontend) in der
+Umgebung überschreiben, oder `make BACKEND_PORT=… FRONTEND_PORT=… dev`.
+Die Standardwerte (18001 / 15174) sind absichtlich nicht-Standard,
+damit Adaptive Learner mit anderen Projekten koexistiert, die schon
+auf 8000 / 5173 gebunden sind.
+
+Vites Proxy leitet `/api/*` ans Backend, also nutzt das
+Frontend immer `/api` als Base-URL - keine CORS-Konfig nötig
+für die lokale Entwicklung.
+
+Hintergrund-Modus:
+
+```bash
+make dev-bg     # detached
+make dev-down   # stoppen
+```
+
+## GitHub Pages (nur Dexie)
+
+`.github/workflows/deploy-gh-pages.yml` baut das Frontend mit:
+
+- `VITE_BASE="/adaptive-learner/"` - präfixt jede Asset-URL
+  für den Pages-Unterpfad.
+- `VITE_STORAGE_MODE="dexie"` - pinnt DexieStorage als
+  Standardmodus.
+- `VITE_API_BASE=""` - kein Backend zum Anpeilen.
+
+Der Workflow läuft bei jedem Push auf `main` (dem Release-Branch
+unter Gitflow) und bei manueller Auslösung.
+Nach dem Build kopiert er `dist/index.html` nach `dist/404.html`
+für den SPA-Router-Fallback und nutzt dann
+`actions/upload-pages-artifact@v5` + `actions/deploy-pages@v5`
+zur Veröffentlichung.
+
+Das Ergebnis ist ein voll statischer, backend-freier Build:
+DexieStorage hält die kanonischen Daten in IndexedDB, KI-Aufrufe
+gehen browser-direkt an den Provider, und die Lektions-Inhalte
+sind in den Build gebündelt, sodass die Site offline funktioniert.
+
+Auf GitHub Pages lassen sich keine eigenen HTTP-Header setzen,
+deshalb bringt der Pages-Build seine eigene Richtlinie mit:
+`frontend/index.html` setzt per `<meta>` eine Content-Security-Policy,
+die Bilder und Medien auf wenige Quellen beschränkt, zum Beispiel die
+eigene Origin und `https://raw.githubusercontent.com` (der genaue Wert
+steht in der Datei), dazu die Referrer-Richtlinie `no-referrer`. Der
+API-Modus sendet dieselben `img-src`/`media-src` als Header
+(`backend/app/frontend_static.py`). Lädt eine Funktion Bilder oder
+Medien von einem Host, den die Richtlinie nicht nennt, blockiert der
+Browser das, im Pages-Build wie im API-Modus. Vor dem Upload prüft
+`scripts/check_external_hosts.py` die gebaute Docs-Site auf Ressourcen
+von Drittanbietern.
+
+Die Site-URL ist `https://astrapi69.github.io/adaptive-learner/`.
+Bei eigener Domain legen Nutzer eine `CNAME`-Datei in
+`frontend/public/` ab; GitHubs Domain-aware Pages-Routing
+erledigt den Rest.
+
+## Docker Compose (voller Stack)
+
+Es gibt zwei Compose-Dateien:
+
+- `docker-compose.yml` (Dev): mountet den Quellbaum, fährt
+  uvicorn `--reload` und den Vite-Dev-Server, veröffentlicht die
+  Dev-Ports (Backend `${ADAPTIVE_LEARNER_PORT:-18001}`, Frontend
+  `${ADAPTIVE_LEARNER_FRONTEND_PORT:-15174}`).
+- `docker-compose.prod.yml` (Produktion), von `make prod` genutzt:
+
+```bash
+make prod        # docker compose up -d
+make prod-down   # docker compose down
+```
+
+`docker-compose.prod.yml` enthält **einen einzigen Service, `app`**
+(Ein-Container-Stack seit #2058 - es gibt kein nginx und keinen
+separaten Frontend-Container):
+
+- **FastAPI (Python-3.12-slim-Image)** liefert BEIDES aus: die
+  gebauten Frontend-Statics (SPA-Fallback, 50M-Body-Limit und gzip
+  als Middleware - der Funktionsumfang des ausgemusterten
+  nginx-Service) und `/api/*`, mit `--workers 2` auf dem internen
+  Port `${ADAPTIVE_LEARNER_BACKEND_PORT:-8000}`. Der interne Port
+  ist ein Implementierungsdetail, entkoppelt vom
+  host-veröffentlichten.
+- Host-veröffentlicht wird
+  `${ADAPTIVE_LEARNER_BIND_ADDRESS:-127.0.0.1}:${ADAPTIVE_LEARNER_PUBLIC_PORT:-8501}`,
+  direkt auf den Backend-Port gemappt - das ist die Adresse, die
+  der Nutzer im Browser erreicht. Standardmäßig loopback; vor dem
+  Freigeben `ADAPTIVE_LEARNER_BIND_ADDRESS` unten lesen.
+- **Ein benanntes `adaptive-learner-data`-Volume**, gemountet auf
+  `/app/data` (gesetzt über `ADAPTIVE_LEARNER_DATA_DIR`), das
+  Container-Rebuilds überlebt. Die DB liegt unter
+  `$DATA_DIR/adaptive_learner.db`, Uploads unter
+  `$DATA_DIR/uploads/`.
+
+Das Image läuft als **Nicht-Root-Nutzer**
+(`adaptive_learner`, angelegt in `backend/Dockerfile`).
+
+`install.sh` und `install.ps1` sind die curl-pipe-Installer
+für Endnutzer - sie klonen das getaggte Release (Tarball-Download
+als Fallback ohne git), setzen
+`ADAPTIVE_LEARNER_SECRET_KEY` und machen `docker compose up`.
+`start.sh` ist der entsprechende lokale Einstiegspunkt: prüft
+Docker, generiert beim ersten Lauf einen zufälligen Secret in
+`.env` aus `.env.example`, wenn keine `.env` existiert, und fährt
+dann den Prod-Stack hoch.
+
+Die Installer werden zur Release-Zeit aus
+`install.sh.template` / `install.ps1.template` plus der
+Version aus `backend/pyproject.toml` neu generiert (siehe
+`scripts/sync_versions.py`). Die generierten Dateien nicht
+direkt editieren.
+
+## Konfiguration für Produktion
+
+Vier Dinge sind in Produktion wichtig:
+
+1. **`ADAPTIVE_LEARNER_SECRET_KEY`**: muss ein stabiler
+   Fernet-Key sein. Einmal generieren, sicher hinterlegen
+   (HashiCorp Vault, AWS Secrets Manager, versiegelte `.env`).
+   Verlust = alle verschlüsselten API-Keys werden unlesbar. Die
+   App bricht beim Start hart ab, wenn er ungesetzt ist (kein
+   stiller Default). Für den Docker-Stack generieren `start.sh` /
+   der Launcher beim ersten Lauf einen zufälligen Key in `.env`,
+   wenn keiner existiert.
+2. **`ADAPTIVE_LEARNER_CORS_ORIGINS`**: kommagetrennte Liste
+   erlaubter Origins. Standard ist permissiv; in Produktion
+   enger schnallen.
+3. **`ADAPTIVE_LEARNER_DEBUG`**: in Produktion ungesetzt /
+   false lassen. Debug-Modus legt Stacktraces in Fehler-
+   Antworten offen.
+4. **`ADAPTIVE_LEARNER_BIND_ADDRESS`**: Standard `127.0.0.1`,
+   der veröffentlichte Port ist damit nur vom Host selbst
+   erreichbar. Die App hat keine Authentifizierung - `0.0.0.0`
+   nur bewusst binden, und nur in einem vertrauenswürdigen Netz
+   oder hinter einer eigenen Auth-Schicht (Reverse Proxy mit
+   Basic Auth, VPN).
+
+## Desktop-Launcher (Cross-OS, Docker-basiert)
+
+`launcher/` ist ein PyInstaller-basierter One-Binary-Desktop-
+Launcher. Er ist **kein** eingebetteter Server - er ist ein
+dünner Wrapper um die veröffentlichte
+`docker-app-launcher`-Engine, konfiguriert über
+`launcher/launcher.json`. Die ausgelieferte Konfiguration läuft
+im **Image-Modus** (`deployment_mode: "image"`): der Launcher
+zieht das fertig gebaute, verifizierte Release-Image
+(`ghcr.io/astrapi69/adaptive-learner:<version>`, auf die
+eingebettete App-Version gepinnt) und startet es als
+Docker-Container - lokal wird nichts gebaut, kein Quelltext
+heruntergeladen und nichts ausgepackt. Der Ablauf ist bewusst
+linear:
+
+1. Prüfen, ob Docker installiert ist und läuft (sonst leiten
+   klare Fehlerdialoge den Nutzer zum Installieren/Starten von
+   Docker an).
+2. Das gepinnte Release-Image von GHCR ziehen, wenn es noch
+   nicht vorhanden ist.
+3. Den Container mit dem benannten Volume
+   `adaptive-learner-data` unter `/app/data` starten, sodass
+   die Daten Updates überleben.
+4. Auf den Backend-Health-Check warten, dann den Standard-Browser
+   des Nutzers auf dem veröffentlichten Port öffnen.
+5. Beim nutzer-gesteuerten Stopp den Container stoppen.
+
+Der Launcher trägt die Ziel-Version in sich (`__version__`-Literal
++ `_build_info.py`, das die Spec-Datei zur Build-Zeit schreibt;
+Source-of-Truth ist `backend/pyproject.toml`). Die Engine führt
+außerdem einen **Hintergrund-Update-Check** gegen die
+GitHub-Releases-API aus (aktiviert über `update_check_enabled` in
+`launcher.json`): sie fragt `/repos/.../releases/latest` ab und
+benachrichtigt den Nutzer nur, wenn ein echt neueres Release
+existiert. Der Check scheitert bei jedem Fehler still (kein Netz,
+GitHub down, Rate-Limit, kaputte Antwort), sodass er den Launcher
+nie blockiert oder unterbricht.
+
+GitHub Actions baut drei Binaries pro Release:
+
+- `launcher-linux.yml` → `adaptive-learner-launcher` (Linux)
+- `launcher-macos.yml` → `adaptive-learner-launcher` (macOS)
+- `launcher-windows.yml` → `adaptive-learner-launcher.exe`
+
+Der Launcher ist bewusst NICHT der primäre Vertriebskanal
+(Docker ist es). Er existiert für Nutzer, die ein "Doppelklick
+zum Installieren"-Erlebnis wollen, ohne Compose-Befehle zu tippen.
+
+Die volle 3-Schichten-Config-Kette (Projekt-YAML <
+User-Overlay < Env-Vars) ist in `docs/configuration.md`
+dokumentiert.
+
+## CI/CD-Architektur
+
+Jeder Workflow läuft isoliert; kein Shared-State zwischen
+ihnen:
+
+| Workflow | Trigger | Was er tut |
+|---|---|---|
+| `ci.yml` | push / PR auf `develop`, `main` | Tests + Lint + tsc |
+| `coverage.yml` | täglicher Schedule, dispatch | Coverage HTML + xml (Backend, Frontend, je Plugin) |
+| `release-gate.yml` | `v*.*.*`-Tag-Push, dispatch | Version-Pin-Drift-Check |
+| `deploy-gh-pages.yml` | push auf `main`, dispatch | GH-Pages-Build + Deploy |
+| `launcher-{linux,macos,windows}.yml` | release: created | Launcher-Binary bauen + anhängen |
+| `dexie-smoke.yml` | PR (wenn betroffen), täglicher Schedule, `release/**`, dispatch | Dexie-Modus-Route-Smoke-Gate |

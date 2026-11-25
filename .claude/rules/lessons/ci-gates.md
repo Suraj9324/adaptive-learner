@@ -1,0 +1,407 @@
+---
+# globs/alwaysApply below document INTENT only - Claude Code loads every rule
+# file regardless and strips this frontmatter (verified 2026-07-28, see #2089).
+description: CI + gate pitfalls - PR-vs-nightly surfaces, environment drift, engine re-pin schema drift, GitHub Action majors
+globs:
+  - .github/**/*
+  - Makefile
+  - scripts/**/*
+alwaysApply: false
+---
+
+# CI + gate pitfalls
+## CI vs local environment drift
+
+Two patterns cause "passes locally, fails in CI" in Poetry-managed projects:
+
+1. `poetry install` does not remove dependencies that vanished from pyproject.toml. Stale `.dist-info` directories in long-tenured local venvs keep importing modules that the lockfile no longer references. CI starts fresh and immediately fails. Mitigation: run `poetry install --sync` periodically, especially before assuming "local green = CI green".
+
+2. Path-dependency declarations in pyproject.toml must include every plugin or sub-package whose code is exercised by tests. Plugin discovery via `importlib.metadata.entry_points()` only sees what's actually installed, not what exists on disk. When creating a new plugin, the path-dep declaration in backend/pyproject.toml is mandatory, not optional.
+
+Detection: if local tests pass but CI fails on routes returning 404, suspect missing path-deps before suspecting code bugs.
+
+## External GitHub Action major-version drift
+
+Standard GitHub Actions (`actions/checkout`, `actions/setup-*`, `actions/upload-artifact`, `actions/cache`, the pages trio, plus common third-parties like `softprops/action-gh-release`) release new majors periodically — usually triggered by Node runtime deprecations or other GitHub-platform shifts. An audit finding "all standard actions are at their current majors" is correct AT THE TIME but stales within weeks-to-months after a deprecation announcement.
+
+Concrete trigger from the 2026-05-14 sweep: GitHub deprecated the Node 20 runtime on 2025-09-19 (forced default 2026-06-02, removed 2026-09-16). Within 6 months, EVERY standard action listed above released a new major moving to Node 24. The previous CI-hygiene audit's `actions/checkout@v4` etc. was accurate at audit time but the warnings re-appeared in CI within weeks.
+
+The original test-infrastructure audit categorized "all standard actions at current majors" as no action needed — accurate at the moment, no longer accurate weeks later. Re-classify as a periodic check, not a one-time verification.
+
+### Periodic CI-hygiene check (every ~quarter, or after any GitHub runtime/platform deprecation announcement)
+
+1. List every pinned action:
+
+```bash
+grep -rE 'uses: [a-zA-Z][a-zA-Z0-9-]+/[a-zA-Z][a-zA-Z0-9-]+@v[0-9]+' \
+  .github/workflows/ | sort -u
+```
+
+2. For each, check the latest released major against the pin via `gh release list --repo <owner>/<repo> --limit 5`.
+
+3. For each candidate version, read the action.yml runtime declaration directly (not the release-note prose). This is the authoritative source for "does this action actually run on Node N?":
+
+```bash
+gh api "repos/<owner>/<repo>/contents/action.yml?ref=<tag>" \
+  --jq '.content' | base64 -d | grep '^[[:space:]]*using:'
+```
+
+Returns e.g. `using: 'node24'` (or `node20`, or `composite`). This is the field GitHub Actions reads to pick the runtime.
+
+4. Cross-reference the release notes via `gh api repos/<owner>/<repo>/releases/tags/v<N>.0.0 --jq .body` for breaking-change context, but treat the notes as advisory — see "Release-notes-vs-action.yml trap" below.
+
+5. Pin to the lowest new major that satisfies the deprecation target AND declares the target Node version in its action.yml. The latest major often bundles additional unrelated breaking changes — taking the minimum-Node-N major lets you adopt those changes deliberately later, not by accident.
+
+6. One commit per action class for traceable bisect; push as a batch.
+
+### Release-notes-vs-action.yml trap
+
+Release notes describe intent and feature changes. action.yml declares the actual runtime. The two can diverge across a major version when an action adds preliminary Node 24 support without flipping the default. Always trust action.yml for audit purposes.
+
+Concrete examples from the 2026-05-14 sweep that caught this:
+
+- `actions/upload-artifact@v5.0.0` — release notes said "preliminary support for Node.js 24" and the bump from v4 was marked BREAKING CHANGE. Both signals pointed at "v5 is the Node-24 baseline". But `action.yml` at v5 declared `runs.using: 'node20'`. v6 was the actual transition (declared `node24`).
+- **`actions/configure-pages@v5.0.0`** — release notes talked about Next.js breaking changes without mentioning the Node runtime at all, leading to inference (from sibling pages actions on Node 24) that v5 was Node-24. But `action.yml` declared `node20`. v6 added Node 24.
+
+The trap is amplified by the `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` env-var: if it's already in place, runtime tests look green because the env-var coerces Node 24 regardless of the action.yml declaration. The action.yml read is the only honest signal.
+
+### Composite-action transitivity
+
+Some actions declare `runs.using: composite` (e.g. `actions/upload-pages-artifact@v5`). Composite actions don't run on any Node runtime directly — they wrap calls to other actions. For those, the audit must read the composite's internal `uses:` references and check THOSE actions' runtimes:
+
+```bash
+gh api "repos/<owner>/<repo>/contents/action.yml?ref=<tag>" \
+  --jq '.content' | base64 -d | grep 'uses:'
+```
+
+Example: `actions/upload-pages-artifact@v5` internally calls `actions/upload-artifact@v7`, which declares `node24`. So upload-pages-artifact@v5 is effectively on Node 24 via its internal dependency — no bump needed at our level even though its own action.yml says `composite`.
+
+### Difference between "external action" warnings
+
+Two distinct sources of "external" warnings in CI:
+
+1. **In-repo action pins**: workflow files reference outdated majors. Fixable in `.github/workflows/`. This rule covers them.
+2. **GitHub-managed services**: e.g. the Dependabot scheduled service that's configured under Settings → Code security → Dependabot, not in workflow files. Annotations from those jobs are GitHub's responsibility, NOT the repo maintainer's. Don't conflate the two — always grep the codebase to confirm a warning has a local source before assuming a fix is locally implementable.
+
+### Defensive env-var as a safety net
+
+`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"` in each workflow's `env:` block coerces any JavaScript-runtime action declaring Node 20 to run on Node 24. After all our standard-action pins are at Node-24-native majors, this env-var becomes a safety net for future additions (especially third-party actions that may lag) — not an active correction. Keep it in the workflow heads; it costs nothing and prevents reintroduction of the warning when a future contributor adds an old-major action by habit.
+
+## An i18n string change can break a nightly-only E2E gate invisibly
+
+Surfaced 2026-06-17 during the v1.86.0 release-test. Five EXP-023 dexie-smoke specs failed on `expect(content-repo-result).toContainText(/passed/i)` (and `/failed/i`). The app was correct — validation succeeded and rendered "Validierung erfolgreich: 1 Sets, 1 Lektionen." The cause: PR #662 ("translate repository management UI in all 9 catalogs") ADDED the German `content_repo.validation.passed` / `.failed` strings. The app's default locale is German; before #662 those keys had no German translation and fell back to the ENGLISH "Validation passed/failed…", which the specs matched. Adding the correct German translation removed the fallback, so the assertions broke.
+
+### Why it surfaced only at release
+
+The Dexie-mode E2E gate ran nightly + release-only, NOT on PRs (#552 cadence; PRs touching `frontend/` run it since #3748). So #662's PR was green (it doesn't run dexie-smoke), and the drift sat latent until `make release-test` ran the gate. This is the same class as "wired != working" and the stale-assertion rule, with an i18n-specific trigger.
+
+### Rules
+
+- **E2E text assertions must not hardcode one locale's wording** when the app renders in a different default locale (German here). Match a locale-robust pattern (`/passed|erfolgreich/i`) or assert on a stable, non-translated signal (a testid state, a count, a success CSS token), not the prose.
+- **Any i18n PR that adds/changes a translated string that an E2E spec asserts on is a latent break** for the nightly/release gates. When translating a string, grep the E2E specs for the old English wording (`grep -rn "toContainText(/<word>/" e2e/`) and update the assertion in the same PR — even though the PR's own CI won't run the affected gate.
+- **A previously-passing assertion that depended on an i18n FALLBACK is fragile by construction.** If a test passes only because a translation is missing, completing the translation breaks it. Prefer locale-agnostic assertions from the start.
+
+## PR-CI vs nightly gates: different test surfaces (green PR -> red nightly/push)
+
+A green PR merge proves only that the surface the PR-CI looks at is green. By the #552 cadence, PR-CI runs correctness gates only; the visual-baselines, the e2e specs (manual-automation, FeatureShots; dexie-smoke until #3748) and the Dexie-mode journeys run nightly / on develop-push only. So any change to a surface only a nightly covers can merge a clean PR and turn the next nightly/push run red. This is not a one-off chain - it is a recurring risk category (#1661): "green PR -> red nightly/push, because the PR-CI never looked at the affected surface."
+
+### Sub-classes (same signature, different fix lever)
+
+1. **Nightly-only surface** (#1638, #1656). The PR-CI does not run the workflow at all. A lesson-header rework left every `lesson-*` visual baseline stale (#1638); a panel rework moved testid carriers into a collapsed `hidden` panel without touching the e2e specs (#1656).
+
+2. **Selection mechanics** (#1620, #1665, #1614). The test IS in the PR-CI suite but the selective runner (`vitest --changed` #615, `pytest --testmon`) does not pick it, because it reads its subject via `readFileSync` (invisible to the module graph) instead of importing it. A moved CSS token broke a `readFileSync` hue-pin the PR-CI never ran (#1665); an `index.html` guard kept develop red across five PRs (#1614). Mitigation candidate: Vitest `forceRerunTriggers` for `src/styles/**/*.css` + `index.html` + `data/i18n/*.json`.
+
+3. **Stale base / semantic merge conflict** (#1729). Two PRs, each tsc-green and textually conflict-free, combine on develop to a type error. `strict: false` branch protection let a PR with 32-minute-old CI merge behind a fresh neighbor. Decided + shipped (2026-07-16): Merge Queue is an Org-only feature (422 on this user-owned repo), so the fallback `strict: true` is active on develop - PR merges now require an up-to-date branch, re-running CI on the combined state. (`enforce_admins` ON since 2026-08-06, #2182; the back-merge is a PR, #2199.)
+
+4. **No cadence at all** (#1771). The verified variant: the surface is not even nightly-covered. The bun migration (#1496) dropped `package-lock.json`; `frontend/Dockerfile` still ran `npm ci` and broke the entire self-hosted/desktop path for ~2 release cycles. No automated consumer existed - discovery was manual. Shipped (#1990): `docker-build-smoke.yml` - a build-only `docker compose -f docker-compose.prod.yml build`, path-filtered on the Docker inputs on PRs + on `release/**` + weekly, analogous to the dexie-smoke pattern (#552).
+
+(Orthogonal, listed for contrast: #1653 `settings-data` baseline churn from live `recommended-repos.json` is the external-data class (#575), not this "spec-not-dragged-along" class.)
+
+### The reviewer rule
+
+A green PR is NOT authoritative for nightly-only surfaces. When a PR touches a visual-critical path, an e2e-covered surface, or a `readFileSync`-pinned subject, the safety net is the full/nightly run - which lands after the merge. Treat the green PR as "the PR-CI slice is green", not "develop is green".
+
+### Shipped mitigations (make the gap PR-visible, targeted)
+
+- **`visual-baseline-gate.yml`** (#1641) - a PR touching visual-critical paths must carry the baseline PNGs; escape label `visual-baselines-unaffected`.
+- `testid-reference-gate.yml` (#1661) - a statically spec-referenced `data-testid` that is net-removed/renamed on a high-user-visibility surface (lesson runner, exercises, dashboard, content browser, settings core) without any e2e spec change fails a fast PR gate (`scripts/testid_reference_gate.py`, `make check-testid-refs`); escape label `testid-refs-unaffected`. Catches the rename/remove sub-class only - the #1656 wrap-into-`hidden` case (literal survives) is not literal-diffable and stays a reviewer + nightly concern.
+- **`docker-build-smoke.yml`** (#1990) - build-only `docker compose -f docker-compose.prod.yml build` (the launcher/install.sh path, which no other gate builds), path-filtered on the Docker inputs on PRs + on `release/**` + weekly + dispatch; `make docker-build-smoke` locally. The release checklist's Docker step moves from "if active" to mandatory.
+
+### The scope discipline (why these gates stay targeted)
+
+Not every nightly-only surface earns a PR gate. Pulling every nightly surface into PR-CI collapses the fast-PR/#552 separation and a too-broad gate produces false positives and gets bypassed. The criterion: gate the high-user-visibility surfaces where a silent nightly break masks a real user regression (lesson runner, dashboard, content, settings core); accept the short red-develop window as the safety net for internal/rarely-changed/tooling surfaces. Prefer a precise gate (an actual diff of the referenced artifact) over a coarse "touched X -> must touch Y" presence check, so the false-positive rate stays near zero.
+
+## Engine re-pin without `make sync-schema` is invisible until the release gate
+
+Surfaced 2026-07-24 as the single red gate of the v2.6.0 release run. The #1993 engine re-pin (`learn-content-engine` 0.13.3 -> 0.14.0, the manifest `visibility` field) merged green through every PR gate - but the mirrored `schema/content-set.schema.json` was never regenerated. The drift sat latent because `sync-schema-check` runs ONLY inside `make release-test` (release cycle), not on PRs: the first signal was a red `make release-test` while cutting the release, fixed on the release branch (commit b67e6043 on release/2.6.0).
+
+### Rule
+
+Every PR that re-pins `learn-content-engine` runs `make sync-schema` in the SAME PR and commits the regenerated mirror (schema files + generated plugin/TS artefacts). "The pin bump is green" proves nothing about the mirror - no PR gate compares them.
+
+When reviewing an engine re-pin, the tell is cheap: a bump of the `learn-content-engine` pin with NO diff under `schema/` or the generated artefacts is suspicious by default; verify with `make sync-schema-check` before merging.
+
+Same shape as the #575 PR-CI-vs-nightly classes: a gate that runs on a slower cadence than the change class it guards leaves a latent window. If engine re-pins become frequent, promote `sync-schema-check` into the PR path filter for `frontend/package.json` changes touching the engine pin.
+
+Pairs with "PR-CI vs nightly gates: different test surfaces" - the cadence-gap family this belongs to. "Cross-layer assumptions must be pinned against REAL data shapes" - the mirror IS the pinned shape; regenerating it is how the pin stays honest.
+
+## A ratchet baseline is itself a measurement - a stale branch measures against a stale baseline
+
+Surfaced 2026-07-30 (#2180). A ratchet gate (css-size, rule-corpus, filesize, complexity) compares a CURRENT measurement against a frozen baseline; both halves live in the tree, so both drift. A branch behind its base carries an OLD baseline AND old content, so the same baseline number means something different on the branch than in CI - CI evaluates the branch MERGED WITH the base, whose content has moved. One case: a rule-corpus add read 480 over the ceiling in CI but 386 locally, because the branch's baseline (278616) lagged develop's (279758) and develop's rule files had grown too.
+
+Rule: before reading OR raising any ratchet baseline on a feature branch, merge the base branch (develop) in FIRST, then measure. Reproduce the gate's oracle - "current vs baseline on the MERGED tree" - never the branch-only view; a raise against a stale merge base is a guess. This is the ratchet corollary of the gate contract's "its number means the same thing everywhere" (quality-checks.md point 5): the number moved because the branch was stale, not because the tool was nondeterministic - same fix, pin WHERE it is measured (the merged tree).
+
+## Release/hotfix back-merges land ratchet-tripping changes on develop ungated
+
+Surfaced 2026-07-30, TWICE in one day (version badges, then css-size, #2182). Both times develop went red on a ratchet by a commit that changed what the ratchet MEASURES without moving its baseline, and both reached develop via `make release-finish`'s back-merge, NOT a feature PR.
+
+Decide the vector in one look when a ratchet-tripping commit is on develop: `git log --first-parent origin/develop` does NOT list the sha AND `git rev-list --merges --ancestry-path <sha>..origin/develop` names a `Release` / `Merge release ... back into develop` merge -> it came through the release/hotfix flow. That flow RAN with `enforce_admins=false` (a deliberate admin merge so `release-finish` worked), so branch-protection required checks never ran against it. Version bumps and late foundation fixes (the #2175 a11y anchor layer) happen ON the release/hotfix branch; the back-merge lands them ungated; develop is then red for EVERY branch (no PR can go green) until a human notices.
+
+Rule: a change made on a release/hotfix branch that trips a ratchet moves that ratchet's baseline IN THE SAME BRANCH, before `make release-finish` - whoever bumps a version or adds a foundation CSS line owns the matching baseline bump. Closed via #2182: ratchet gates inside `make release-test` (#2190), a develop-push detection gate (#2193), the back-merge routed through a PR (#2199), and `enforce_admins=true` on develop (2026-08-06). Pairs with "Operational gaps masquerade as wired infrastructure" and core.md "Claimed enforcement without enforcement" - a gate the release channel routes around is advisory on exactly the changes releases make.
+
+## Ein Byte-Gate kann eine zufällige Übereinstimmung prüfen statt der Spiegelung (#2265)
+
+Aufgetaucht 2026-08-01 beim Engine-Pin 0.14.0 -> 0.17.0. `schema/lesson.schema.json`,
+`content-manifest.schema.json` und `quality-rules.json` sind als BYTE-SPIEGEL der
+gepinnten Engine-Fassung erklärt, und zwei Gates verglichen Bytes
+(`sync-schema-check`, `engine-parity-check`). Beide gingen rot, ohne dass sich
+Inhalt geändert hatte: `json.loads(a) == json.loads(b)` war `True`, sogar die
+Byte-LÄNGE stimmte.
+
+Ursache: die drei Dateien hatten ZWEI Schreiber. Das Spiegel-Skript kopierte die
+Engine-Bytes, danach schrieb `generate_lesson_schema.py` dieselben Dokumente aus
+dem eigenen Serialisierer erneut. Bis Engine 0.14.0 schrieb die Engine
+`sort_keys=True` + ASCII-escaped - exakt das, was der App-Generator erzeugt. Die
+Gates waren grün, weil zwei unabhängige Erzeuger zufällig dieselben Bytes
+lieferten. Engine 0.16.x wechselte auf Einfüge-Reihenfolge + literales UTF-8,
+und die Zufallsgleichheit endete.
+
+Regeln:
+
+- **Ein erzeugter Pfad hat genau EINEN Schreiber.** Zwei Schreiber auf einem Pfad
+  sind ein Defekt, auch wenn beide dasselbe schreiben - die Gleichheit ist dann
+  eine Beobachtung, keine Eigenschaft. Gepinnt von
+  `backend/tests/test_schema_single_writer.py`.
+- **Ein Byte-Gate über einem Pfad mit zwei Schreibern misst nicht, was sein Name
+  sagt.** Vor dem Verschärfen oder Lockern eines Vergleichs erst fragen: WER
+  schreibt diesen Pfad? Solange die Antwort mehr als einen nennt, ist ein roter
+  Gate kein Inhaltsbefund.
+- **Die Gegenprobe ist billig und empirisch**: jeden Generator einzeln laufen
+  lassen und die geschriebenen Dateien per mtime zuordnen
+  (`scripts/audit_generator_writers.sh`). Statisches Lesen der Schreibaufrufe
+  beantwortet es nicht - die Pfade stehen dort als Ausdrücke.
+
+Passt zu "Gate-Test-Vertrag: fünf Tests, und fail closed" (Punkt 5, die Zahl
+muss überall dasselbe bedeuten) und zu core.md "Behauptete Durchsetzung ohne
+Durchsetzung": hier war die Durchsetzung echt, aber sie prüft etwas anderes als
+angenommen.
+
+## Ein Namens-Grep über frontend/src ist kein "0 Konsumenten"-Beweis, wenn Pakete mitrendern (#2477/#2486)
+
+Ein Dead-CSS-Audit (#2452/#2476) grepte `frontend/src` nach Konsumenten
+eines CSS-Selektors, fand keine, erklärte ihn für tot und löschte die Regel.
+Der einzige Konsument lag in `@astrapi69/ai-key-vault-react` -
+`node_modules` wurde nie durchsucht. Settings > KI lief ausgeliefert ohne
+Styling (#2477), Wiederherstellung in #2485.
+
+Der Vergleichslauf davor war grün: ein dispatchter 0-diff Visual-Run auf
+`visual-baselines-unaffected` gestellt. Nachmessung (#2486) zeigte:
+richtiges Werkzeug (Playwright navigiert echte Routen, kein isoliertes
+Rendering), falscher Umfang - 21 Settings-Bildmotive existierten, keins für
+den KI-Tab. Der 0-diff-Beweis bewies nur, dass die GEPRÜFTEN Flächen sich
+nicht änderten; die betroffene Fläche gehörte nicht dazu.
+
+Regeln:
+
+- **"0 Konsumenten" ist nur ein Beweis, wenn die Suche jeden Renderer
+  einschließt** - eigener Code UND jedes npm-Paket, das App-gestylte
+  classNames rendert (ein "headless-styled"-Muster: das Paket liefert
+  Markup + semantische Klassennamen, das Host-Projekt liefert die Regel).
+  Eine Paket-Inventarliste dieser Kandidaten gehört ins Repo, nicht ins
+  Gedächtnis der Session, die sie zuletzt geprüft hat (docs/development/,
+  #2588).
+- **Ein 0-diff-Visual-Run ist nur ein Beweis für die Flächen im
+  Motiv-Satz.** Vor dem Vertrauen auf "0 diff" fragen: ist die Fläche, die
+  die Änderung trifft, überhaupt im Satz? Ein neuer Tab/Panel braucht sein
+  eigenes Motiv, bevor er sich auf den Gate verlassen kann - sonst ist grün
+  nur Abwesenheit von Prüfung, keine Abwesenheit von Fehlern.
+- **Eine Stiländerung braucht einen Blick auf die gerenderte Anwendung,
+  nicht nur auf Namen.** Ein Architekten-Beschluss stoppte auf #1485 jede
+  weitere Dead-CSS-Tranche, bis (1) der Gate paket-bewusst ist
+  (`scripts/check-dead-classnames.py` scannt jetzt zusaetzlich Paket-Dist,
+  neuer `--consumers <name>`-Modus, #2588), (2) diese Lektion existiert, (3) das
+  Paket-Inventar steht und (4) die Visual-Lücke geschlossen ist (#2589).
+  Ein Tranchen-Stopp mit konkreten, prüfbaren Vorbedingungen ist stärker
+  als eine allgemeine Mahnung "vorsichtiger sein".
+
+Passt zu core.md "Cross-Layer-Annahmen müssen gegen ECHTE Datenformen
+gepinnt sein" - derselbe Fehler-Typ, andere Schicht: eine Prüfung, deren
+Eingabemenge nicht die reale Konsumentenmenge abdeckt. Passt zu "PR-CI vs
+nightly gates" - der 0-diff-Lauf ist eine ANDERE Prüfung als "ist diese
+Fläche überhaupt im Prüfsatz", und die zweite Frage stellte hier niemand.
+
+## Vorläufige Regel: `visual-baseline-sync` ungezielt - Gate bleibt, Sync-Scope ist der Bremser (#2682)
+
+Aufgefallen 2026-08-19 über drei Cluster-PRs plus den parallelen
+#2669/#2670-Stack: jeder `refresh-visual-baselines`-Dispatch rendert alle
+~150 Motive, egal was die PR ändert (23-26 Min/Lauf). Eine Dashboard-only-PR
+(#2676) kam mit 118 geänderten PNGs zurück, keins zur eigenen Diff gehörig
+(alle berührten Elemente strukturell unsichtbar - Tab-Gate,
+Mehr-Projekte-Bedingung, Fold). Eine reine Backend/i18n-PR (#2669, 0
+`.tsx`-Dateien) bekam denselben Ausschlag. Der Gate selbst ist schnell
+(5-9s) und incident-begründet (`quality-checks.md` §1640,
+#1628→#1638→#1635) - der ungezielte Sync dahinter ist der Bremser.
+#2682 wurde BEWUSST ohne Pfad→Motiv-Scoping geschlossen: genau so eine
+Liste hat die dokumentierte #1640-Fehlerhistorie ("any narrower list
+will keep missing entries"); stattdessen senkte #2684/#2685 die
+Wall-Clock ~3x (CI-Parallelisierung). Die Review-Last bleibt - darum
+gilt diese Regel weiter, bei jedem `refresh-visual-baselines`-Dispatch:
+
+1. Ergebnis nie blind annehmen (#1532).
+2. Prüfen: rendert die geänderte Komponente überhaupt in der betroffenen
+   Aufnahme? Häufigster Fehlschluss: Tab-Gate oder Feature-Flag. (Der
+   frühere dritte Fall - Inhalt unterhalb des Viewports fehlt im Shot -
+   ist seit dem #2696-Capture-Fix strukturell weg.)
+3. Nicht zurechenbare Dateien aus dem Sync-Commit zurücksetzen
+   (`git restore --source=<pre-sync-sha> -- <pfad>`) vor dem Merge.
+4. Bleibt nichts Zurechenbares: `visual-baselines-unaffected` mit
+   Begründung im PR-Body, nicht kommentarlos.
+5. Label-Trigger feuern nur auf `labeled`, nicht `synchronize` - nach
+   jedem Push das Label toggeln, sonst rendert der Sync den alten HEAD.
+
+Passt zu "Ein 0-diff-Visual-Run ist nur ein Beweis für die Flächen im
+Motiv-Satz" (oben) - dieselbe Disziplin, auf den Sync-Workflow selbst
+angewandt.
+
+## Ein Toleranz-Vergleich schreibt keine Baseline neu (#3023)
+
+Aufgetaucht 2026-09-08. Ein neuer X-Knopf (16-px-Icon) in jeder
+"Weitermachen"-Zeile ergab im `visual-baseline-sync` einen 0-Diff: 141
+Tests grün, "nothing to push". Ursache ist nicht eine fehlende Änderung,
+sondern das Zusammenspiel zweier Eigenschaften: `--update-snapshots`
+schreibt eine Referenz NUR bei einem fehlgeschlagenen Vergleich neu
+(#2712), und `maxDiffPixels: 2500` schluckt alles Kleinere. Der Gate
+meldet also Grün für eine sichtbare Änderung, die in keiner Referenz
+steht.
+
+Die Folgekosten sind nicht theoretisch: dieselbe Lücke hielt die
+Dashboard-Baselines nach zwei Kopfzeilen-PRs (#2986, #2999) fünf Tage
+still veraltet. Die erzwungene Neuaufnahme zeigte einen um ~15 px
+verschobenen Navigationsblock, den nie jemand gesehen hatte.
+
+Regeln:
+
+- Ein 0-Diff nach einer ABSICHTLICH sichtbaren Änderung ist ein Befund,
+  kein Freibrief. Vor dem Label `visual-baselines-unaffected` prüfen, ob
+  die Änderung überhaupt über der Toleranz liegt - das Label behauptet
+  "keine visuelle Wirkung", nicht "unter dem Budget".
+- Seit #3215 schreiben beide CI-Neuaufnahmen jede Baseline, die in
+  mindestens einem Pixel über dem Rauschboden abweicht (Mengen-Toleranz
+  0, `threshold` 0.05, `e2e/visual/refresh-mode.ts`); Rasterrauschen
+  (gemessen höchstens 2 pro Kanal) bleibt darunter. Jede
+  gewollte Änderung landet, auch unter der Vergleichs-Toleranz.
+  Löschen-dann-Resync (#2719) braucht es nur noch für lokal gerenderte
+  FeatureShots.
+- Der Sync-Commit trägt dafür jede seither gebliebene Fremd-Drift mit.
+  Nicht Zurechenbares zurücksetzen (#2682), und der Alt-gegen-neu-Vergleich
+  (Cluster-Analyse der geänderten Pixel, nicht nur der Blick aufs neue
+  Bild) gehört in die Review - sonst wandert unbemerkte Drift als
+  "geprüft" in die Referenz.
+
+Passt zu "Ein Bildvergleich prüft nur, was die Referenz unterscheidbar
+macht" (#2696): dort war es die leere Fläche, hier die Toleranz.
+
+## Ein Bildvergleich prüft nur, was die Referenz unterscheidbar macht (#2696)
+
+Aufgetaucht 2026-08-20. `fullPage: true` (CDP `captureBeyondViewport`)
+malte auf dem App-Layout (`html,body{overflow:hidden}` +
+`#root{overflow-y:auto}`) NIE etwas unterhalb des Viewports: alle 7
+Baselines von Seiten hoeher als der Viewport waren ab ~Viewport-Hoehe
+uniform weiss (74-95% tote Pixel). Der Vergleich blieb trotzdem gruen -
+die committed Referenzen trugen DIESELBE Leere. Leere gegen Leere ist
+Uebereinstimmung, keine Pruefung. Sichtbar wurde es nur als
+Fehl-Meldung "Capture landet auf der falschen Seite" (#2696): der
+obere Streifen der RICHTIGEN Seite ueber zwei Dritteln Weiss liest
+sich wie die Default-Ansicht.
+
+Regeln:
+
+- **Ein gruener Pixelvergleich beweist Uebereinstimmung, nicht Inhalt.**
+  Beim Anlegen oder Reparieren einer Baseline einmal pruefen, dass die
+  Referenz das Behauptete ZEIGT - eine Uniform-Band-Analyse (PIL,
+  100px-Streifen auf Extrema) kostet Sekunden und haette die Klasse
+  jederzeit gefunden. Verwandt mit dem Gate-Vertrag Punkt 4
+  (quality-checks.md): "0 Findings" und "0 geprueft" drucken dasselbe
+  Gruen.
+- **Der Fix macht die Klasse selbstpinnend, ein Extra-Guard waere falsch
+  gebaut.** Seit die Baselines echten Inhalt tragen, kollidiert jede
+  Rueckkehr der Leere (Helper entfernt, Chromium-Verhalten geaendert)
+  mit inhaltsvoller Referenz und wird rot. Ein pauschaler
+  Leere-Schwellwert dagegen muesste 72% LEGITIME Leere tolerieren
+  (review-session-desktop ist ein fast leerer Empty-State) und finge
+  nichts.
+- **`expandViewportToDocument` statt `fullPage`** (e2e/visual/helpers.ts):
+  Viewport auf Dokumenthoehe wachsen lassen, dann normaler Shot -
+  in-viewport wird immer gerastert. Kein neues `fullPage: true` in
+  Visual-Specs; auf diesem Layout ist es strukturell kaputt.
+
+Passt zu "Vorlaeufige Regel: visual-baseline-sync ungezielt" (oben,
+der Fold-Fehlschluss dort war diese Klasse) und zu core.md "Behauptete
+Durchsetzung ohne Durchsetzung" - ein Gate, das jede Nacht lief und
+auf drei Flaechen nichts absicherte.
+
+### Nachtrag #3016: der Ersatz erbte das kaputte Maß
+
+Der Fix oben tauschte das AUFNAHMEVERFAHREN und übernahm das HÖHENMASS
+ungeprüft: `expandViewportToDocument` las weiter
+`documentElement.scrollHeight`. Genau dieses Maß kennt die Seite nicht -
+die App scrollt in `#root`, und ein Scroll-Container behält seinen
+Überlauf für sich, meldet ihn also keinem Vorfahren. Gemessen an
+settings-general: Dokument 1080/1435/1913 px gegen `#root`
+2497/3088/3774 px (Desktop/Tablet/Telefon). Die Grundlinien deckten
+43-51 % der Seite ab, der Rest (Tab-Reihenfolge, Sprache, zwei
+Einstellungs-Abschnitte, Updates) war in keinem Bild - und der Vergleich
+blieb grün, weil Referenz und Ist an derselben Stelle abgeschnitten
+waren. Betroffen war jedes Motiv, nur unterschiedlich stark: von 41 px
+auf dashboard-empty@Desktop bis zu mehr als der halben Seite.
+
+Regeln:
+
+- **Ein Maß für "die ganze Seite" muss den Container nennen, der wirklich
+  scrollt.** Auf verschachtelten Layouts ist `documentElement` dieser
+  Container nicht. Die Gegenprobe kostet eine Zeile: Bildhöhe gegen
+  `#root.scrollHeight` halten. Ein Motiv, das exakt auf Viewport-Höhe
+  endet, ist verdächtig, nicht zufällig.
+- **Wer einen kaputten Mechanismus ersetzt, prüft dessen Annahmen mit.**
+  Sonst überlebt der Fehler seinen eigenen Fix, und die Reparatur trägt
+  ihn als Beleg weiter.
+- **Fail closed statt stillem Abschneiden:** die Aufnahme bricht jetzt ab,
+  wenn die Fläche nach den Wachstumsrunden noch höher ist als der
+  Viewport, und schreibt die gedeckte Höhe pro Motiv in den Bericht
+  (Gate-Vertrag Punkt 4: "0 geprüft" darf nicht dasselbe Grün drucken wie
+  "0 Befunde").
+
+**Folgekosten, die dazugehören:** sobald die Aufnahme dem Inhalt folgt,
+schlägt sich jede späte Änderung in der BILDHÖHE nieder statt nur
+unterhalb der Falz. Aus drei bis dahin unsichtbaren Wettläufen wurden
+sofort rote Motive, und jeder brauchte eine andere Sorte Antwort:
+
+- eine Karte ohne Ladezustand (`PausedLessonsCard` rendert `null`, solange
+  ihre Abfrage läuft, und `null`, wenn sie leer ist) lässt sich nicht
+  abwarten - hier war die Wurzel die NAVIGATION: `page.goto` feuert auf
+  der Lektionsroute `beforeunload`, dessen Handler die Zeile schreibt, die
+  das Dashboard gleich darauf liest. Ein Routenwechsel innerhalb der App
+  feuert ihn nicht, schreibt seit #3075 aber per Unmount-Pause. Wenn
+  Lesung und Schreibvorgang von DERSELBEN Aktion ausgehen, ordnet keine
+  Wartezeit sie; die Aktion muss sich ändern.
+- ein Wert, den die Fläche im geöffneten Zustand weiter verfeinert
+  (der Offline-Cache-Zähler), braucht ein Ausschwingen statt eines
+  Fertig-Signals.
+- ein Wert, der von LIVE-Daten abhängt (derselbe Zähler in CI, wo die
+  Sets erst über das Netz kommen), ist damit nur innerhalb eines Laufs
+  geordnet. Zwischen zwei Läufen hilft nur, die Quelle zu pinnen - die
+  #1653-Abhilfe, hier `keys()` auf genau diesem einen Cache.
+
+Regel daraus: wer ein Aufnahmeverfahren auf "ganze Seite" umstellt,
+rechnet mit einer Runde neuer Wackler und plant sie ein, statt sie als
+Rückschlag zu lesen. Sie waren vorher da und wurden nur nicht abgebildet.

@@ -1,0 +1,152 @@
+/**
+ * SummarySectionsControl (#1426, generalises #1411) — a numbered reorder list
+ * with an in-row visibility checkbox per section. Pins: all sections listed
+ * in the default order with the compact default checked (#3124: result and
+ * XP on, the rest off), Up/Down reorders and persists, a disabled section
+ * keeps its position + its arrows usable, and the migrated #1376 correction
+ * choice is reflected instead of reset.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+
+import SummarySectionsControl from "./SummarySectionsControl";
+import {
+  DEFAULT_SUMMARY_SECTION_ORDER,
+  defaultSummarySections,
+  readSummarySections,
+} from "../../../../lib/learning/summarySectionsPref";
+
+afterEach(() => {
+  localStorage.clear();
+});
+
+/** The rendered top-to-bottom order of section rows (by id). */
+function renderedOrder(): string[] {
+  return Array.from(
+    document.querySelectorAll("[data-testid^='summary-sections-order-item-']"),
+  ).map((el) =>
+    el.getAttribute("data-testid")!.replace("summary-sections-order-item-", ""),
+  );
+}
+
+describe("SummarySectionsControl", () => {
+  it("lists one row per section in the default order, checked per the compact default (#3124)", () => {
+    render(<SummarySectionsControl />);
+    expect(renderedOrder()).toEqual([...DEFAULT_SUMMARY_SECTION_ORDER]);
+    for (const { id, enabled } of defaultSummarySections()) {
+      const box = screen.getByTestId(`settings-summary-section-${id}`);
+      if (enabled) expect(box, id).toBeChecked();
+      else expect(box, id).not.toBeChecked();
+    }
+    expect(screen.getByTestId("settings-summary-section-result")).toBeChecked();
+    expect(screen.getByTestId("settings-summary-section-xp")).toBeChecked();
+    expect(screen.getByTestId("settings-summary-section-next_steps")).not.toBeChecked();
+    // The #599 mistake review is a row of its own, labelled by its heading.
+    expect(screen.getByTestId("summary-sections-order-item-explanations")).toHaveTextContent(
+      "Why you missed these",
+    );
+  });
+
+  it("Move-up reorders the list and persists the new order", () => {
+    render(<SummarySectionsControl />);
+    // result is second by default → move it up to first.
+    fireEvent.click(screen.getByTestId("summary-sections-up-result"));
+    expect(renderedOrder().slice(0, 2)).toEqual(["result", "favorite"]);
+    expect(readSummarySections().map((s) => s.id).slice(0, 2)).toEqual([
+      "result",
+      "favorite",
+    ]);
+  });
+
+  it("the first row's Up and the last row's Down are disabled", () => {
+    render(<SummarySectionsControl />);
+    expect(screen.getByTestId("summary-sections-up-favorite")).toBeDisabled();
+    // #2570 — next_steps is now the last default section (correction moved
+    // ahead of it).
+    expect(
+      screen.getByTestId("summary-sections-down-next_steps"),
+    ).toBeDisabled();
+  });
+
+  it("unchecking a section persists it without changing the order", () => {
+    render(<SummarySectionsControl />);
+    fireEvent.click(screen.getByTestId("settings-summary-section-xp"));
+    expect(screen.getByTestId("settings-summary-section-xp")).not.toBeChecked();
+    const stored = readSummarySections();
+    expect(stored.find((s) => s.id === "xp")!.enabled).toBe(false);
+    expect(stored.map((s) => s.id)).toEqual([...DEFAULT_SUMMARY_SECTION_ORDER]);
+  });
+
+  it("a disabled section keeps its row + its arrows stay usable", () => {
+    render(<SummarySectionsControl />);
+    // share is OFF in the compact default (#3124).
+    expect(screen.getByTestId("settings-summary-section-share")).not.toBeChecked();
+    // Row still present, arrow enabled, and moving it keeps it OFF.
+    const upShare = screen.getByTestId("summary-sections-up-share");
+    expect(upShare).toBeEnabled();
+    fireEvent.click(upShare);
+    const stored = readSummarySections();
+    const share = stored.find((s) => s.id === "share")!;
+    expect(share.enabled).toBe(false);
+    // share moved above answers (its default follower) proving position moved.
+    expect(stored.map((s) => s.id).indexOf("share")).toBeLessThan(
+      [...DEFAULT_SUMMARY_SECTION_ORDER].indexOf("share"),
+    );
+  });
+
+  it("reflects a stored reordered + disabled config on mount", () => {
+    localStorage.setItem(
+      "adaptive-learner.lesson.summary_sections_order",
+      JSON.stringify([
+        { id: "correction", enabled: false },
+        { id: "result", enabled: true },
+      ]),
+    );
+    render(<SummarySectionsControl />);
+    // #3124 - the stored config predates the mistake-review section, so it
+    // slots in directly above the stored correction entry, ON.
+    expect(renderedOrder().slice(0, 3)).toEqual([
+      "explanations",
+      "correction",
+      "result",
+    ]);
+    expect(
+      screen.getByTestId("settings-summary-section-explanations"),
+    ).toBeChecked();
+    expect(
+      screen.getByTestId("settings-summary-section-correction"),
+    ).not.toBeChecked();
+    expect(screen.getByTestId("settings-summary-section-result")).toBeChecked();
+  });
+
+  it("lets the arrows wrap under a full-width label instead of breaking words (#3027)", () => {
+    render(<SummarySectionsControl />);
+    expect(screen.getByTestId("summary-sections-order-list")).toHaveClass(
+      "list-none",
+      "pl-0",
+    );
+    const row = screen.getByTestId("summary-sections-order-item-correction");
+    expect(row).toHaveClass("flex", "flex-wrap");
+    const body = row.firstElementChild as HTMLElement;
+    expect(body).toHaveClass("min-w-0", "flex-1", "basis-40");
+    // The checkbox + number + text stay one click target inside the body.
+    expect(body.querySelector("label")).toContainElement(
+      screen.getByTestId("settings-summary-section-correction"),
+    );
+  });
+
+  it("shows the migrated #1376 correction-round OFF choice (no reset)", () => {
+    localStorage.setItem(
+      "adaptive-learner.lesson.correction_round_enabled",
+      "false",
+    );
+    render(<SummarySectionsControl />);
+    expect(
+      screen.getByTestId("settings-summary-section-correction"),
+    ).not.toBeChecked();
+    // Order untouched by the visibility-only migration.
+    expect(renderedOrder()).toEqual([...DEFAULT_SUMMARY_SECTION_ORDER]);
+  });
+});

@@ -1,0 +1,73 @@
+# Git
+.git
+.gitignore
+
+# Claude Code
+.claude
+
+# Documentation
+docs/
+*.md
+!backend/README.md
+
+# Frontend (built separately)
+frontend/node_modules
+frontend/dist
+frontend/.env
+
+# EVERY node_modules, at any depth (#2112). The single frontend/ entry
+# above missed nested ones, and the content checkout carries a
+# node_modules/.bin whose symlinks point ABSOLUTELY into a sibling repo.
+# Those targets are outside the build context, so the links dangle in the
+# container and Vite's recursive copy of public/ dies on stat().
+**/node_modules
+
+# The linked content repo under public/ (gitignored here, so it never
+# reaches a user's tarball - but a maintainer build from the working tree
+# would drag it in). Content is downloaded at runtime, not baked in.
+frontend/public/content
+
+# Backend dev artifacts
+backend/__pycache__
+backend/.pytest_cache
+backend/.mypy_cache
+backend/.ruff_cache
+backend/.coverage
+backend/.coverage.*
+backend/tests
+backend/*.db
+backend/*.db-shm
+backend/*.db-wal
+backend/htmlcov
+
+# Backend production data that may exist in dev tree (Phase 2 XDG
+# migration moves these to ~/.local/share/adaptive_learner/ on backend
+# start; they MUST NOT be shipped into the Docker image where they
+# would either bloat the layer or leak real user data).
+backend/uploads/
+backend/.adaptive-learner-production
+backend/.migration-complete
+
+# Plugin dev artifacts
+plugins/**/tests
+plugins/**/__pycache__
+plugins/**/.pytest_cache
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# E2E tests
+e2e/
+playwright-report/
+test-results/

@@ -1,0 +1,527 @@
+# Testen
+
+AdaptiveLearners Test-Disziplin wird durch `make test` bei
+jeder Änderung erzwungen. Die Strategie ist eine Pyramide:
+Unit-Tests an der Basis, Integration in der Mitte, E2E-Smoke
+oben.
+
+## Test-Zahlen
+
+| Schicht | Werkzeug |
+|---|---|
+| Backend-Unit + -Integration | pytest ^9 |
+| Plugin-Tests (alle Plugins) | pytest ^9 |
+| Frontend-Unit + -Integration | Vitest 4 |
+| E2E-Smoke | Playwright |
+| Dexie-Modus-Release-Gate | Playwright |
+
+Die Zahlen wachsen mit jedem Release. Um duplizierte Zahlen zu
+vermeiden, die auseinanderdriften, hält diese Seite KEINE
+Gesamtzahl fest. `docs/audits/current-coverage.md` ist die
+einzige kanonische, stets aktuelle Quelle für Test-Zahlen und
+Coverage. Die Plugins sind assessment, die KI-Anbieter
+(anthropic / openai / gemini / perplexity), session, tracking,
+tools, gamification, anki, notebooklm, learning-repo,
+content-loader und missions.
+
+## Testgetriebene Entwicklung: der Ablauf
+
+Alles unterhalb dieses Abschnitts beschreibt die Infrastruktur:
+welcher Runner, wie gemockt wird, wo CI was ausführt. Dieser
+Abschnitt beschreibt die Reihenfolge der Arbeit. Die bindende Norm
+liegt im Regelkatalog des Repositories (`.claude/rules/tdd.md` und
+der Tests-Abschnitt von `.claude/rules/coding-standards.md`); diese
+Seite erklärt den Ablauf und geht einen echten Zyklus durch. Wo
+beide abweichen, gilt der Regelkatalog.
+
+Der Zyklus ist Rot-Grün-Refaktorieren:
+
+1. **ROT** - einen Test schreiben, der das gewünschte Verhalten
+   beschreibt, und ihn ausführen. Er muss fehlschlagen, und zwar aus
+   dem erwarteten Grund.
+2. **GRÜN** - den minimalen Code schreiben, der ihn bestehen lässt.
+   Nichts "für später".
+3. **REFAKTORIEREN** - Namen, Duplikate, Formatierung aufräumen. Die
+   Tests bleiben grün und werden nicht angefasst.
+
+### Wann die Verpflichtung greift
+
+Jede Änderung mit Verhalten: ein neuer Codepfad, eine Bedingung,
+eine Berechnung, eine Validierung, ein Mapping. Fehlerbehebungen
+sind der strengste Fall: eine Behebung ohne zuerst fehlschlagenden
+Test ist nicht belegt. Der Reproduktionstest wird VOR der Behebung
+geschrieben und bleibt danach als Regressionsanker im Repo.
+
+Sie greift nicht bei reinen Umbenennungen, mechanischen Refactorings
+mit bestehender Testabdeckung (die grün bleibende Suite ist der
+Beleg), Formatierung, Konfiguration ohne Logik oder Dokumentation.
+
+### Ein echter Zyklus aus diesem Repository
+
+Das Beispiel ist der Release-Helfer `scripts/bump_roadmap_header.py`
+mit seiner Suite `backend/tests/test_bump_roadmap_header.py`.
+Gewählt, weil sein roter Zustand eindeutig ist und keine Fachlichkeit
+voraussetzt: das getestete Modul existierte noch nicht, und der
+entscheidende Fehlerfall ist eine fehlende Datei.
+
+**Was gebaut werden sollte**, in zwei Sätzen: `docs/ROADMAP.md` und
+`docs/backlog.md` beginnen mit einem datierten "Current state"-
+Prosaeintrag, der fünf Releases in Folge veraltet war. Der Helfer
+stellt die veröffentlichte Version als neuen Eintrag voran (Zusammen-
+fassung aus den Release-Notes), stuft den vorherigen Eintrag in die
+Kette zurück und muss laut verweigern, wenn die Release-Notes-Datei
+oder der Header-Anker fehlt.
+
+**Der Test zuerst.** Die Vorrichtung baut die echte Repo-Form in
+`tmp_path` (ein `backend/pyproject.toml` mit der kanonischen Version,
+beide Header-Dateien, eine Release-Notes-Datei), und die Tests fahren
+den CLI-Einstieg, keine internen Funktionen:
+
+```python
+@pytest.fixture()
+def fake_repo(tmp_path: Path) -> Path:
+    """Build a minimal repo layout the script operates on."""
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "pyproject.toml").write_text(
+        '[tool.poetry]\nname = "adaptive_learner"\nversion = "2.7.0"\n',
+        encoding="utf-8",
+    )
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "ROADMAP.md").write_text(ROADMAP_TEMPLATE, encoding="utf-8")
+    (docs / "backlog.md").write_text(BACKLOG_TEMPLATE, encoding="utf-8")
+    releases = tmp_path / "changelog" / "releases"
+    releases.mkdir(parents=True)
+    (releases / "v2.7.0.md").write_text(CHANGELOG_BODY, encoding="utf-8")
+    return tmp_path
+
+
+def test_bump_prepends_current_state_and_demotes_prior_when_stale(
+    fake_repo: Path,
+) -> None:
+    exit_code = bump_roadmap_header.main(["--repo-root", str(fake_repo), "--date", "2026-07-30"])
+    assert exit_code == 0
+
+    roadmap = (fake_repo / "docs" / "ROADMAP.md").read_text(encoding="utf-8")
+    assert roadmap.count("Current state:") == 1
+    assert "Current state: **v2.7.0 (released 2026-07-30 - " in roadmap
+    assert (
+        "see changelog/releases/v2.7.0.md).** Recent prior: **v2.6.1 (released 2026-07-24"
+        in roadmap
+    )
+    assert "Recent prior: **v2.6.0" in roadmap
+```
+
+Der Fehlerfall, für den der Helfer existiert: die Release-Notes-Datei
+fehlt, der Lauf muss scheitern, statt eine Halbwahrheit in die Header
+zu schreiben.
+
+```python
+def test_bump_fails_when_changelog_missing(fake_repo: Path) -> None:
+    (fake_repo / "changelog" / "releases" / "v2.7.0.md").unlink()
+    exit_code = bump_roadmap_header.main(["--repo-root", str(fake_repo), "--date", "2026-07-30"])
+    assert exit_code == 1
+```
+
+Die Datei enthält insgesamt sechs Tests; die anderen vier decken
+Idempotenz bei kanonischer Version, einen fehlenden Header-Anker, die
+Zusammenfassungs-Extraktion und `--dry-run` ohne Schreibzugriff ab.
+Für das vollständige Bild die Datei selbst lesen.
+
+**Der rote Lauf.** Bevor eine Zeile Implementierung existierte:
+
+```text
+$ poetry run pytest tests/test_bump_roadmap_header.py -q
+ERROR tests/test_bump_roadmap_header.py - FileNotFoundError: [Errno 2] No suc...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.09s
+```
+
+(Die abgeschnittene Zeile ist pytests eigene `-q`-Ausgabe,
+unverändert.)
+
+**Warum das der wichtigste Schritt ist.** Ein Test, der nie rot war,
+belegt nicht, dass er etwas prüft. Er kann grün sein, weil er die
+falsche Frage stellt, weil er den Code nie erreicht oder weil seine
+Vorrichtung nichts enthält. Dieses Repository hat dafür mehrfach
+bezahlt:
+
+- Fünf aufeinanderfolgende "behobene" Backup-Releases (#49, #57,
+  #64, #115, #117) erschienen jeweils mit grünen Unit-Tests, und
+  keines davon lieferte einen funktionierenden Export/Import-
+  Roundtrip in der echten App. Grün, und falsch: die Tests stellten
+  eine Frage, die die echten Daten nie stellten. Diese Geschichte
+  ist der Grund für das manuelle Backup-Roundtrip-Gate
+  (BACKUP-AKZEPTANZTEST in `.claude/rules/quality-checks.md`).
+- Das Content-Verfügbarkeits-Orakel (#1816 / #1818) war grün gegen
+  handgebaute `{source, id}`-Vorrichtungen, die die Annahme des
+  Autors über `listSets` kodierten. Gegen die echte
+  `ContentSetEntry`-Form war die Annahme im API-Modus falsch; Modul
+  und Tests waren gemeinsam grün und falsch. Das ist die häufigste
+  Falle: die Vorrichtung so bauen, dass sie zum Test passt, statt
+  die echte Datenform in die Vorrichtung zu kopieren.
+
+Eine Anmerkung zur Qualität eines Rots: der Sammelfehler oben ist nur
+akzeptabel, weil das getestete Modul überhaupt nicht existierte. Für
+eine brandneue Datei ist "kann nicht importieren" der erwartete
+Grund. Sobald das Modul existiert, muss jeder Test aus seinem eigenen
+Grund scheitern: der Test zur fehlenden Release-Notes-Datei oben wird
+über `exit_code == 1` rot, nicht über einen Importfehler. Ein Test,
+der wegen eines Tippfehlers im Import rot ist, hat nichts belegt.
+
+**Der Code, der ihn grün macht**, in der ersten Fassung. Der Kern ist
+eine verankerte Ersetzung plus ein laut scheiternder Wächter im
+Einstiegspunkt:
+
+```python
+ROADMAP_ANCHOR = re.compile(r"Current state: \*\*v(\d+\.\d+\.\d+) \(released ")
+
+
+def bump_roadmap(text: str, version: str, date: str, summary: str) -> str | None:
+    """Prepend the new Current-state entry; None when already current."""
+    match = ROADMAP_ANCHOR.search(text)
+    if match is None:
+        raise ValueError("ROADMAP.md: 'Current state: **vX.Y.Z (released' anchor not found")
+    if match.group(1) == version:
+        return None
+    new_entry = (
+        f"Current state: **v{version} (released {date} - {summary} "
+        f"see changelog/releases/v{version}.md).** "
+        f"Recent prior: **v{match.group(1)} (released "
+    )
+    return text.replace(match.group(0), new_entry, 1)
+```
+
+```python
+    changelog_path = repo_root / "changelog" / "releases" / f"v{version}.md"
+    if not changelog_path.exists():
+        print(f"ERROR: {changelog_path} not found - draft the release notes first")
+        return 1
+```
+
+**Der grüne Lauf:**
+
+```text
+$ poetry run pytest tests/test_bump_roadmap_header.py -q
+......                                                                   [100%]
+6 passed in 0.16s
+```
+
+**Das Aufräumen danach.** In diesem Zyklus rein mechanisch:
+`ruff format` formatierte die neue Testdatei vor dem Commit um
+("1 file reformatted"), keine Logikänderung, die Suite blieb grün.
+Wenn ein echtes Refactoring nötig ist (Benennung, Extraktion,
+Deduplizierung), gilt derselbe Vertrag: die Tests werden nicht
+angefasst und sind vorher wie nachher grün.
+
+### Den Zyklus in diesem Projekt fahren
+
+```bash
+cd backend && poetry run pytest tests/test_<deinedatei>.py -q  # die enge Schleife
+make test                                                      # das volle Gate vor dem Commit
+```
+
+Das Frontend-Äquivalent der engen Schleife ist
+`cd frontend && bunx vitest run src/pfad/zur/datei.test.tsx`. Der
+Pre-Commit-Hook führt die Backend-Smoke-Suite ohnehin bei jedem
+Commit aus, und `make test` muss nach jeder Änderung grün sein.
+
+## Backend-pytest
+
+```bash
+make test-backend
+cd backend && poetry run pytest -k "test_session" -v
+cd backend && poetry run pytest --pdb  # bei erstem Fehler in Debugger
+```
+
+Tests leben in `backend/tests/`. Fixtures in `conftest.py`
+liefern pro Test eine frische In-Memory-SQLite-DB, den
+`TestClient` und einen gemockten Plugin-Manager. Test-
+Isolation ist hart - `ADAPTIVE_LEARNER_TEST=1` wird vor jedem
+`app.*`-Import gesetzt.
+
+## Plugin-Tests
+
+Jedes Plugin hat sein eigenes `tests/`-Verzeichnis:
+
+```bash
+make test-plugins              # jedes Plugin
+make test-plugin-session       # nur eines
+cd plugins/adaptive-learner-plugin-session && poetry run pytest
+```
+
+Plugin-Tests laden die FastAPI-App nicht - sie üben die
+Plugin-Module isoliert. Mock den `pluggy.PluginManager`, wenn
+du Hook-Firing testest.
+
+## Frontend-Vitest
+
+```bash
+make test-frontend                # führt Vitest aus frontend/ aus
+cd frontend && bunx vitest         # Watch-Modus
+cd frontend && bunx vitest run src/storage/  # ein Verzeichnis
+```
+
+Vitest aus `frontend/` ausführen (die Konfiguration liegt in
+`frontend/vite.config.ts`), oder über `make test-frontend`. Aus
+dem Repo-Wurzelverzeichnis wird die Konfiguration nicht
+gefunden, die `node`-Umgebung verwendet, und DOM-nutzende Tests
+scheitern mit `ReferenceError: document is not defined`.
+
+Tests liegen neben dem Quelltext: `Component.test.tsx` neben
+`Component.tsx`. happy-dom ist die Umgebung; React 19 + RTL.
+Die i18n-Paritäts-Prüfung (11 Sprachen), die
+Theme-Token-Paritäts-Prüfung und die Design-Token-Prüfung
+("keine hartkodierten Farben") laufen als Vitest-Tests in
+derselben Suite.
+
+## Mock-Patterns
+
+**KI-Anbieter**: `global.fetch` mocken und auf URL, Headers,
+Body prüfen:
+
+```typescript
+beforeEach(() => {
+  global.fetch = vi.fn(async (input, init) => {
+    calls.push({url, method, body});
+    return new Response(JSON.stringify({content: [{type: "text", text: "hi"}]}), {status: 200});
+  });
+});
+```
+
+**fake-indexeddb**: am Anfang jeder Dexie-Test-Datei:
+
+```typescript
+import "fake-indexeddb/auto";
+
+beforeEach(async () => {
+  await _resetDbForTests();
+  const {IDBFactory} = await import("fake-indexeddb");
+  (globalThis as unknown as {indexedDB: IDBFactory}).indexedDB = new IDBFactory();
+});
+```
+
+Jeder Test bekommt eine frische In-Memory-IndexedDB - kein
+Leak.
+
+**api/client.ts-Mocks** (Legacy-Seiten):
+
+```typescript
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+  return {...actual, api: {...actual.api, users: {...actual.api.users, get: apiGetMock}}};
+});
+```
+
+Die Seite importiert `getStorage()`, das an ApiStorage
+delegiert, das wiederum an `api.*` delegiert. Der Mock klinkt
+sich auf der `api.*`-Ebene ein und feuert weiter durch den
+Storage-Stack.
+
+## Playwright-E2E
+
+```bash
+cd e2e && npx playwright test
+cd e2e && npx playwright test --ui   # interaktiv
+cd e2e && npx playwright test smoke/mobile-viewports.spec.ts
+```
+
+Smoke-Specs decken die kritischen User-Pfade ab:
+
+- Landing-Sprachwahl + Onboarding-Formular
+- Lerntyp-Test 12 Fragen + Radar
+- Session starten + beenden + bewerten
+- Einstellungen Sprache + API-Key
+- Curriculum anlegen
+- Mobile Viewports (iPhone SE, iPhone 14, Pixel 7, iPad)
+
+Specs nutzen ausschließlich `data-testid`-Selektoren - keine
+brüchigen CSS-Selektoren. Smoke-Specs sind NICHT im
+`make test`-Pfad; sie starten eigene Server auf eigenen Ports
+und brauchen keine laufende App. Ein laufendes `make dev` bleibt
+unberührt.
+
+Neben `e2e/smoke/` enthält der `e2e/`-Baum drei weitere
+Spec-Familien:
+
+- `e2e/dexie/` - das Dexie-Modus-Release-Gate. Baut das
+  Frontend mit `VITE_STORAGE_MODE=dexie` (die GitHub-Pages-Form,
+  ohne Backend) und läuft jede über die Navigation erreichbare
+  Route ab; jeder Fehler-Toast oder Seitenabsturz lässt es
+  scheitern, ebenso mehr übersprungene Tests, als
+  `e2e/.runtime-skip-budget.json` für die Suite erlaubt (ein Spec,
+  der seine Oberfläche nicht erreicht, überspringt zur Laufzeit).
+  Ausführen mit `make test-dexie-smoke`.
+- `e2e/visual/` - Visuelle Baseline-Regressions-Specs.
+- `e2e/manual-automation/` - Playwright-Automatisierung des
+  manuellen Testplans.
+
+## Coverage
+
+```bash
+make test-coverage   # opt-in; langsam + thermisch heftig
+```
+
+Coverage ist ein Bericht, kein Merge-Gate, und läuft daher
+nicht bei PRs. Der `coverage.yml`-Workflow läuft nächtlich
+(und auf Abruf); Artefakte herunterladen:
+
+```bash
+gh run download --name backend-coverage
+gh run download --name frontend-coverage
+```
+
+Jedes Plugin bekommt ein eigenes Artefakt `<plugin-verzeichnis>-coverage`,
+zum Beispiel
+`gh run download --name adaptive-learner-plugin-session-coverage`;
+ein neues Plugin ist ohne Workflow-Änderung dabei.
+
+Targets per `.claude/rules/quality-checks.md`:
+
+- Services + Business-Logik: 95% min
+- API-Endpunkte: 90% min
+- Frontend-Komponenten mit Logik: 85% min
+- Hooks + Utilities: 95% min
+
+Gesamt: 85-95% projektweit.
+
+## Pre-Commit
+
+```bash
+cd backend && poetry run pre-commit install
+```
+
+Die Hooks stehen in `.pre-commit-config.yaml`, zum Beispiel ruff
+check (Auto-Fix) und ruff format, Whitespace-, YAML-, JSON- und
+Merge-Konflikt-Prüfungen, Frontend-ESLint, die Doku-Prüfungen
+(Umlaut-Ratsche, Doc-Referenzen) und
+`plugin-lock-paired-with-pyproject` (blockierend): Er führt für
+jedes Plugin, dessen `pyproject.toml` oder `poetry.lock` betroffen
+ist, `poetry check --lock` aus und schlägt fehl, wenn sich die
+Abhängigkeiten seit dem Schreiben des Locks geändert haben; er läuft
+auch im CI-Pre-Commit-Job über alle Dateien. Dort
+wird der Hook `eslint` übersprungen (der Frontend-Tests-Job
+führt ESLint stattdessen mit installierten Abhängigkeiten
+aus). Prettier ist kein Hook: `bun run format:check` läuft im
+Frontend-Tests-Job, nicht blockierend bis zur einmaligen
+Neuformatierung aus #3270.
+
+## CI
+
+CI teilt sich in zwei Stufen: Korrektheits-Gates laufen bei
+jedem PR (sie müssen zum Mergen grün sein), und die teuren oder
+nur-warnenden Suiten laufen zur Nachtschicht und beim Release.
+
+`.github/workflows/ci.yml` läuft bei Push auf `develop` /
+`main` und bei jedem PR (Python 3.12):
+
+1. Backend-Tests (pytest)
+2. Plugin-Tests (`make test-plugins`, jedes Plugin über die
+   Backend-venv)
+3. Frontend: `tsc --noEmit`, ESLint (`--max-warnings 0`),
+   Circular-Dependency-Prüfung, Stylelint, Vitest,
+   `vite build`, `bun audit --audit-level=high` (blockiert bei hohen
+   und kritischen Funden). Ein Fund ohne gepatchte Version, der nur
+   eine Entwicklungs-Abhängigkeit erreicht, wird per ID in
+   `frontend/audit-ignore.txt` ausgenommen: eine ID pro Zeile,
+   darüber ein Kommentar mit Grund und Bedingung fürs Entfernen.
+   `make check-security` liest dieselbe Liste; `security-scan.yml`
+   bleibt ungefiltert.
+4. Pre-Commit-Hooks über alle Dateien
+5. Backend ruff + mypy + pip-audit
+6. Docs-Drift-Verifizierer (`verify_docs.py` + mkdocs-nav-Sync)
+
+**Test Impact Analysis (#615):** bei einem PR laufen nur die
+betroffenen Tests - `vitest run --changed origin/<base>` und
+`pytest --testmon`. Push auf `develop` / `main`, die
+nächtlichen Läufe und der Release-Lauf führen immer die VOLLE
+Suite aus. Der Rückfall auf die volle Suite ist automatisch
+(nicht auflösbare Basis-Referenz oder ein testmon-Cache-Miss).
+Auch der erste Lauf eines PRs ist selektiv: Er liest die testmon-Daten, die der Job `testmon-seed` bei jedem Push auf `develop` schreibt (#3901).
+
+Weitere PR-Gates leben in eigenen Workflows:
+
+- `complexity-check.yml` - das Komplexitäts-Ratschen-Gate
+  (`make check-complexity-gate`, radon für Python +
+  ESLint-Komplexität für TS). Es ist ein Baseline-Ratschen: es
+  scheitert nur an NEUEN oder verschlechterten Verstößen
+  gegenüber `.complexity-baseline`, blockiert also neue
+  Komplexität, ohne ein Aufräumen der bestehenden Schuld zu
+  erzwingen. Der volle nur-warnende Komplexitätsbericht läuft
+  nächtlich. Im selben Job läuft die Ordnergrößen-Prüfung
+  (`scripts/check-folder-size.sh` gegen `.dirsize-baseline`); lokal
+  `make check-folder-size` oder als Teil von `make ci`.
+- `cohesion-check.yml` - die Dateigrößen-Prüfung (Gate gegen
+  `.filesize-whitelist`) plus zwei Klassen-Namens-Gates:
+  tote CSS-Klassennamen (`check-dead-classnames.py` gegen
+  `.dead-classnames-baseline`) und das
+  **Ungestylte-className-Gate** (`--unstyled`, Ratsche gegen
+  `.unstyled-classnames-baseline`) - ein `className`, dessen
+  Tokens alle tot sind, blockiert den PR.
+- `visual-baseline-gate.yml` - ein PR, der visuell-kritische
+  Pfade ändert (Lesson-Komponenten, Exercise-Renderer,
+  Theme-/CSS-Dateien), muss die betroffenen
+  Baseline-Screenshots im selben PR mitbringen; Escape-Label
+  `visual-baselines-unaffected` für nachweislich inerte
+  Änderungen.
+- `testid-reference-gate.yml` - entfernt oder benennt ein PR
+  ein `data-testid` um, das ein E2E-Spec statisch referenziert
+  (auf einer stark nutzer-sichtbaren Fläche), ohne das Spec
+  anzufassen, scheitert das Gate (`make check-testid-refs`);
+  Escape-Label `testid-refs-unaffected`.
+- `docker-build-smoke.yml` - Build-only-Smoke der
+  Produktions-Compose-Images (der Launcher-/install.sh-Pfad),
+  pfadgefiltert bei PRs, zusätzlich auf `release/**`,
+  wöchentlich und per Abruf; lokal `make docker-build-smoke`.
+- `dexie-smoke.yml` - das Dexie-Modus-E2E-Gate: auf jedem Pull
+  Request, den es betrifft (`scripts/dexie_smoke_affected.py`
+  entscheidet; der Job `Dexie smoke (required)` meldet immer), dazu
+  täglich, auf `release/**` und per Abruf; lokal
+  `make test-dexie-smoke`.
+- `backup-e2e.yml` - läuft auf PRs, die einen Backup-Pfad berühren
+  (zum Beispiel `frontend/src/storage/backup/`, die Dexie-Stores oder
+  die Backend-Backup-Dienste; die Liste steht im Workflow), und führt
+  jede `e2e/dexie/backup-*.spec.ts` aus, darunter den Round-Trip über
+  alle Backup-Tabellen.
+
+**Nachtschicht / Release (nicht bei PRs):**
+
+- `coverage.yml` - Coverage-Bericht (täglich + Abruf)
+- `security-scan.yml` - pip-audit / bun audit / bandit
+  (wöchentlich + auf `release/**` + Abruf; nur-warnend)
+- `content-stats.yml` - Content-Statistik-Drift gegen ein
+  frisches Content-Checkout (täglich + Abruf)
+- `mutation-frontend.yml` - Stryker-Mutation-Testing (Nächtlich
+  hinter der Repo-Variable `ENABLE_NIGHTLY_MUTATION` + Abruf;
+  mutiert pro Lauf eine Datei-Scheibe, damit der Lauf ins
+  Job-Zeitlimit passt); Backend-Mutation-Testing nutzt mutmut
+- `webkit-gate.yml` - das echte WebKit-Engine-Layout-Gate
+  (iOS-/Safari-Bugklassen, die die Chromium-Gates strukturell
+  nicht sehen), täglich hinter der Repo-Variable
+  `ENABLE_NIGHTLY_WEBKIT`, immer auf `release/**` und per Abruf
+- `visual-regression.yml` - die visuelle Baseline-Matrix
+  (täglich + Abruf; `update_baselines=true` rendert die
+  Baselines in CI neu und lädt sie als Artefakt hoch)
+- `visual-baseline-sync.yml` - Service-Workflow: rendert die
+  Baselines in CI und pusht sie als Commit auf den PR-Branch
+  (Label `refresh-visual-baselines` oder Abruf mit
+  PR-Nummer) - die Bild-Review vor dem Merge bleibt Pflicht
+- `smoke-nightly.yml` - nächtlicher Lauf der Mobile-Viewport-Smoke;
+  Befunde landen in einem Sammel-Issue
+- `unused-catalog-keys.yml` - nächtlicher Bericht über
+  Katalog-Schlüssel ohne Konsumenten, die älter als das Vorlauf-Fenster
+  sind (`AGE_DAYS` in `frontend/src/i18n/unused-catalog-keys.ts`), in
+  einem Sammel-Issue; jeder Schlüssel darin ist ein Kandidat und wird
+  vor dem Löschen einzeln geprüft
+
+`.github/workflows/release-gate.yml` läuft bei Tag-Pushes:
+verifiziert, dass alle versionstragenden Dateien im Gleichschritt
+sind (kein Drift), Plugin-Lockfiles passen, und regenerierte
+Artefakte aktuell sind.
+
+## Manueller Testplan
+
+Was Automatisierung nicht abdeckt (Layout, Lesbarkeit,
+Touch-Bedienung, Theme-Kontraste), prüft eine manuelle
+Checkliste vor jedem größeren Release:
+[MANUAL-TESTPLAN.md](https://github.com/astrapi69/adaptive-learner/blob/main/docs/reference/MANUAL-TESTPLAN.md).

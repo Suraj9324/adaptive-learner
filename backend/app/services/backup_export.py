@@ -1,0 +1,168 @@
+"""Backup export: gather a user's rows + content sets into a backup dict.
+
+Extracted from ``backup_service`` (the facade). The restore pipeline lives
+in ``backup_restore``; the per-table sync surface + ownership checks live
+in ``sync_service``.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from typing import Any
+
+from app import __version__
+from app.exceptions import NotFoundError
+from app.repositories.backup_repo import BackupRepository
+from app.services.content_backup import dump_content_sets
+from app.services.sync_service import (
+    EXCLUDED_USER_SETTINGS_FIELDS,
+    _to_iso,
+    serialize_row,
+)
+from app.services.sync_service import (
+    TABLES as SYNC_TABLES,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# One format version for both storage modes; the frontend's
+# ``BACKUP_VERSION`` (storage/backup/backup-tables.ts) must match, pinned
+# by a parity test there. The backend said 1.4.0 and the frontend 1.5.0 for
+# the same EXP-051 change until #3363.
+# 1.10.0 - #3952: element_errors gains retired_reason. A backup without it
+# has its retired rows restored as "author", the only cause there was.
+# 1.9.0 - #3412: an optional ai_validation_results block (cached AI
+# content-check reports), captured and applied frontend-side; an API-mode
+# export carries it empty and this import ignores it.
+# 1.8.0 - #3412: an optional plugin_settings block (connected repos, invites,
+# the Learning Repository switch), added and applied frontend-side in both
+# modes like local_storage; this import ignores it.
+# 1.7.0 - #3445: xp_purchases rides the export. Older backups have no
+# ledger; ownership then migrates from the local_storage snapshot the first
+# time a gallery loads (frontend purchase-ledger.ts).
+# 1.6.0 - #3363: paused_at / abandoned_at, content_hash + the import
+# language pair, cycle_count / cycle_topics and the session-note kind ride
+# the export. Older backups lack them and import with the column defaults.
+# 1.5.0 (1.4.0 here) - EXP-051 / #2125: element_errors gains run_id and
+# set_runs rides the export; older backups import with run_id 1.
+BACKUP_VERSION = "1.10.0"
+BACKUP_FORMAT = "adaptive-learner-backup"
+
+#: The top-level keys of a backup this build knows (#3827). A newer backup's
+#: other keys are skipped and named in the restore summary. The client-side
+#: blocks count as known: the frontend applies them in both modes. The
+#: frontend keeps the same set (``PAYLOAD_SEGMENTS`` in
+#: storage/backup/backup-version.ts), pinned by a parity test there.
+PAYLOAD_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "format",
+        "version",
+        "app_version",
+        "created_at",
+        "user_id",
+        "storage_mode",
+        "data",
+        "content_sets",
+        "local_storage",
+        "plugin_settings",
+        "ai_validation_results",
+        "stats",
+    }
+)
+
+# API keys are sensitive; the backup file is meant to travel
+# (cloud, USB, email). Stripped on export, ignored on import. The field
+# list (EXCLUDED_USER_SETTINGS_FIELDS) lives in sync_tables.py, shared with
+# the LAN sync wire (#3854).
+
+
+def _strip_excluded_fields(table: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Remove sensitive fields (API keys) from a serialized row."""
+    if table != "user_settings":
+        return record
+    return {k: v for k, v in record.items() if k not in EXCLUDED_USER_SETTINGS_FIELDS}
+
+
+def _gather_user_rows(repo: BackupRepository, user_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Build the ``data`` segment: ALL backup tables, scoped to the user.
+
+    Every one of the 30 tables is ALWAYS present, even with zero rows
+    (an empty list). A backup is a COMPLETE snapshot of the user's
+    state: an empty table is information ("this table had no rows"),
+    and a table that is merely absent is ambiguous — was it empty, or
+    did the export forget it? That ambiguity was the exact bug class
+    chased across #49/#57/#64/#115/#117. The earlier #117 "skip empty
+    tables" optimization is intentionally reverted (#126).
+    """
+    data: dict[str, list[dict[str, Any]]] = {}
+    for table in SYNC_TABLES:
+        rows = repo.scoped_rows(table, user_id)
+        data[table] = [_strip_excluded_fields(table, serialize_row(table, row)) for row in rows]
+    return data
+
+
+def _build_stats(
+    data: dict[str, list[dict[str, Any]]],
+    content_sets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Per-table counts + grand total. Cheap derived field for the UI."""
+    tables = {table: len(rows) for table, rows in data.items()}
+    return {
+        "total_records": sum(tables.values()),
+        "tables": tables,
+        "content_sets": len(content_sets) if content_sets else 0,
+    }
+
+
+def create_backup(
+    repo: BackupRepository, user_id: str, storage_mode: str = "api"
+) -> dict[str, Any]:
+    """Return the JSON backup payload for ``user_id``.
+
+    Raises :class:`NotFoundError` if the user does not exist; the
+    user is the scope key for every table query, so a missing user
+    means the request is meaningless.
+
+    ``storage_mode`` is a UI hint that travels with the backup
+    (the Settings panel shows "this backup was made in Dexie mode"
+    on restore). It does not change the wire format.
+    """
+    if not repo.user_exists(user_id):
+        raise NotFoundError(f"User {user_id!r} not found.")
+    data = _gather_user_rows(repo, user_id)
+    # Downloaded lesson CONTENT lives outside the 30 sync tables (#130).
+    # Include it so a restore is self-contained — and so user-generated
+    # sets, which exist ONLY in this cache, are not lost.
+    content_sets = dump_content_sets()
+    return {
+        "format": BACKUP_FORMAT,
+        "version": BACKUP_VERSION,
+        "app_version": __version__,
+        "created_at": _to_iso(datetime.now(UTC)),
+        "user_id": user_id,
+        "storage_mode": storage_mode,
+        "data": data,
+        "content_sets": content_sets,
+        "stats": _build_stats(data, content_sets),
+    }
+
+
+def get_backup_stats(repo: BackupRepository, user_id: str) -> dict[str, Any]:
+    """Per-table row counts for one user. Used by the UI for the
+    pre-restore "current vs incoming" diff.
+    """
+    if not repo.user_exists(user_id):
+        raise NotFoundError(f"User {user_id!r} not found.")
+    tables: dict[str, int] = {}
+    for table in SYNC_TABLES:
+        # ALL 30 tables, even at zero rows (#126): the pre-restore
+        # "current vs incoming" dialog shows the COMPLETE state so the
+        # user sees every table, not just the non-empty ones.
+        tables[table] = repo.scoped_count(table, user_id)
+    return {
+        "user_id": user_id,
+        "total_records": sum(tables.values()),
+        "tables": tables,
+    }

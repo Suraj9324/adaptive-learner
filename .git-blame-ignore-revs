@@ -1,0 +1,10 @@
+# Commits `git blame` skips (#3270): one full SHA per line, `#` starts a
+# comment. List only commits that change formatting and nothing else, such
+# as the one-time Prettier reformat of frontend/src. Its squash SHA is added
+# in a follow-up PR, because it exists only after the reformat PR merges.
+#
+# GitHub reads this file on its own. Locally, `make install-hooks` sets
+# `blame.ignoreRevsFile` to it.
+
+# ruff format of every plugin module (#3658, #3665)
+62c904c295fdc6adb8a5ce3c499b54fab49801a6

@@ -1,0 +1,77 @@
+import {describe, expect, it} from "vitest";
+
+import {
+    contentDomainToStamp,
+    DEFAULT_DOMAIN,
+    DOMAIN_OPTIONS,
+    isKnowledgeDomain,
+    KNOWN_CONTENT_DOMAINS,
+    LEVEL_NONE,
+    normalizeLevel,
+} from "./content-domains";
+import {ENGINE_KNOWN_CONTENT_DOMAINS} from "./engine";
+
+// #1716 — the shared content-domain vocabulary the CreateLesson + Share
+// wizards both consume, so they mirror ONE distinction.
+describe("content-domains (#1716)", () => {
+    it("DOMAIN_OPTIONS leads with the language default, then the known domains", () => {
+        expect(DOMAIN_OPTIONS[0]).toBe(DEFAULT_DOMAIN);
+        expect(DOMAIN_OPTIONS[0]).toBe("language");
+        // Every known non-language domain is offered after it.
+        for (const d of KNOWN_CONTENT_DOMAINS) {
+            expect(DOMAIN_OPTIONS).toContain(d);
+        }
+        // The language default is never inside the known-domains set.
+        expect(KNOWN_CONTENT_DOMAINS.has("language")).toBe(false);
+    });
+
+    // #3397 - the app's question is "a known NON-language domain?"; the
+    // engine's isKnownContentDomain answers "a known domain?" (language and
+    // empty included). The app helper is named for its own question and
+    // built on the engine's answer.
+    it.each([
+        ["psychology", true],
+        ["Psychology", true],
+        ["traffic-knowledge", true],
+        ["language", false],
+        ["", false],
+        [null, false],
+        [undefined, false],
+        ["not-real", false],
+    ])("isKnowledgeDomain(%s) is %s", (domain, expected) => {
+        expect(isKnowledgeDomain(domain)).toBe(expected);
+    });
+
+    it("isKnowledgeDomain agrees with the engine on every canonical domain", () => {
+        for (const domain of ENGINE_KNOWN_CONTENT_DOMAINS) {
+            expect([domain, isKnowledgeDomain(domain)]).toEqual([domain, domain !== "language"]);
+        }
+    });
+
+    it("contentDomainToStamp returns the lowercased known domain, else undefined", () => {
+        expect(contentDomainToStamp("Programming")).toBe("programming");
+        expect(contentDomainToStamp("knowledge")).toBe("knowledge");
+        expect(contentDomainToStamp("language")).toBeUndefined();
+        expect(contentDomainToStamp("")).toBeUndefined();
+        expect(contentDomainToStamp(null)).toBeUndefined();
+        expect(contentDomainToStamp("bogus")).toBeUndefined();
+    });
+
+    it("LEVEL_NONE is the non-empty Radix-safe sentinel for a level-less shape", () => {
+        expect(LEVEL_NONE).toBe("__none__");
+        expect(LEVEL_NONE.length).toBeGreaterThan(0);
+    });
+});
+
+describe("normalizeLevel (#3385)", () => {
+    it.each([
+        { level: "", stored: "none" },
+        { level: "  ", stored: "none" },
+        { level: undefined, stored: "none" },
+        { level: null, stored: "none" },
+        { level: "none", stored: "none" },
+        { level: "A2", stored: "A2" },
+    ])("normalizeLevel($level) is $stored", ({ level, stored }) => {
+        expect(normalizeLevel(level)).toBe(stored);
+    });
+});

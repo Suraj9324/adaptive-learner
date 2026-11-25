@@ -1,0 +1,32 @@
+# Copied to app.yaml (gitignored) on first start. Every key here has a
+# reader; a key nothing reads does not belong here (#3435).
+app:
+  # Fallback language of PluginForge's i18n lookup (config/i18n/).
+  default_language: de
+server:
+  # Allowed CORS origins. Comma-joined into the
+  # ``ADAPTIVE_LEARNER_CORS_ORIGINS`` env var by deployment tooling;
+  # main.py merges either source. The frontend dev port (15174)
+  # is the only entry that has to be here for local development.
+  # The backend port is not configured here: uvicorn takes it from
+  # ``--port``, filled from ``ADAPTIVE_LEARNER_PORT`` (default 18001).
+  cors_origins:
+    - http://localhost:15174
+plugins:
+  disabled: []
+  enabled:
+    - assessment
+    - ai-anthropic
+    - ai-openai
+    - ai-gemini
+    - ai-perplexity
+    - session
+    - tracking
+    - tools
+    - gamification
+    - anki
+    - notebooklm
+    - learning-repo
+    - content-loader
+    - missions
+  entry_point_group: adaptive_learner.plugins

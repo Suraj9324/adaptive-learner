@@ -1,0 +1,109 @@
+import "@testing-library/jest-dom/vitest";
+import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import { describe, expect, it } from "vitest";
+
+import type { SetReview } from "../../lib/statistics/set-review";
+import ReviewReport from "./ReviewReport";
+
+const t = (_key: string, fallback?: string) => fallback ?? _key;
+
+function review(overrides: Partial<SetReview> = {}): SetReview {
+  return {
+    setId: "s1",
+    hasData: true,
+    totalErrors: 7,
+    elementsTracked: 4,
+    elementsMastered: 1,
+    elementsOpen: 3,
+    masteredShare: 25,
+    lessonsCompleted: 2,
+    timeSpentSeconds: 150,
+    byLesson: [{ lessonId: "01.json", errors: 5, elements: 3 }],
+    byType: [{ type: "vocabulary", errors: 7, elements: 4 }],
+    weakAreas: [
+      {
+        elementKey: "bonjour",
+        lessonId: "01.json",
+        errorCount: 4,
+        mastered: false,
+        lastAnswer: "bonjor",
+        correctAnswer: "bonjour",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function renderReport(props: Partial<React.ComponentProps<typeof ReviewReport>> = {}) {
+  return render(
+    <MemoryRouter>
+      <ReviewReport review={review()} t={t} testIdPrefix="rr" {...props} />
+    </MemoryRouter>,
+  );
+}
+
+describe("ReviewReport (#3124)", () => {
+  it("renders the four key figures, the type breakdown and the weak spots under the prefix", () => {
+    renderReport();
+    expect(screen.getByTestId("rr-total-errors")).toHaveTextContent("7");
+    expect(screen.getByTestId("rr-mastered")).toHaveTextContent("25%");
+    expect(screen.getByTestId("rr-open")).toHaveTextContent("3");
+    expect(screen.getByTestId("rr-time")).toHaveTextContent("3 min");
+    expect(screen.getByTestId("rr-by-type")).toHaveTextContent("vocabulary: 7");
+    expect(screen.getByTestId("rr-weak-areas")).toHaveTextContent("bonjor");
+    expect(screen.getByTestId("rr-weak-areas")).toHaveTextContent("4 mistakes");
+  });
+
+  it("renders Still open from the aggregate's elementsOpen instead of re-deriving it (#3166)", () => {
+    // The fixture deliberately disagrees with tracked minus mastered (4 - 1):
+    // the aggregate owns the maths, the renderer must not compute a second one.
+    renderReport({ review: review({ elementsOpen: 2 }) });
+    expect(screen.getByTestId("rr-open")).toHaveTextContent("2");
+  });
+
+  it("shows the per-lesson breakdown only for the set scope", () => {
+    const { unmount } = renderReport({ showByLesson: true });
+    expect(screen.getByTestId("rr-by-lesson")).toHaveTextContent("01.json");
+    unmount();
+    renderReport({ showByLesson: false });
+    expect(screen.queryByTestId("rr-by-lesson")).toBeNull();
+  });
+
+  it.each(["rr-by-lesson", "rr-by-type", "rr-weak-areas"])(
+    "resets the browser list marker and indent of %s (#3341)",
+    (testId) => {
+      // No Tailwind preflight is loaded: a bare <ul> keeps its disc bullets
+      // and the 40px indent, so every report list resets them itself.
+      renderReport({ showByLesson: true });
+      const list = screen.getByTestId(testId).querySelector("ul");
+      expect(list).toHaveClass("m-0", "list-none", "p-0");
+    },
+  );
+
+  it("uses the requested heading level for its sections", () => {
+    renderReport({ headingLevel: 4 });
+    const heading = screen.getByTestId("rr-by-type").querySelector("h4");
+    expect(heading).toHaveTextContent("Mistakes per exercise type");
+    expect(screen.getByTestId("rr-by-type").querySelector("h2")).toBeNull();
+  });
+
+  it("renders the action links only when their routes are given", () => {
+    const { unmount } = renderReport({ practiceHref: "/review/s1", backHref: "/content/set/s1" });
+    expect(screen.getByTestId("rr-practice")).toHaveAttribute("href", "/review/s1");
+    expect(screen.getByTestId("rr-back")).toHaveAttribute("href", "/content/set/s1");
+    unmount();
+    renderReport();
+    expect(screen.queryByTestId("rr-practice")).toBeNull();
+    expect(screen.queryByTestId("rr-back")).toBeNull();
+  });
+
+  it.each([
+    ["a review without data", review({ hasData: false })],
+    ["no review at all", null],
+  ])("renders the empty state for %s", (_name, value) => {
+    renderReport({ review: value });
+    expect(screen.getByTestId("rr-empty")).toHaveTextContent("No mistakes recorded");
+    expect(screen.queryByTestId("rr-report")).toBeNull();
+  });
+});

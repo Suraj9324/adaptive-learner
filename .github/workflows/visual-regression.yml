@@ -1,0 +1,136 @@
+name: Visual regression
+
+# Block 8 (#244) + critical-surfaces matrix (#705). Visual tests are SLOW
+# and require a committed baseline, so they run as their own job — NOT in
+# the smoke/PR gate (screenshots change on every UI PR; same night-shift
+# rationale as the mutation / dexie-smoke workflows, #575). Runs nightly
+# (04:00 UTC, after the nightly suite) + on demand via workflow_dispatch.
+#
+# NOT wired to pull_request on purpose. Manual-first per the "wired !=
+# working" rule: trigger once after the baseline PNGs are committed and
+# confirm green before relying on the schedule.
+
+on:
+  workflow_dispatch:
+    inputs:
+      update_baselines:
+        description: >-
+          Regenerate the baseline PNGs (--update-snapshots) in the CI
+          environment and upload them as the visual-baselines artifact
+          instead of diffing. Download, REVIEW, and commit them via PR —
+          baselines must be rendered here, not on a dev machine (font
+          anti-aliasing differs per machine). (#1532)
+        type: boolean
+        default: false
+  schedule:
+    # Nightly at 04:00 UTC — after the nightly test suite (#575).
+    - cron: "0 4 * * *"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  visual:
+    name: Visual screenshot matrix (themes + critical surfaces)
+    runs-on: ubuntu-latest
+    # #2715 — the comparison MUST render in the SAME environment that
+    # produces the baselines: visual-baseline-sync.yml renders inside this
+    # pinned Playwright image, and after the #2695 resync anchored every
+    # PNG to the container's system fonts, a bare-runner render diffs by
+    # 9k-497k pixels per surface (the #2690 font-weight shift) and the
+    # nightly went permanently red (2026-08-20/21). Same image + --user
+    # 1001 pattern as visual-baseline-sync.yml / dexie-smoke.yml /
+    # manual-automation.yml (browsers pre-baked, no cdn.playwright.dev
+    # download — the #317/#1248 hang class). Pin the tag to the
+    # @playwright/test version in e2e/package.json (1.61.1); bump both
+    # together.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --user 1001
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      # NOT oven-sh/setup-bun: it unpacks the Bun zip with `unzip`, which
+      # the Playwright noble image does not ship, and the job runs as
+      # --user 1001 (no apt). The npm distribution carries the binary as a
+      # plain npm tarball, installed to a user-writable prefix (#1530,
+      # same pattern as visual-baseline-sync.yml / dexie-smoke.yml).
+      - name: Install Bun 1.4.2 (npm; image lacks unzip for setup-bun)
+        run: |
+          npm install --global --prefix "$HOME/.bun-npm" bun@1.4.2
+          echo "$HOME/.bun-npm/bin" >> "$GITHUB_PATH"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock', 'e2e/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Build dexie frontend
+        working-directory: frontend
+        run: VITE_STORAGE_MODE=dexie bun run build
+
+      - name: Install e2e deps
+        working-directory: e2e
+        run: bun install --frozen-lockfile
+
+      # NO `playwright install` step: the browsers are baked into the
+      # container image (#2715; the #317 CDN-hang class).
+
+      # #3215 - a refresh writes every baseline that differs in at least one
+      # pixel past a noise floor: VISUAL_BASELINE_REFRESH=1 drops the count
+      # budget (maxDiffPixels) to 0 and the colour threshold to 0.05
+      # (e2e/visual/refresh-mode.ts). With the budget, a change under
+      # 2,500 px was never written (five cases, the last 30 images in #3689).
+      # Measured on 166 baselines rendered twice: raster noise is at most 2
+      # per channel, the faintest real change up to 52. The compare run keeps
+      # its budget and its threshold.
+      - name: Run visual regression
+        working-directory: e2e
+        env:
+          VISUAL_BASELINE_REFRESH: ${{ inputs.update_baselines == true && '1' || '0' }}
+        run: >-
+          npx playwright test --config=playwright.visual.config.ts
+          ${{ inputs.update_baselines == true && '--update-snapshots=changed' || '' }}
+
+      # #3427 - a surface without a baseline that cannot be reached skips at
+      # runtime; the budget keeps a broken path from turning into a green
+      # night. A baseline refresh run is not a gate run.
+      - name: Runtime skip budget (#3427)
+        if: (success() || failure()) && inputs.update_baselines != true
+        run: python3 scripts/check_e2e_skip_budget.py --suite visual-regression --report e2e/test-results/visual-regression.json
+
+      - name: Upload report + diffs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-regression-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 14
+
+      # Baseline-refresh mode (#1532): the regenerated PNGs are an artifact,
+      # NEVER auto-committed — download, review every image, commit via PR.
+      # #2661 — `always()` is required, not optional: an unrelated flaky/
+      # broken spec elsewhere in the 100+-spec matrix fails the job exit
+      # code even under --update-snapshots (which never fails on a pixel
+      # diff itself), and without always() this step is silently skipped —
+      # the regenerated PNGs exist transiently in the runner workspace and
+      # are lost. Matches the precedent on "Upload report + diffs" above.
+      - name: Upload regenerated baselines
+        if: always() && inputs.update_baselines == true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-baselines
+          path: e2e/visual/screenshots
+          retention-days: 14

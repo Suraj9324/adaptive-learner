@@ -1,0 +1,277 @@
+/**
+ * AiValidationDialog — the EXP-033 set-wide AI content-check flow
+ * (AIV-02/03/05): cost estimate → confirm → batched run with progress +
+ * cancel → per-card report. Opens for a single cached set.
+ *
+ * The provider call runs through ``getStorage().contentLoader
+ * .aiValidateCards`` (Dexie browser-direct). The trigger is gated to a
+ * configured key + Dexie mode by the caller; this dialog still guards
+ * defensively and surfaces any error as a friendly message.
+ */
+
+import { useEffect } from "react";
+
+import { Button } from "@/components/ui/button";
+
+import ModalShell from "../../../shared/feedback/ModalShell";
+import ProgressBar from "../../../shared/data-display/ProgressBar";
+import type { ValidationReportItem } from "../../../shared/feedback/ValidationReport";
+import { useI18n } from "../../../hooks/ui/useI18n";
+import { useAiCardValidation } from "../../../hooks/content/useAiCardValidation";
+import { useAiFix } from "../../../hooks/content/ai-fix";
+import { isOwnEditableSet } from "../../../lib/lesson/own-set";
+import AiPrivacyNote from "../AiPrivacyNote";
+import AiFixPanel from "./AiFixPanel";
+import AiReportStep from "./AiReportStep";
+import {
+  buildValidationMarkdown,
+  type ValidationMarkdownRow,
+} from "../../../lib/ai/validation/validation-markdown";
+import { checkedWithLine } from "../../../lib/ai/validation/validation-provenance";
+import { aiProviderLabel } from "../../../lib/ai/providers/provider-label";
+import { downloadBlob } from "../../../lib/lesson/export/result-download";
+import type { AIProvider } from "../../../lib/constants";
+import type { ContentSetEntry } from "../../../storage/types";
+
+export interface AiValidationDialogProps {
+  /** The set under review, or null when the dialog is closed. */
+  entry: ContentSetEntry | null;
+  activeProvider: AIProvider | null;
+  onClose: () => void;
+}
+
+export default function AiValidationDialog({
+  entry,
+  activeProvider,
+  onClose,
+}: AiValidationDialogProps) {
+  const { t } = useI18n();
+  const { state, rateLimited, begin, recheck, run, abort, reset } =
+    useAiCardValidation();
+  // AIV-07 (#3060): apply the report's field suggestions to the learner's
+  // own set, reviewed and reversible. Foreign sets keep the button disabled
+  // with the reason (#335).
+  const fix = useAiFix(entry, t);
+  const ownSet = entry ? isOwnEditableSet(entry.source, entry.id) : false;
+
+  // Open: load lessons + estimate when a target arrives.
+  useEffect(() => {
+    if (entry) void begin(entry, activeProvider);
+    else reset();
+    // begin/reset are stable useCallbacks; entry/activeProvider drive it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry, activeProvider]);
+
+  if (!entry) return null;
+
+  const close = () => {
+    fix.reset();
+    reset();
+    onClose();
+  };
+
+  const reportItems: ValidationReportItem[] = state.issueRows.map((row) => ({
+    cardId: row.cardId,
+    label: row.lessonTitle ? `${row.lessonTitle} - ${row.front}` : row.front,
+    issues: row.result.issues,
+  }));
+
+  const progressPct =
+    state.progress && state.progress.total > 0
+      ? Math.round((state.progress.current / state.progress.total) * 100)
+      : 0;
+
+  const formatCheckedAt = (iso: string | null): string => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  };
+
+  // #940 — surface which provider + model ran the check (read from the run,
+  // never hardcoded). Empty for an older cached report without provenance.
+  const providerLabel = state.provider ? aiProviderLabel(t, state.provider) : "";
+  const checkedWith = checkedWithLine({
+    prefix: t("content.ai_check.checked_with", "Checked with"),
+    providerLabel,
+    model: state.model,
+  });
+
+  const handleExportMarkdown = () => {
+    const rows: ValidationMarkdownRow[] = state.issueRows.flatMap((row) =>
+      row.result.issues.map((issue) => ({
+        lessonTitle: row.lessonTitle,
+        cardLabel: row.front,
+        field: issue.field,
+        problem: issue.problem,
+        suggestion: issue.suggestion,
+      })),
+    );
+    const markdown = buildValidationMarkdown({
+      setName: entry.title,
+      summaryLine: t("content.ai_check.report.summary", "Checked {cards} cards in {lessons} lessons")
+        .replace("{cards}", String(state.checkedCards))
+        .replace("{lessons}", String(state.lessonCount)),
+      headers: {
+        lesson: t("content.ai_check.export.lesson", "Lesson"),
+        card: t("content.ai_check.export.card", "Card"),
+        field: t("content.ai_check.export.field", "Field"),
+        problem: t("content.ai_check.report.problem", "Problem"),
+        suggestion: t("content.ai_check.report.suggestion", "Suggestion"),
+      },
+      allOkLine: t("content.ai_check.report.all_ok", "All cards passed. No issues found."),
+      rows,
+      metaLines: [
+        checkedWith,
+        state.checkedAt
+          ? `${t("content.ai_check.date", "Date")}: ${formatCheckedAt(state.checkedAt)}`
+          : "",
+      ],
+    });
+    const slug = entry.id.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    downloadBlob(markdown, `ai-check-${slug}.md`, "text/markdown");
+  };
+
+  return (
+    <ModalShell
+      open
+      onClose={close}
+      title={t("content.ai_check.title", "AI content check")}
+      closeLabel={t("common.close", "Close")}
+      testId="ai-validation-modal"
+    >
+      <div className="flex flex-col gap-1">
+        <p className="text-sm text-fg-muted">{entry.title}</p>
+
+        {/* Loading the set's lessons (before the estimate is ready). */}
+        {state.phase === "running" && !state.estimate && !state.progress && (
+          <p className="mt-4 text-sm text-fg-secondary" data-testid="ai-validation-loading">
+            {t("content.ai_check.loading", "Preparing cards…")}
+          </p>
+        )}
+
+        {/* Cost estimate + privacy + confirmation. */}
+        {state.phase === "confirm" && state.estimate && (
+          <div className="mt-4 flex flex-col gap-3" data-testid="ai-validation-confirm">
+            <p className="text-sm text-fg-primary" data-testid="ai-validation-estimate">
+              {t(
+                "content.ai_check.cost_estimate",
+                "~{cards} cards, ~{tokens} tokens, ~{usd}.",
+              )
+                .replace("{cards}", String(state.estimate.cardCount))
+                .replace("{tokens}", state.estimate.tokensLabel)
+                .replace("{usd}", state.estimate.usdLabel)}
+            </p>
+            <AiPrivacyNote
+              className="text-xs text-fg-muted"
+              testId="ai-validation-privacy"
+              text={t(
+                "content.ai_check.privacy",
+                "The check sends your AI provider the cards of the set (identifier, front, back, notes) as well as the set's source language, target language and level, but neither your profile nor your learning progress. In addition, as with every AI request, your AI provider receives, among other things, your IP address and your API key.",
+              )}
+            />
+            {rateLimited && (
+              <p className="text-sm text-warning" data-testid="ai-validation-rate-limited">
+                {t(
+                  "content.ai_check.rate_limited",
+                  "Please wait a moment before running another check.",
+                )}
+              </p>
+            )}
+            <div className="mt-4 flex justify-end gap-3 max-[769px]:flex-col max-[769px]:items-stretch max-[769px]:gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={close}
+                data-testid="ai-validation-cancel"
+              >
+                {t("common.cancel", "Cancel")}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void run()}
+                disabled={state.estimate.cardCount === 0}
+                data-testid="ai-validation-confirm-run"
+              >
+                {t("content.ai_check.confirm", "Check")}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* In-flight batched run with progress + cancel. */}
+        {state.phase === "running" && state.progress && (
+          <div className="mt-4 flex flex-col gap-3" data-testid="ai-validation-progress">
+            <ProgressBar
+              valueNow={progressPct}
+              ariaLabel={t("content.ai_check.title", "AI content check")}
+              className="h-2 w-full overflow-hidden rounded-full bg-bg-elevated"
+              fillClassName="h-full bg-accent transition-all"
+              testId="ai-validation-progress-bar"
+            />
+            <p className="text-sm text-fg-secondary">
+              {t("content.ai_check.progress", "Checking batch {current} of {total}…")
+                .replace("{current}", String(state.progress.current))
+                .replace("{total}", String(state.progress.total))}
+            </p>
+            <div className="mt-4 flex justify-end gap-3 max-[769px]:flex-col max-[769px]:items-stretch max-[769px]:gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={abort}
+                data-testid="ai-validation-abort"
+              >
+                {t("common.cancel", "Cancel")}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* AIV-07: review, apply, undo (replaces the report while active). */}
+        {state.phase === "done" && fix.state.phase !== "idle" && (
+          <AiFixPanel
+            fix={fix}
+            onRecheck={() => {
+              fix.reset();
+              recheck();
+            }}
+            onClose={close}
+            t={t}
+          />
+        )}
+
+        {/* Final report. */}
+        {state.phase === "done" && fix.state.phase === "idle" && (
+          <AiReportStep
+            entry={entry}
+            state={state}
+            reportItems={reportItems}
+            checkedWith={checkedWith}
+            formatCheckedAt={formatCheckedAt}
+            ownSet={ownSet}
+            canUndo={fix.state.canUndo}
+            onOpenFix={() => void fix.openReview(state.issueRows.map((row) => row.result))}
+            onUndo={() => void fix.undo()}
+            onExport={handleExportMarkdown}
+            onRecheck={recheck}
+            onClose={close}
+            t={t}
+          />
+        )}
+
+        {/* Error. */}
+        {state.phase === "error" && (
+          <div className="mt-4 flex flex-col gap-3" data-testid="ai-validation-error">
+            <p className="text-sm text-error">
+              {t("content.ai_check.failed", "AI check unavailable.")} {state.error}
+            </p>
+            <div className="mt-4 flex justify-end gap-3 max-[769px]:flex-col max-[769px]:items-stretch max-[769px]:gap-2">
+              <Button type="button" variant="outline" onClick={close}>
+                {t("common.close", "Close")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}

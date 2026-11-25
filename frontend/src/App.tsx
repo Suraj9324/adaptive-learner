@@ -1,0 +1,307 @@
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { FeatureProvider } from "@astrapi69/feature-strategy-react";
+
+import { featureRegistry, type FeatureContext } from "./features/featureConfig";
+import { useApiKeyStatus } from "./hooks/settings/useApiKeyStatus";
+import { AiKeyVaultProvider } from "./components/settings/ai/AiKeyVaultProvider";
+import AppUpdateProvider from "./components/pwa/AppUpdateProvider";
+import { resolveStorageMode } from "./storage";
+import { syncLanguageAtBoot, syncUserDataAtBoot } from "./storage/dexie/dexie-user-data";
+import { lazyWithReload } from "./lib/pwa/lazy-route";
+import { Routes, Route, Navigate, useLocation } from "react-router";
+import "react-toastify/dist/ReactToastify.css";
+import "./styles/toast-theme.css";
+
+import type { ApiError } from "./api/client";
+import ErrorBoundary from "./components/error/ErrorBoundary";
+import { RouteLoading, RouteLoadError } from "./components/system/RouteFallback";
+import AppToastContainer from "./components/feedback/AppToastContainer";
+import MilestoneHost from "./components/feedback/MilestoneHost";
+import GlobalShortcuts from "./components/a11y/GlobalShortcuts";
+import UpdatePromptHost from "./components/pwa/UpdatePromptHost";
+import DesktopUpdateHost from "./components/pwa/DesktopUpdateHost";
+import HelpDrawer from "./components/help/HelpDrawer";
+import ReminderScheduler from "./components/settings/controls/reminders/ReminderScheduler";
+import Navigation from "./components/nav/Navigation";
+import BottomTabBar from "./components/nav/BottomTabBar";
+import OfflineIndicator from "./components/pwa/OfflineIndicator";
+import { HelpProvider } from "./contexts/HelpContext";
+import { ConfirmProvider } from "./contexts/ConfirmContext";
+import { I18nProvider } from "./hooks/ui/useI18n";
+import { useTheme } from "./hooks/ui/useTheme";
+import { useKeyboardPreReveal } from "./hooks/ui/useKeyboardPreReveal";
+import { useVisualViewportRealign } from "./hooks/ui/useVisualViewportRealign";
+import ViewportDiagnostic from "./components/dev/ViewportDiagnostic";
+import VvPanelToggleFab from "./components/dev/VvPanelToggleFab";
+import { useViewportFixExperiment } from "./components/dev/useViewportFixExperiment";
+import { useContentRepoAutoSync } from "./hooks/content/useContentRepoAutoSync";
+import Landing from "./pages/onboarding/Landing";
+import SkipToContent from "./components/a11y/SkipToContent";
+import { DocumentTitle } from "./components/a11y/DocumentTitle";
+
+// Route-level code-splitting. Landing stays in the main bundle as
+// the entry route; everything else loads on first navigation. See
+// BUNDLE-SIZE-DYNAMIC-IMPORT-01.
+const AnkiPage = lazyWithReload(() => import("./pages/content/Anki"));
+const ArcadePage = lazyWithReload(() => import("./pages/arcade/Arcade"));
+const Assessment = lazyWithReload(() => import("./pages/onboarding/Assessment"));
+// #856 — Discover + My-content + Import merged into one tabbed hub at /content.
+const ContentHub = lazyWithReload(() => import("./pages/content/ContentHub"));
+// #1149 — "Beitragen": the community-gaps block moved out of Meine Inhalte.
+const Contribute = lazyWithReload(() => import("./pages/content/Contribute"));
+// #892 — deep-link to a single content set (prerequisite for set-level QR).
+const SetDeepLink = lazyWithReload(() => import("./pages/content/SetDeepLink"));
+const SetSummary = lazyWithReload(() => import("./pages/content/SetSummary"));
+const AddRepo = lazyWithReload(() => import("./pages/content/AddRepo"));
+const RedeemInvite = lazyWithReload(() => import("./pages/content/RedeemInvite"));
+const CreateLesson = lazyWithReload(() => import("./pages/lesson/CreateLesson"));
+const LearningPath = lazyWithReload(() => import("./pages/learning-path/LearningPathPersonal"));
+const Dashboard = lazyWithReload(() => import("./pages/dashboard/Dashboard"));
+const LessonPage = lazyWithReload(() => import("./pages/lesson/Lesson"));
+const ReviewPage = lazyWithReload(() => import("./pages/lesson/Review"));
+const AdaptiveLessonPage = lazyWithReload(() => import("./pages/lesson/AdaptiveLesson"));
+const ShuffleLessonPage = lazyWithReload(() => import("./pages/lesson/ShuffleLesson"));
+const EndlessLessonPage = lazyWithReload(() => import("./pages/lesson/EndlessLesson"));
+const ErrorReplayLessonPage = lazyWithReload(() => import("./pages/lesson/ErrorReplayLesson"));
+const ImportDetail = lazyWithReload(() => import("./pages/content/ImportDetail"));
+const LearningRepoPage = lazyWithReload(() => import("./pages/content/LearningRepo"));
+const NotFound = lazyWithReload(() => import("./pages/system/NotFound"));
+const Onboarding = lazyWithReload(() => import("./pages/onboarding/Onboarding"));
+// EXP-037 (#850) — Progress + Statistics + Curriculum merged into a tabbed hub.
+const ProgressHub = lazyWithReload(() => import("./pages/dashboard/ProgressHub"));
+const Pronunciation = lazyWithReload(() => import("./pages/lesson/Pronunciation"));
+const Session = lazyWithReload(() => import("./pages/lesson/Session"));
+const Settings = lazyWithReload(() => import("./pages/system/Settings"));
+
+// Lazy-loaded so ``eventRecorder`` (statically imported inside both
+// components) lands in its own chunk instead of the main bundle.
+// See BUNDLE-SIZE-DYNAMIC-IMPORT-01.
+const EventRecorderSetup = lazyWithReload(() => import("./components/error/EventRecorderSetup"));
+const ErrorReportDialog = lazyWithReload(() => import("./components/error/ErrorReportDialog"));
+
+/**
+ * Application root. Three concentric layers:
+ *
+ *   1. ErrorBoundary — catches anything thrown during render so
+ *      a single broken component cannot blank the whole app.
+ *   2. I18nProvider — async-loads /api/i18n/{lang} and exposes
+ *      ``t / lang / setLang`` to every descendant.
+ *   3. useTheme — owns the data-theme attribute on
+ *      ``document.documentElement``, persists choice to
+ *      localStorage.
+ *
+ * Routes match the project-reference §8 table:
+ *
+ *   /            -> Landing
+ *   /onboarding  -> Onboarding (create user + project)
+ *   /assessment  -> Assessment (12-question test)
+ *   /dashboard   -> Dashboard
+ *   /session     -> Session
+ *   /progress    -> Progress
+ *   /settings    -> Settings
+ *
+ * Navigation surfaces on every route EXCEPT the pre-onboarding
+ * funnel (Landing / Onboarding / Assessment) so the entry flow
+ * stays focused.
+ */
+export default function App() {
+  useTheme();
+  const location = useLocation();
+  // #1569 — reset the iOS phantom window scroll that lands taps ~2 lines
+  // below their visible target (see the hook's TSDoc for the mechanism).
+  useVisualViewportRealign();
+  // #3002 — reveal a focused text field in the app's own scroller BEFORE
+  // Safari pans the viewport for it; prevents the shifted tap grid the
+  // realign hook must not repair (Safari owns the reveal while focused).
+  useKeyboardPreReveal();
+  // #1569 — opt-in on-device fix-candidate experiment (?vvfix=<id>). Inert for
+  // normal users; lets a device trial each candidate remedy against ΔY.
+  useViewportFixExperiment();
+  // EXP-023 Phase A — background-sync a connected user content repo on
+  // app start when its cache is older than 24h.
+  useContentRepoAutoSync();
+
+  // Feature-strategy context: the storage mode is fixed for the session,
+  // the AI-key status resolves asynchronously. Memoised so consuming
+  // components re-evaluate only when one of the two actually changes.
+  const [storageMode] = useState(() => resolveStorageMode());
+  const apiKeyStatus = useApiKeyStatus();
+  const featureContext = useMemo<FeatureContext>(
+    () => ({
+      mode: storageMode,
+      hasAiKey: apiKeyStatus.ready && apiKeyStatus.hasKey,
+    }),
+    [storageMode, apiKeyStatus.ready, apiKeyStatus.hasKey],
+  );
+
+  // Phase 37 — error-report dialog state, opened via custom
+  // event dispatched from the "Report Issue" button inside the
+  // error toast (``utils/notify.ts``).
+  const [errorReport, setErrorReport] = useState<{
+    open: boolean;
+    message: string;
+    apiError?: ApiError;
+    proactive?: boolean;
+  }>({ open: false, message: "" });
+
+  const handleOpenReport = useCallback((e: Event) => {
+    const detail = (e as CustomEvent).detail as {
+      message: string;
+      apiError?: ApiError;
+      proactive?: boolean;
+    };
+    setErrorReport({
+      open: true,
+      message: detail.message,
+      apiError: detail.apiError,
+      proactive: detail.proactive,
+    });
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("adaptive-learner:open-error-report", handleOpenReport);
+    return () => window.removeEventListener("adaptive-learner:open-error-report", handleOpenReport);
+  }, [handleOpenReport]);
+
+  // #791 Teil B — reconcile the device-local user-data keys (contributions,
+  // contributor name, custom paths) + the learner language between the Dexie
+  // canonical store and the localStorage cache once at boot. No-op in API mode.
+  useEffect(() => {
+    void syncUserDataAtBoot();
+    void syncLanguageAtBoot();
+  }, []);
+
+  return (
+    <ErrorBoundary>
+      <I18nProvider>
+        <FeatureProvider registry={featureRegistry} context={featureContext}>
+          <HelpProvider>
+            <ConfirmProvider>
+            {/* Provides the storage adapter + provider registry + UI slots to
+                the package's AI settings panel and encrypted key vault, and the
+                context the ``useApiKeyStatus`` gate reads. Inside ConfirmProvider
+                (it injects the confirm dialog) + I18nProvider (it injects ``t``). */}
+            <AiKeyVaultProvider>
+            <AppUpdateProvider>
+            <SkipToContent />
+            {/* #3431 - document.title follows the route and the UI language. */}
+            <DocumentTitle />
+            {/* #1569 — opt-in on-device tap-offset probe (?vvdiag=1). Self-gates
+                to nothing for normal users; pointer-events:none so it never
+                perturbs the hit-testing it measures. */}
+            <ViewportDiagnostic />
+            {/* #2799 — opt-in sticky toggle for the probe's measurement bar.
+                Self-gates to nothing unless probe + fab pref are both on. */}
+            <VvPanelToggleFab />
+            <UpdatePromptHost />
+            <DesktopUpdateHost />
+            <Navigation />
+            <OfflineIndicator />
+            {/* Content-scoped boundary: a lazy route whose import REJECTS, or a
+                page that throws while rendering, lands here instead of
+                blanking the whole shell. Keyed on the path (#3390), so
+                navigating away recovers without a reload. The visible
+                Suspense fallback covers the load/stall case (#2573). */}
+            <ErrorBoundary
+              resetKey={location.pathname}
+              fallback={(error) => <RouteLoadError error={error} />}
+            >
+            <Suspense fallback={<RouteLoading />}>
+              <Routes>
+                <Route path="/" element={<Landing />} />
+                <Route path="/onboarding" element={<Onboarding />} />
+                <Route path="/assessment" element={<Assessment />} />
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/session" element={<Session />} />
+                {/* EXP-037 (#850) — old destinations redirect to their new
+                    tabbed home; the routes stay alive for bookmarks/links. */}
+                <Route
+                  path="/curriculum"
+                  element={<Navigate to="/progress?tab=paths" replace />}
+                />
+                <Route path="/progress" element={<ProgressHub />} />
+                <Route
+                  path="/statistics"
+                  element={<Navigate to="/progress?tab=stats" replace />}
+                />
+                {/* #856 — Content/Discover/Import unified at /content with
+                    tabs. Old destinations redirect to their new tabbed home;
+                    the routes stay alive for bookmarks/links. */}
+                <Route
+                  path="/import"
+                  element={<Navigate to="/content?tab=import" replace />}
+                />
+                <Route
+                  path="/discover"
+                  element={<Navigate to="/content?tab=discover" replace />}
+                />
+                <Route path="/content" element={<ContentHub />} />
+                {/* #892 — deep-link to a single set (set-level QR / share). */}
+                <Route path="/content/set/:setId" element={<SetDeepLink />} />
+                {/* #2792 - the set-completion review (all mistakes of one set). */}
+                <Route path="/set-summary/:setId" element={<SetSummary />} />
+                <Route path="/contribute" element={<Contribute />} />
+                <Route path="/content/import/:conversationId" element={<ImportDetail />} />
+                {/* Old import-detail link kept alive for existing bookmarks. */}
+                <Route path="/import/:conversationId" element={<ImportDetail />} />
+                <Route path="/anki" element={<AnkiPage />} />
+                <Route path="/arcade" element={<ArcadePage />} />
+                <Route path="/add-repo" element={<AddRepo />} />
+                <Route path="/invite" element={<RedeemInvite />} />
+                <Route path="/learning-path" element={<LearningPath />} />
+                {/* #3006 — creating is a hub tab now; the standalone route
+                    redirects into it instead of being duplicated, exactly as
+                    /import and /discover do above. Every other entry point
+                    (Dashboard, Discover link, share dialog) keeps working
+                    through this redirect. */}
+                <Route
+                  path="/create-lesson"
+                  element={<Navigate to="/content?tab=create" replace />}
+                />
+                {/* #1740 — edit an existing own lesson in the pre-filled wizard. */}
+                <Route path="/create-lesson/edit/:source/:setId" element={<CreateLesson />} />
+                <Route path="/lesson/:setSlug/:setId/:filename" element={<LessonPage />} />
+                <Route path="/review/:setId" element={<ReviewPage />} />
+                <Route path="/adaptive-lesson/:setId" element={<AdaptiveLessonPage />} />
+                <Route path="/shuffle-lesson/:setId" element={<ShuffleLessonPage />} />
+                <Route path="/endless-lesson/:setId" element={<EndlessLessonPage />} />
+                <Route
+                  path="/error-replay/:setSlug/:setId/:filename"
+                  element={<ErrorReplayLessonPage />}
+                />
+                <Route path="/projects/:projectId/learning-repo" element={<LearningRepoPage />} />
+                <Route path="/pronunciation" element={<Pronunciation />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </Suspense>
+            </ErrorBoundary>
+            <BottomTabBar />
+            <MilestoneHost />
+            <ReminderScheduler />
+            <Suspense fallback={null}>
+              <EventRecorderSetup />
+            </Suspense>
+            <HelpDrawer />
+            <GlobalShortcuts />
+            {errorReport.open && (
+              <Suspense fallback={null}>
+                <ErrorReportDialog
+                  open={errorReport.open}
+                  onClose={() => setErrorReport({ open: false, message: "" })}
+                  errorMessage={errorReport.message}
+                  apiError={errorReport.apiError}
+                  proactive={errorReport.proactive}
+                />
+              </Suspense>
+            )}
+            <AppToastContainer />
+            </AppUpdateProvider>
+            </AiKeyVaultProvider>
+            </ConfirmProvider>
+          </HelpProvider>
+        </FeatureProvider>
+      </I18nProvider>
+    </ErrorBoundary>
+  );
+}

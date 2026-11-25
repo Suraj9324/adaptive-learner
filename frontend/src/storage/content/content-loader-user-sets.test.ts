@@ -1,0 +1,178 @@
+/**
+ * Tests for user-generated sets ("My Lessons") in Dexie mode
+ * (Phase 59B/C / v1.42.0). Saves a generated lesson into the same
+ * IndexedDB tables as downloaded sets and verifies it lists, plays,
+ * overwrites, and deletes. No network: ``listSetsDexie([])`` skips
+ * upstream sources and surfaces the user-generated rows directly.
+ */
+
+import "fake-indexeddb/auto";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import {
+  deleteSetDexie,
+  getLessonDexie,
+  listLessonsDexie,
+  listSetsDexie,
+  saveUserSetDexie,
+} from "./content-loader-dexie";
+import { _resetDbForTests } from "../dexie/db";
+import { USER_GENERATED_SOURCE } from "../types";
+import { generateLessonFromAnalysis } from "../../lib/content/analysis/analysis-to-lesson";
+import type { ConversationAnalysisResult } from "../../types/domain";
+
+const ANALYSIS: ConversationAnalysisResult = {
+  topic: "Spanish travel",
+  summary: "Ordering food and directions.",
+  vocabulary: [
+    {
+      word: "la cuenta",
+      translation: "the bill",
+      example: "La cuenta, por favor.",
+    },
+    { word: "el agua", translation: "the water", example: "Quiero el agua." },
+    {
+      word: "la calle",
+      translation: "the street",
+      example: "La calle esta cerca.",
+    },
+    { word: "izquierda", translation: "left", example: "Gira a la izquierda." },
+    { word: "gracias", translation: "thank you" },
+  ],
+};
+
+function lesson(id = "conv-1") {
+  return generateLessonFromAnalysis(ANALYSIS, { id });
+}
+
+function saveInput(overrides: Record<string, unknown> = {}) {
+  return {
+    set_id: "conv-1",
+    title: "Spanish travel",
+    language: "es",
+    level: "beginner",
+    origin: "analysis" as const,
+    lessons: [lesson()],
+    ...overrides,
+  };
+}
+
+describe("user-generated sets (Dexie / My Lessons)", () => {
+  beforeEach(async () => {
+    await _resetDbForTests();
+  });
+
+  it.each([
+    ["the legacy language alias as the target", {}, { target_language: "es", source_language: "en" }],
+    ["an explicit pair", { target_language: "fr", source_language: "de" }, { target_language: "fr", source_language: "de" }],
+  ])("stores the row the engine projects: %s (#3395)", async (_label, overrides, pair) => {
+    const entry = await saveUserSetDexie(saveInput(overrides), "2026-05-29T00:00:00Z");
+    expect(entry).toMatchObject({ ...pair, language: pair.target_language, visibility: "visible", review_status: "authored" });
+    const { getDb } = await import("../dexie/db");
+    const rows = await getDb().contentSets.where("set_id").equals("conv-1").toArray();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      ...pair,
+      language: pair.target_language,
+      domain: "analysis",
+      visibility: "visible",
+      review_status: "authored",
+      evaluation: null,
+    });
+  });
+
+  it("saves, lists, and plays a user-generated lesson", async () => {
+    const entry = await saveUserSetDexie(saveInput(), "2026-05-29T00:00:00Z");
+    expect(entry.source).toBe(USER_GENERATED_SOURCE);
+    expect(entry.id).toBe("conv-1");
+    expect(entry.domain).toBe("analysis");
+    expect(entry.lesson_count).toBe(1);
+
+    // Appears in listSets (no upstream sources consulted).
+    const list = await listSetsDexie([]);
+    expect(
+      list.sets.some(
+        (s) => s.source === USER_GENERATED_SOURCE && s.id === "conv-1",
+      ),
+    ).toBe(true);
+
+    // Lessons listable + playable via the existing viewer paths.
+    const l = lesson();
+    const lessons = await listLessonsDexie(USER_GENERATED_SOURCE, "conv-1");
+    expect(lessons.lessons).toContain(`${l.id}.json`);
+    const got = await getLessonDexie(
+      USER_GENERATED_SOURCE,
+      "conv-1",
+      `${l.id}.json`,
+    );
+    expect(got.id).toBe(l.id);
+    expect(got.steps.length).toBe(l.steps.length);
+  });
+
+  it("persists the optional book block into the saved set (#1743)", async () => {
+    const book = {
+      title: "KI fuer Einsteiger",
+      author: "Asterios Raptis",
+      url: "https://example.com/ki",
+      asin: "B0F43H6T2M",
+    };
+    const entry = await saveUserSetDexie(
+      saveInput({ book }),
+      "2026-07-16T00:00:00Z",
+    );
+    expect(entry.book).toEqual(book);
+    // Survives a round-trip through listSets (read back from IndexedDB).
+    const list = await listSetsDexie([]);
+    const stored = list.sets.find(
+      (s) => s.source === USER_GENERATED_SOURCE && s.id === "conv-1",
+    );
+    expect(stored?.book).toEqual(book);
+  });
+
+  it("saves no book block when none is supplied (book is null)", async () => {
+    const entry = await saveUserSetDexie(saveInput(), "t0");
+    expect(entry.book ?? null).toBeNull();
+  });
+
+  it("#2655 — persists the optional attribution/derivation chain into the saved set", async () => {
+    const attribution = {
+      author: "Original Author",
+      derived_from: [{ author: "Even Earlier Author" }],
+    };
+    const entry = await saveUserSetDexie(
+      saveInput({ attribution }),
+      "2026-08-17T00:00:00Z",
+    );
+    expect(entry.attribution).toEqual(attribution);
+    // Survives a round-trip through listSets (read back from IndexedDB).
+    const list = await listSetsDexie([]);
+    const stored = list.sets.find(
+      (s) => s.source === USER_GENERATED_SOURCE && s.id === "conv-1",
+    );
+    expect(stored?.attribution).toEqual(attribution);
+  });
+
+  it("saves no attribution when none is supplied (attribution is null)", async () => {
+    const entry = await saveUserSetDexie(saveInput(), "t0");
+    expect(entry.attribution ?? null).toBeNull();
+  });
+
+  it("re-saving overwrites in place (no duplicate sets)", async () => {
+    await saveUserSetDexie(saveInput({ title: "Old" }), "t1");
+    const e2 = await saveUserSetDexie(saveInput({ title: "New" }), "t2");
+    expect(e2.title).toBe("New");
+    const list = await listSetsDexie([]);
+    const matches = list.sets.filter(
+      (s) => s.id === "conv-1" && s.source === USER_GENERATED_SOURCE,
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].title).toBe("New");
+  });
+
+  it("deletes a user-generated set", async () => {
+    await saveUserSetDexie(saveInput(), "t");
+    await deleteSetDexie(USER_GENERATED_SOURCE, "conv-1");
+    const list = await listSetsDexie([]);
+    expect(list.sets.some((s) => s.id === "conv-1")).toBe(false);
+  });
+});

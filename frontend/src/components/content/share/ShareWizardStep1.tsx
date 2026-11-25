@@ -1,0 +1,352 @@
+/**
+ * Share Wizard step 1 — preview, editable lesson metadata (title /
+ * source / target / level), computed placement, and the optional author
+ * credit. State + gating come from {@link useShareWizard}.
+ */
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useI18n } from "../../../hooks/ui/useI18n";
+import type { UseShareWizardResult } from "../../../hooks/content/useShareWizard";
+import { CEFR_LEVELS, LANGUAGE_OPTIONS } from "../../../lib/content/language/language-options";
+import { isCefr, LEVEL_NONE } from "./shareWizardHelpers";
+
+export default function ShareWizardStep1({ wiz }: { wiz: UseShareWizardResult }) {
+  const { t } = useI18n();
+  const {
+    isEmptyLesson,
+    onRegenerate,
+    editTitle,
+    setEditTitle,
+    editSource,
+    setEditSource,
+    editTarget,
+    setEditTarget,
+    editLevel,
+    setEditLevel,
+    exerciseCount,
+    cardCount,
+    lessons,
+    minutes,
+    sameLanguage,
+    resolvedDomain,
+    step1Blocked,
+    step1Errors,
+    placement,
+    singleLesson,
+    authorName,
+    setAuthorName,
+    showName,
+    setShowName,
+    foreignCredit,
+    removeForeignCredit,
+    setRemoveForeignCredit,
+  } = wiz;
+
+  return (
+    <section data-testid="share-wizard-step-1">
+      {/* BUG B — an empty lesson is never shareable; offer to
+          rebuild it from the source analysis. */}
+      {isEmptyLesson && (
+        <div
+          className="share-wizard-empty content-share-failed"
+          data-testid="share-wizard-empty"
+          role="alert"
+        >
+          <p>
+            {t(
+              "content.wizard.err_empty",
+              "This lesson has no exercises. Please recreate the lesson.",
+            )}
+          </p>
+          {onRegenerate && (
+            <Button
+              type="button"
+              onClick={onRegenerate}
+              data-testid="share-wizard-regenerate"
+            >
+              {t("content.wizard.regenerate", "Regenerate")}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* BUG A/C — editable metadata: old lessons carry bad
+          source/target/level the user must be able to fix. */}
+      <p className="share-wizard-metadata-intro mb-3 text-sm text-fg-secondary">
+        {t(
+          "content.wizard.metadata_intro",
+          "Check and correct the lesson details before sharing.",
+        )}
+      </p>
+      <div
+        className="share-wizard-metadata flex flex-col gap-3"
+        data-testid="share-wizard-metadata"
+      >
+        <label className="flex flex-col gap-2">
+          <span className="text-[0.95rem] font-medium">
+            {t("content.wizard.edit_title", "Title")}
+          </span>
+          <Input
+            type="text"
+            value={editTitle}
+            onChange={(e) => setEditTitle(e.target.value)}
+            data-testid="share-wizard-edit-title"
+          />
+        </label>
+        <div className="flex flex-col gap-2">
+          <span className="text-[0.95rem] font-medium" id="share-wizard-edit-source-label">
+            {t("content.wizard.edit_source", "Source language (you speak)")}
+          </span>
+          <Select
+            value={editSource || undefined}
+            onValueChange={(v) => setEditSource(v)}
+          >
+            <SelectTrigger
+              data-testid="share-wizard-edit-source"
+              aria-labelledby="share-wizard-edit-source-label"
+            >
+              <SelectValue
+                placeholder={t(
+                  "content.wizard.select_language",
+                  "Select a language…",
+                )}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {LANGUAGE_OPTIONS.map((opt) => (
+                <SelectItem key={opt.code} value={opt.code}>
+                  {opt.name} ({opt.code})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-2">
+          <span className="text-[0.95rem] font-medium" id="share-wizard-edit-target-label">
+            {t("content.wizard.edit_target", "Target language (you learn)")}
+          </span>
+          <Select
+            value={editTarget || undefined}
+            onValueChange={(v) => setEditTarget(v)}
+          >
+            <SelectTrigger
+              data-testid="share-wizard-edit-target"
+              aria-labelledby="share-wizard-edit-target-label"
+            >
+              <SelectValue
+                placeholder={t(
+                  "content.wizard.select_language",
+                  "Select a language…",
+                )}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {LANGUAGE_OPTIONS.map((opt) => (
+                <SelectItem key={opt.code} value={opt.code}>
+                  {opt.name} ({opt.code})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-2">
+          <span className="text-[0.95rem] font-medium" id="share-wizard-edit-level-label">
+            {t("content.wizard.edit_level", "Level (CEFR)")}
+          </span>
+          <Select
+            value={
+              isCefr(editLevel) ? editLevel.toUpperCase() : LEVEL_NONE
+            }
+            onValueChange={(v) =>
+              setEditLevel(v === LEVEL_NONE ? "" : v)
+            }
+          >
+            <SelectTrigger
+              data-testid="share-wizard-edit-level"
+              aria-labelledby="share-wizard-edit-level-label"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* Explicit "no level". A language set must declare a
+                  CEFR band, so here it is only the empty choice the gate
+                  blocks (BUG C); any other set may have no level, the
+                  engine's "none" (#3356). */}
+              <SelectItem value={LEVEL_NONE}>
+                {resolvedDomain === "language"
+                  ? t("content.wizard.select_level", "- Select level -")
+                  : t("content.wizard.level_none", "No level (not a language course)")}
+              </SelectItem>
+              {CEFR_LEVELS.map((lvl) => (
+                <SelectItem key={lvl} value={lvl}>
+                  {lvl}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <p className="share-wizard-counts mt-1 text-sm text-fg-secondary">
+          <span data-testid="share-wizard-exercise-count">
+            {t("content.wizard.exercises_label", "Exercises")}:{" "}
+            {exerciseCount}
+          </span>
+          {" · "}
+          <span data-testid="share-wizard-card-count">
+            {t("content.wizard.cards_label", "Cards")}: {cardCount}
+          </span>
+          {" · "}
+          <span>
+            {lessons.length} {t("content.lessons", "lessons")}
+          </span>
+          {" · "}
+          <span>~{minutes} min</span>
+        </p>
+        {sameLanguage && (
+          <p
+            className="share-wizard-domain-hint text-sm text-fg-secondary"
+            data-testid="share-wizard-domain-hint"
+          >
+            {t(
+              "content.wizard.same_language_domain_hint",
+              "Same source and target language - this will be shared as knowledge (non-language) content.",
+            )}
+          </p>
+        )}
+      </div>
+
+      {step1Blocked && (
+        <ul
+          className="content-share-issues share-wizard-step1-errors list-disc"
+          data-testid="share-wizard-step1-errors"
+        >
+          {step1Errors.map((err, i) => (
+            <li key={i}>{err}</li>
+          ))}
+        </ul>
+      )}
+
+      <div
+        className="share-wizard-placement mt-4 flex flex-col gap-1 rounded-lg border border-border bg-card p-3"
+        data-testid="share-wizard-placement"
+      >
+        <p className="share-wizard-placement-line text-sm text-fg-secondary">
+          {t("content.wizard.lands_under", "Your lesson lands under")}:
+        </p>
+        <p className="share-wizard-breadcrumb text-sm">
+          <strong>
+            {placement.source.toUpperCase()} →{" "}
+            {placement.target.toUpperCase()} → {placement.level}
+          </strong>
+        </p>
+        <code className="share-wizard-path block break-all text-xs text-fg-secondary">
+          {placement.path}/lessons/
+          {singleLesson ? placement.filename : ""}
+        </code>
+        {placement.isNewSet ? (
+          <p
+            className="share-wizard-newset text-sm text-fg-secondary"
+            data-testid="share-wizard-newset"
+          >
+            {t("content.wizard.new_set", "New set! You're the first to contribute here.")}
+          </p>
+        ) : (
+          <p
+            className="share-wizard-existing text-sm text-fg-secondary"
+            data-testid="share-wizard-existing"
+          >
+            {t("content.wizard.next_to_existing", "Next to {count} existing lesson(s) in this set.")
+              .replace("{count}", String(placement.existingLessonCount))}
+          </p>
+        )}
+      </div>
+
+      {/* Phase 64C-2 — optional author credit. */}
+      <div
+        className="share-wizard-author mt-4 flex flex-col gap-3"
+        data-testid="share-wizard-author"
+      >
+        <label className="flex flex-col gap-2">
+          <span className="text-[0.95rem] font-medium">
+            {t("content.credit.name_label", "Your name (optional)")}
+          </span>
+          <Input
+            type="text"
+            placeholder={t("content.credit.name_placeholder", "e.g. Maria S.")}
+            value={authorName}
+            onChange={(e) => {
+              setAuthorName(e.target.value);
+              if (e.target.value.trim() && !showName) setShowName(true);
+            }}
+            data-testid="share-wizard-author-name"
+          />
+        </label>
+        {authorName.trim() && (
+          <label className="flex items-center justify-between gap-2">
+            <span className="text-[0.95rem] font-medium">
+              {t("content.credit.show_name", "Show name in lesson")}
+            </span>
+            <input
+              type="checkbox"
+              className="m-0 size-4 flex-none p-0"
+              checked={showName}
+              onChange={(e) => setShowName(e.target.checked)}
+              data-testid="share-wizard-author-show"
+            />
+          </label>
+        )}
+        {authorName.trim() && showName && (
+          <p className="share-wizard-author-privacy text-sm text-fg-secondary">
+            {t(
+              "content.credit.privacy",
+              "Your name will be shown in the lesson and the pull request.",
+            )}
+          </p>
+        )}
+        {/* #2656 — a carried-over FOREIGN credit (from an authored
+            original, or a #2655 fork) travels with the share by
+            default; schema 1.9 requires disclosing that before it
+            becomes visible, plus a one-click way to remove it. */}
+        {foreignCredit && (
+          <div
+            className="flex flex-col gap-2"
+            data-testid="share-wizard-foreign-credit"
+          >
+            <p className="text-sm text-fg-secondary">
+              {t(
+                "content.credit.foreign_notice",
+                "This content credits {author}. Their name travels when you share, you can remove it.",
+              ).replace("{author}", foreignCredit)}
+            </p>
+            {removeForeignCredit ? (
+              <p
+                className="text-sm text-fg-secondary"
+                data-testid="share-wizard-foreign-credit-removed"
+              >
+                {t("content.credit.foreign_removed", "Credits removed.")}
+              </p>
+            ) : (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="self-start"
+                onClick={() => setRemoveForeignCredit(true)}
+                data-testid="share-wizard-foreign-credit-remove"
+              >
+                {t("content.credit.foreign_remove", "Remove credits")}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

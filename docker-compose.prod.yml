@@ -1,0 +1,84 @@
+# Compose project name. Pins the container / network / volume / image
+# prefixes to "adaptive-learner" regardless of the install directory, so
+# the stack is recognizable in Docker Desktop and never collides with a
+# sibling app (e.g. bibliogon) that was launched from a similarly named
+# folder.
+#
+# Since #2058 the stack is a SINGLE service: the backend image carries the
+# bun-built frontend statics and FastAPI serves them itself (SPA fallback,
+# 50M body limit and gzip live as middleware - the retired nginx service's
+# whole feature set). This file is the documented power-user alternative;
+# the desktop launcher drives the same image through docker-py
+# (deployment_mode "dockerfile") without needing Compose at all.
+name: adaptive-learner
+
+services:
+  app:
+    # Identity fields are env-overridable with stable defaults (#2122):
+    # without env nothing changes for existing installs; a parallel local
+    # test instance sets ADAPTIVE_LEARNER_CONTAINER_NAME /
+    # ADAPTIVE_LEARNER_IMAGE_NAME / COMPOSE_PROJECT_NAME to "-local"
+    # values (see launcher/launcher.example.json) and shares NOTHING with
+    # the real installation - the named volume isolates itself via the
+    # compose project prefix (#2154).
+    container_name: ${ADAPTIVE_LEARNER_CONTAINER_NAME:-adaptive-learner}
+    # The locally built image carries the app version as its tag and as the
+    # OCI version label (#2034) - `docker inspect` and stale-image detection
+    # can then name the version instead of an anonymous :latest. The DEFAULT
+    # version below is maintained by `make sync-versions` (same derived-pin
+    # class as every other version literal - do not edit it by hand);
+    # ADAPTIVE_LEARNER_APP_VERSION in .env overrides it.
+    image: ${ADAPTIVE_LEARNER_IMAGE_NAME:-adaptive-learner}:${ADAPTIVE_LEARNER_APP_VERSION:-2.17.1}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      labels:
+        org.opencontainers.image.title: adaptive-learner
+        org.opencontainers.image.version: ${ADAPTIVE_LEARNER_APP_VERSION:-2.17.1}
+        org.opencontainers.image.source: https://github.com/astrapi69/adaptive-learner
+    # One container, one port: the host-published port the user reaches in
+    # the browser maps straight onto the backend port that serves BOTH the
+    # frontend statics and /api/*. ``ADAPTIVE_LEARNER_PUBLIC_PORT`` (default
+    # 8501 - Adaptive Learner's own port, NOT 7880/Bibliogon) is written
+    # into .env by the launcher and can move on a conflict; the internal
+    # port stays env-driven for experts running multiple Docker apps.
+    command: sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${ADAPTIVE_LEARNER_BACKEND_PORT:-8000} --workers 2'
+    # SECURITY: bind to loopback by DEFAULT. An unqualified host port
+    # publishes on every interface (IPv4 and IPv6), which makes the app -
+    # with no authentication and the user's AI provider keys in it -
+    # reachable from any network the machine sits in: an office LAN, a
+    # hotel or conference WLAN. The launcher engine fixed the same
+    # exposure on its side in 0.26.0; this is the compose half.
+    #
+    # Reaching the app from another device is still possible, but it is
+    # now a DELIBERATE act: set ADAPTIVE_LEARNER_BIND_ADDRESS=0.0.0.0 in
+    # .env - and only where the network is one you control.
+    ports:
+      - "${ADAPTIVE_LEARNER_BIND_ADDRESS:-127.0.0.1}:${ADAPTIVE_LEARNER_PUBLIC_PORT:-8501}:${ADAPTIVE_LEARNER_BACKEND_PORT:-8000}"
+    volumes:
+      - adaptive-learner-data:/app/data
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - ADAPTIVE_LEARNER_DEBUG=false
+      # Single canonical data dir. DB lives at $DATA_DIR/adaptive_learner.db
+      # and uploads at $DATA_DIR/uploads/, both inside the named
+      # volume so they survive container rebuilds. The volume mount
+      # at /app/data is the persistence boundary.
+      - ADAPTIVE_LEARNER_DATA_DIR=/app/data
+      - ADAPTIVE_LEARNER_PORT=${ADAPTIVE_LEARNER_BACKEND_PORT:-8000}
+      - ADAPTIVE_LEARNER_CORS_ORIGINS=${ADAPTIVE_LEARNER_CORS_ORIGINS:-http://localhost:${ADAPTIVE_LEARNER_PUBLIC_PORT:-8501}}
+      - ADAPTIVE_LEARNER_SECRET_KEY=${ADAPTIVE_LEARNER_SECRET_KEY:-}
+      # Serve the bundled frontend statics from the backend (#2058); both
+      # values are also baked into the image, repeated here for explicitness.
+      - ADAPTIVE_LEARNER_SERVE_FRONTEND=1
+      - ADAPTIVE_LEARNER_FRONTEND_DIST=/app/static
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:${ADAPTIVE_LEARNER_BACKEND_PORT:-8000}/api/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  adaptive-learner-data:

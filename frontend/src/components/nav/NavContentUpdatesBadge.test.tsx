@@ -1,0 +1,117 @@
+/**
+ * Tests for the "N content updates" header badge (#2904): it surfaces the
+ * existing per-row update_available signal outside the /content page, and
+ * renders nothing when nothing is out of date.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import {act, render, screen, waitFor} from "@testing-library/react";
+import {MemoryRouter} from "react-router";
+import {beforeEach, describe, expect, it, vi} from "vitest";
+
+vi.mock("../../hooks/ui/useI18n", () => ({
+    useI18n: () => ({
+        t: (_k: string, fallback?: string) => fallback ?? _k,
+        lang: "en",
+    }),
+}));
+
+const getContentUpdateCountMock = vi.fn();
+
+vi.mock("../../lib/content/browse/content-updates-badge", () => ({
+    getContentUpdateCount: () => getContentUpdateCountMock(),
+    CONTENT_UPDATES_CHANGED_EVENT: "adaptive-learner:content-updates-changed",
+}));
+
+import NavContentUpdatesBadge from "./NavContentUpdatesBadge";
+
+beforeEach(() => {
+    getContentUpdateCountMock.mockReset();
+});
+
+describe("NavContentUpdatesBadge", () => {
+    it("renders nothing while no content set has an update", async () => {
+        getContentUpdateCountMock.mockResolvedValueOnce(0);
+        render(
+            <MemoryRouter>
+                <NavContentUpdatesBadge />
+            </MemoryRouter>,
+        );
+        await waitFor(() => expect(getContentUpdateCountMock).toHaveBeenCalled());
+        expect(
+            screen.queryByTestId("nav-content-updates-badge"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("shows the count and deep-links to the My-content tab when updates exist", async () => {
+        // Repro: the badge linked to bare /content, which opens the FIRST
+        // configured tab (#1378) - Importieren for the reporter, Entdecken
+        // by default. The update rows only render under Meine Inhalte.
+        getContentUpdateCountMock.mockResolvedValueOnce(3);
+        render(
+            <MemoryRouter>
+                <NavContentUpdatesBadge />
+            </MemoryRouter>,
+        );
+        const badge = await screen.findByTestId("nav-content-updates-badge");
+        expect(badge).toHaveTextContent("3");
+        expect(badge).toHaveAttribute("href", "/content?tab=my");
+    });
+
+    it("refreshes when the content-updates-changed event fires (#2985)", async () => {
+        // Repro: the badge showed "4 updates", the learner applied them on
+        // /content - the frozen once-per-mount read kept the stale count
+        // until a full app reload.
+        getContentUpdateCountMock.mockResolvedValueOnce(4);
+        render(
+            <MemoryRouter>
+                <NavContentUpdatesBadge />
+            </MemoryRouter>,
+        );
+        await screen.findByTestId("nav-content-updates-badge");
+        getContentUpdateCountMock.mockResolvedValueOnce(0);
+        act(() => {
+            window.dispatchEvent(
+                new Event("adaptive-learner:content-updates-changed"),
+            );
+        });
+        await waitFor(() =>
+            expect(
+                screen.queryByTestId("nav-content-updates-badge"),
+            ).not.toBeInTheDocument(),
+        );
+    });
+
+    it("composes the accessible name from the visible label plus the action", async () => {
+        getContentUpdateCountMock.mockResolvedValueOnce(1);
+        render(
+            <MemoryRouter>
+                <NavContentUpdatesBadge />
+            </MemoryRouter>,
+        );
+        const badge = await screen.findByTestId("nav-content-updates-badge");
+        expect(badge.getAttribute("aria-label")).toContain("1 updates");
+        expect(badge.getAttribute("aria-label")).toContain("view content");
+    });
+});
+
+describe("NavContentUpdatesBadge: count-only below 2xl (#3123, #3339)", () => {
+    it("renders the count in its own span and hides only the word below 2xl", async () => {
+        getContentUpdateCountMock.mockResolvedValue(12);
+        render(
+            <MemoryRouter>
+                <NavContentUpdatesBadge />
+            </MemoryRouter>,
+        );
+        const badge = await screen.findByTestId("nav-content-updates-badge");
+        expect(
+            screen.getByTestId("nav-content-updates-badge-count"),
+        ).toHaveTextContent("12");
+        // #3339 - never flex-shrunk in a crowded bar, word hidden below 2xl.
+        expect(badge.className).toContain("shrink-0");
+        const hidden = [...badge.querySelectorAll("span.max-2xl\\:hidden")];
+        expect(hidden.map((el) => el.textContent).join("")).toBe(" updates");
+        expect(badge.getAttribute("aria-label")).toContain("12 updates");
+        expect(badge).toHaveTextContent("12 updates");
+    });
+});

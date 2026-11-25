@@ -1,0 +1,140 @@
+# Creating lessons - overview
+
+Adaptive Learner thrives on content. You can build your own
+lessons - directly in the app or as a file in the content-repo
+format - and share them with the community. This page gives the
+overview; the detailed format specifics are in the linked sources.
+
+---
+
+## Two ways to create lessons
+
+### 1. In the app: the Lesson Creator
+
+The **Lesson Creator** at `/create-lesson` is a 4-step wizard
+(Metadata → Card Editor → Exercise Editor → Save/Share) and
+needs **no AI key**:
+
+- Order cards via drag-and-drop or **import from CSV**; cards can
+  carry an **uploaded image**.
+- The metadata step offers a **knowledge-domain** selector (e.g.
+  language, programming, psychology, dog training, traffic
+  knowledge).
+- **Auto-generate** exercises from the cards or **edit them fully
+  yourself** in step 3: every core exercise type can be created,
+  changed, and added manually - including native **multiple
+  choice** with a prominent **single/multi selection** toggle.
+- **Dictation** (audio dictation) is available right in the
+  exercise-type picker; upload the audio clip as a file (embedded
+  in the lesson) or type an asset path. The lesson is
+  automatically marked as extension-dependent.
+- The **extension-authoring wizard** builds all five extension
+  exercise types with AI assistance (categorization, error
+  correction, reading comprehension, graded quiz, dictation).
+- **Templates** (Blank / Vocabulary / Grammar / Conversation) and
+  **draft auto-save**.
+- **Preview** in the real lesson viewer before saving.
+- **Save locally** or **Save and share**. Saving locally only needs a
+  valid lesson (title, valid language pair, at least 4 cards for a new
+  card lesson, valid structure); one exercise is enough, and the lesson
+  is playable right away. Save and share saves and opens the share
+  wizard. For that the lesson must also meet the content engine's
+  minimums, for example enough exercises and exercise types and enough
+  answers or pairs in every exercise. The **"Review and save"** step
+  lists them with the current numbers under **"Needed for sharing"**.
+
+Entry points exist in the Content Browser and on the Dashboard.
+
+#### Knowledge lesson from text (book mode)
+
+The fifth template card, **"Knowledge lesson from text"**, starts a
+dedicated 3-step flow (Metadata → Book text → Review): paste one
+section (e.g. a chapter) of your textbook - the AI rewrites it **in
+its own words** as theory steps (never a copy) and generates
+matching exercises that link back to their theory step. Optional
+book metadata (title, author, URL, ISBN/ASIN) can be attached; it
+is preserved when you later edit the lesson.
+
+Instead of pasting text you can also **upload a book file**
+(EPUB, DOCX, TXT, or Markdown, up to 20 MiB). The file is parsed
+entirely **in the browser** - nothing is uploaded - and the
+detected chapters appear as a **checkbox list**. Sections that
+look like front or back matter (preface, glossary, index, …) are
+**unchecked by default** by a heuristic, but stay visible and
+selectable:
+
+- **One section selected** - it is inserted into the text field
+  (with a preview; a non-empty field asks first).
+- **Several sections selected** - **batch generation** creates
+  **one lesson per section** and saves them together as a
+  multi-lesson set.
+
+When **editing** a multi-lesson set, a **lesson picker** asks
+which lesson to open; book-text lessons open the exercise editor
+directly.
+
+Unlike the card-based path, this mode requires a **configured AI
+key**. Only paste text you have the rights to, or that is intended
+for personal use.
+
+### 2. As a file: the content-repo format
+
+A lesson is a JSON file in a **content set**. Sets live in public
+GitHub repos and follow a fixed directory tree
+(`sets/{source-language}/{target-language-level}/`). The
+authoritative guides live in the content repository:
+
+- **Getting started:**
+  [`docs/GETTING-STARTED.md`](https://github.com/astrapi69/adaptive-learner-content/blob/main/docs/GETTING-STARTED.md)
+- **Lesson format:**
+  [`docs/LESSON-FORMAT.md`](https://github.com/astrapi69/adaptive-learner-content/blob/main/docs/LESSON-FORMAT.md)
+
+A ready-made **starter kit** to study and copy is
+[`astrapi69/adaptive-learner-content-test`](https://github.com/astrapi69/adaptive-learner-content-test).
+
+---
+
+## Token roles: better cloze exercises
+
+While editing a card you can mark individual words of the front with
+their grammatical role: article, noun, verb, adjective, preposition,
+gender marker or tense marker.
+
+The benefit shows up in the exercises. Without annotations a cloze
+exercise picks its blank by position; with them it picks a word whose
+role matches the mistake, and draws the distractors from that same role.
+An arbitrary blank becomes one that practises what actually went wrong.
+
+Two rules apply:
+
+- The word must appear in the front **exactly** like that, same casing.
+  Otherwise the exercise cannot find it later and the annotation would
+  have no effect, so the editor refuses such an entry.
+- A card carries at most ten roles.
+
+**Suggest roles** fills the list for you, but only with articles and
+prepositions. Those word classes are countable, so a match is a lookup
+rather than a guess. Nouns, verbs and adjectives are deliberately not
+suggested: a wrongly assigned role would be worse than none, because the
+exercise would then draw its distractors from the wrong word class. You
+add those yourself, and every suggestion can be changed or removed.
+
+---
+
+## Sharing via pull request
+
+Sharing a lesson creates a real **pull request** (fork → commit →
+PR). The app automatically suggests the correct path and a
+numbered file name and detects duplicates/variations. The content
+repo's **validation pipeline** checks every submitted lesson on
+each PR (schema, language pair, quality minimums), so only clean
+content makes it into the catalog. Optionally there is an
+AI-assisted content review; it never blocks sharing.
+
+---
+
+## Related pages
+
+- [Authoring lesson content (developer)](../developer/authoring-content.md) - schema details, assets, code/formula cards
+- [Book recommendations](books.md) - maintaining `books.yaml`
+- [Multiple content repositories](../features/content-repos.md) - connect your own repo

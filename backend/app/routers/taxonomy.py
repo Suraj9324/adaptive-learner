@@ -1,0 +1,236 @@
+"""Subject + Tag CRUD + project-association routers (Phase 22C).
+
+  GET    /api/subjects                            -> list[SubjectOut]
+  GET    /api/subjects/{id}                       -> SubjectOut
+  POST   /api/subjects                            -> 201 SubjectOut
+  PATCH  /api/subjects/{id}                       -> SubjectOut
+  DELETE /api/subjects/{id}                       -> 204
+
+  GET    /api/users/{user_id}/tags                -> list[TagOut]
+  POST   /api/users/{user_id}/tags                -> 201 TagOut
+  PATCH  /api/tags/{id}                           -> TagOut
+  DELETE /api/tags/{id}                           -> 204
+
+  GET    /api/projects/{id}/subjects              -> list[SubjectOut]
+  POST   /api/projects/{id}/subjects              -> 201 SubjectOut
+  DELETE /api/projects/{id}/subjects/{subject_id} -> 204
+
+  GET    /api/projects/{id}/tags                  -> list[TagOut]
+  POST   /api/projects/{id}/tags                  -> 201 TagOut
+  DELETE /api/projects/{id}/tags/{tag_id}         -> 204
+
+Subjects are GLOBAL (no user-scoping in the URL). Tags are
+user-scoped through the path prefix to prevent cross-user
+writes from being forged via the body.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, status
+from fastapi.responses import Response
+from pydantic import BaseModel
+
+from app.deps import get_taxonomy_repo
+from app.repositories.taxonomy_repo import TaxonomyRepository
+from app.schemas import (
+    SubjectCreate,
+    SubjectOut,
+    SubjectUpdate,
+    TagCreate,
+    TagOut,
+    TagUpdate,
+)
+from app.services import taxonomy as taxonomy_service
+
+subjects_router = APIRouter(prefix="/subjects", tags=["taxonomy"])
+tags_router = APIRouter(prefix="/tags", tags=["taxonomy"])
+users_tags_router = APIRouter(prefix="/users", tags=["taxonomy"])
+projects_taxonomy_router = APIRouter(prefix="/projects", tags=["taxonomy"])
+
+
+# --- Subject body schemas ---------------------------------------------------
+
+
+class _AssignSubjectBody(BaseModel):
+    subject_id: str
+
+
+class _AssignTagBody(BaseModel):
+    tag_id: str
+
+
+# --- /subjects --------------------------------------------------------------
+
+
+@subjects_router.get("", response_model=list[SubjectOut])
+def list_subjects(repo: TaxonomyRepository = Depends(get_taxonomy_repo)) -> list[SubjectOut]:
+    """List all global subjects."""
+    return [SubjectOut.model_validate(row) for row in taxonomy_service.list_subjects(repo)]
+
+
+@subjects_router.get("/{subject_id}", response_model=SubjectOut)
+def get_subject(
+    subject_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> SubjectOut:
+    """Get a single subject by id."""
+    return SubjectOut.model_validate(taxonomy_service.get_subject(repo, subject_id))
+
+
+@subjects_router.post(
+    "",
+    response_model=SubjectOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_subject(
+    payload: SubjectCreate, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> SubjectOut:
+    """Create a new global subject."""
+    return SubjectOut.model_validate(taxonomy_service.create_subject(repo, payload))
+
+
+@subjects_router.patch("/{subject_id}", response_model=SubjectOut)
+def update_subject(
+    subject_id: str,
+    payload: SubjectUpdate,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> SubjectOut:
+    """Update a subject's fields."""
+    return SubjectOut.model_validate(taxonomy_service.update_subject(repo, subject_id, payload))
+
+
+@subjects_router.delete("/{subject_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_subject(
+    subject_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> Response:
+    """Delete a subject."""
+    taxonomy_service.delete_subject(repo, subject_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- /users/{user_id}/tags -------------------------------------------------
+
+
+@users_tags_router.get("/{user_id}/tags", response_model=list[TagOut])
+def list_user_tags(
+    user_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> list[TagOut]:
+    """List all tags for the user."""
+    return [
+        TagOut.model_validate(row) for row in taxonomy_service.list_tags_for_user(repo, user_id)
+    ]
+
+
+@users_tags_router.post(
+    "/{user_id}/tags",
+    response_model=TagOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_user_tag(
+    user_id: str,
+    payload: TagCreate,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> TagOut:
+    """Create a tag for the user."""
+    return TagOut.model_validate(taxonomy_service.create_tag(repo, user_id, payload))
+
+
+# --- /tags/{tag_id} --------------------------------------------------------
+
+
+@tags_router.patch("/{tag_id}", response_model=TagOut)
+def update_tag(
+    tag_id: str,
+    payload: TagUpdate,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> TagOut:
+    """Update a tag's fields."""
+    return TagOut.model_validate(taxonomy_service.update_tag(repo, tag_id, payload))
+
+
+@tags_router.delete("/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tag(tag_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)) -> Response:
+    """Delete a tag."""
+    taxonomy_service.delete_tag(repo, tag_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- /projects/{project_id}/subjects + /tags -------------------------------
+
+
+@projects_taxonomy_router.get("/{project_id}/subjects", response_model=list[SubjectOut])
+def list_project_subjects(
+    project_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> list[SubjectOut]:
+    """List the subjects assigned to a project."""
+    return [
+        SubjectOut.model_validate(row)
+        for row in taxonomy_service.list_project_subjects(repo, project_id)
+    ]
+
+
+@projects_taxonomy_router.post(
+    "/{project_id}/subjects",
+    response_model=SubjectOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_subject_to_project(
+    project_id: str,
+    payload: _AssignSubjectBody,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> SubjectOut:
+    """Assign a subject to a project."""
+    taxonomy_service.assign_subject_to_project(repo, project_id, payload.subject_id)
+    return SubjectOut.model_validate(taxonomy_service.get_subject(repo, payload.subject_id))
+
+
+@projects_taxonomy_router.delete(
+    "/{project_id}/subjects/{subject_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def unassign_subject_from_project(
+    project_id: str,
+    subject_id: str,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> Response:
+    """Unassign a subject from a project."""
+    taxonomy_service.unassign_subject_from_project(repo, project_id, subject_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@projects_taxonomy_router.get("/{project_id}/tags", response_model=list[TagOut])
+def list_project_tags(
+    project_id: str, repo: TaxonomyRepository = Depends(get_taxonomy_repo)
+) -> list[TagOut]:
+    """List the tags assigned to a project."""
+    return [
+        TagOut.model_validate(row) for row in taxonomy_service.list_project_tags(repo, project_id)
+    ]
+
+
+@projects_taxonomy_router.post(
+    "/{project_id}/tags",
+    response_model=TagOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_tag_to_project(
+    project_id: str,
+    payload: _AssignTagBody,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> TagOut:
+    """Assign a tag to a project."""
+    taxonomy_service.assign_tag_to_project(repo, project_id, payload.tag_id)
+    return TagOut.model_validate(taxonomy_service.get_tag(repo, payload.tag_id))
+
+
+@projects_taxonomy_router.delete(
+    "/{project_id}/tags/{tag_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def unassign_tag_from_project(
+    project_id: str,
+    tag_id: str,
+    repo: TaxonomyRepository = Depends(get_taxonomy_repo),
+) -> Response:
+    """Unassign a tag from a project."""
+    taxonomy_service.unassign_tag_from_project(repo, project_id, tag_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

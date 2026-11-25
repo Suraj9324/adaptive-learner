@@ -1,0 +1,536 @@
+/**
+ * Tests for ImportActionsPanel (#1253) — the import/creation action
+ * buttons + the standalone "My Lessons" section, relocated from
+ * "Meine Inhalte" into the Import tab.
+ *
+ * Mirrors the Content-page test harness (mocked storage namespace) so
+ * neither the API client nor the Dexie helper runs. Pins that every
+ * moved control + handler works at its new home:
+ *  - the five action buttons render,
+ *  - the import-lesson modal opens from the Import button,
+ *  - the user-generated "My Lessons" list + its actions render,
+ *  - delete + the community share wizard still function,
+ *  - sharing records a local contribution.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const listSetsMock = vi.fn();
+const downloadSetMock = vi.fn();
+const deleteSetMock = vi.fn();
+const listLessonsMock = vi.fn();
+const getLessonMock = vi.fn();
+const saveUserSetMock = vi.fn();
+const aiValidateMock = vi.fn();
+
+vi.mock("../../lib/content/repos/recommended-repos", async (orig) => ({
+  ...(await orig<typeof import("../../lib/content/repos/recommended-repos")>()),
+  fetchRecommendedRepos: vi.fn(async () => []),
+}));
+
+vi.mock("../../storage", () => ({
+  resolveStorageMode: () => "api",
+  getStorage: () => ({
+    contentLoader: {
+      listSets: listSetsMock,
+      downloadSet: downloadSetMock,
+      listLessons: listLessonsMock,
+      getLesson: getLessonMock,
+      saveUserSet: saveUserSetMock,
+      deleteSet: deleteSetMock,
+      aiValidate: aiValidateMock,
+      aiValidateCards: vi.fn(),
+      getAiValidationCache: vi.fn(async () => null),
+      saveAiValidationCache: vi.fn(async () => undefined),
+    },
+    github: {
+      getStatus: async () => ({ configured: false, source: "none" }),
+    },
+  }),
+}));
+
+const apiKeyStatusMock = vi.fn(() => ({
+  ready: true,
+  hasKey: false,
+  activeProvider: null as string | null,
+  refresh: vi.fn(),
+}));
+vi.mock("../../hooks/settings/useApiKeyStatus", () => ({
+  useApiKeyStatus: () => apiKeyStatusMock(),
+}));
+vi.mock("../../lib/learning/learnerState", () => ({
+  readLearnerState: () => ({ userId: "u1" }),
+}));
+vi.mock("../../utils/notify", () => ({
+  notify: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}));
+
+import ImportActionsPanel from "./ImportActionsPanel";
+import { listContributions } from "../../lib/content/placement/contribution-history";
+import { DexieFeatureWrapper } from "../../features/testFeatureProvider";
+
+/** A schema-valid, quality-passing lesson for the share-flow tests. */
+function shareableLesson() {
+  return {
+    id: "01-lektion",
+    title: "Lektion",
+    estimated_minutes: 10,
+    cards: [
+      { id: "c1", front: "Bonjour", back: "Guten Tag", tags: [] },
+      { id: "c2", front: "Merci", back: "Danke", tags: [] },
+      { id: "c3", front: "Salut", back: "Hallo", tags: [] },
+    ],
+    steps: [
+      { id: "intro", type: "theory", body: "# Theorie" },
+      {
+        id: "m",
+        type: "exercise",
+        exercise: {
+          id: "m",
+          type: "matching",
+          prompt: "Zuordnen",
+          card_ids: ["c1", "c2", "c3"],
+          pairs: [
+            { left: "Bonjour", right: "Guten Tag" },
+            { left: "Merci", right: "Danke" },
+            { left: "Salut", right: "Hallo" },
+          ],
+          distractors: [],
+        },
+      },
+      {
+        id: "f",
+        type: "exercise",
+        exercise: {
+          id: "f",
+          type: "free_text",
+          prompt: "Tippe",
+          card_ids: ["c1"],
+          accept: ["Bonjour", "bonjour"],
+          distractors: ["Salut", "Merci"],
+        },
+      },
+      { id: "t1", type: "exercise", exercise: { id: "t1", type: "word_tiles", prompt: "x", card_ids: ["c1"], tiles: ["Bon", "jour"], distractors: [] } },
+      { id: "t2", type: "exercise", exercise: { id: "t2", type: "word_tiles", prompt: "x", card_ids: ["c2"], tiles: ["Mer", "ci"], distractors: [] } },
+      { id: "t3", type: "exercise", exercise: { id: "t3", type: "word_tiles", prompt: "x", card_ids: ["c3"], tiles: ["Sa", "lut"], distractors: [] } },
+    ],
+  };
+}
+
+const USER_ENTRY = {
+  source: "user-generated",
+  branch: "",
+  id: "analysis-conv-1",
+  title: "My Spanish lesson",
+  title_native: null,
+  language: "es",
+  target_language: "es",
+  source_language: "de",
+  level: "beginner",
+  domain: "analysis",
+  version: "1.0.0",
+  lesson_count: 1,
+  description: "Generated from a chat.",
+  tags: [],
+  cover_image: null,
+  cached_version: "1.0.0",
+  update_available: false,
+};
+
+function renderPanel() {
+  return render(
+    <MemoryRouter>
+      <ImportActionsPanel />
+    </MemoryRouter>, { wrapper: DexieFeatureWrapper });
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  listSetsMock.mockReset();
+  downloadSetMock.mockReset();
+  deleteSetMock.mockReset();
+  listLessonsMock.mockReset();
+  getLessonMock.mockReset();
+  saveUserSetMock.mockReset();
+  aiValidateMock.mockReset();
+  apiKeyStatusMock.mockReturnValue({
+    ready: true,
+    hasKey: false,
+    activeProvider: null,
+    refresh: vi.fn(),
+  });
+});
+
+describe("ImportActionsPanel — action buttons", () => {
+  it("renders the four action buttons", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    for (const testId of [
+      "content-import-lesson",
+      "content-import-chat",
+      "content-anki-export",
+      "content-learning-path",
+    ]) {
+      expect(screen.getByTestId(testId)).toBeInTheDocument();
+    }
+  });
+
+  // #3006 — creating is its own hub tab now, so the button that #1253 had
+  // put here would only point at the neighbouring tab.
+  it("no longer renders the create-lesson button (#3006)", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(screen.queryByTestId("content-create-lesson")).toBeNull();
+  });
+
+  it("opens the import-lesson modal from the Import button", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(screen.queryByTestId("import-lesson-modal")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("content-import-lesson"));
+    expect(screen.getByTestId("import-lesson-modal")).toBeInTheDocument();
+  });
+
+  it("renders action buttons icon-only on mobile (label hidden below md)", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    const importBtn = screen.getByTestId("content-import-lesson");
+    expect(importBtn.querySelector("svg")).toBeInTheDocument();
+    const label = importBtn.querySelector("span.hidden");
+    expect(label).not.toBeNull();
+    expect(label).toHaveClass("md:inline");
+    expect(importBtn).toHaveAccessibleName(/Import Lesson/i);
+  });
+
+  it("uses the outline variant for the remaining actions", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    for (const testId of [
+      "content-import-lesson",
+      "content-import-chat",
+      "content-learning-path",
+    ]) {
+      const btn = screen.getByTestId(testId);
+      expect(btn.className).toContain("border");
+      expect(btn.className).toContain("text-foreground");
+    }
+  });
+});
+
+describe("ImportActionsPanel — My Lessons", () => {
+  it("lists a user lesson with its play/edit/delete/export/share actions", async () => {
+    listSetsMock.mockResolvedValue({ sets: [USER_ENTRY], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(await screen.findByTestId("my-lesson-analysis-conv-1")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-play")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-edit")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-delete")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-export")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-export-set")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-analysis-conv-1-share")).toBeInTheDocument();
+  });
+
+  it("shows Edit for every own lesson, incl. non-analysis origins (#1740)", async () => {
+    listSetsMock.mockResolvedValue({
+      sets: [{ ...USER_ENTRY, id: "adaptive-x", domain: "adaptive" }],
+      sources: [],
+    });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(await screen.findByTestId("my-lesson-adaptive-x-play")).toBeInTheDocument();
+    // #1740 — Edit is now offered for created / imported / adaptive
+    // origins too (dispatched to the wizard), not analysis only.
+    expect(screen.getByTestId("my-lesson-adaptive-x-edit")).toBeInTheDocument();
+  });
+
+  it("does not render the My Lessons section when there are no user sets", async () => {
+    listSetsMock.mockResolvedValue({ sets: [], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(screen.queryByTestId("content-my-lessons")).not.toBeInTheDocument();
+  });
+
+  it("#2655 — shows the 'Your edit' badge + basiert-auf credit line on a forked set", async () => {
+    listSetsMock.mockResolvedValue({
+      sets: [
+        {
+          ...USER_ENTRY,
+          id: "forked-x",
+          domain: "imported",
+          attribution: { author: "Original Author" },
+        },
+      ],
+      sources: [],
+    });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(await screen.findByTestId("my-lesson-forked-x-badge")).toHaveTextContent(
+      "Your edit",
+    );
+    expect(screen.getByTestId("my-lesson-forked-x-credit")).toHaveTextContent(
+      "Based on Original Author",
+    );
+  });
+
+  it("#2655 — shows neither badge nor credit line for a non-forked (own) lesson", async () => {
+    listSetsMock.mockResolvedValue({ sets: [USER_ENTRY], sources: [] });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    await screen.findByTestId("my-lesson-analysis-conv-1");
+    expect(
+      screen.queryByTestId("my-lesson-analysis-conv-1-badge"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("my-lesson-analysis-conv-1-credit"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("#2655 — shows the badge without a credit line when a fork carries no attribution", async () => {
+    listSetsMock.mockResolvedValue({
+      sets: [{ ...USER_ENTRY, id: "forked-no-credit", domain: "imported" }],
+      sources: [],
+    });
+    renderPanel();
+    await screen.findByTestId("import-actions-panel");
+    expect(
+      await screen.findByTestId("my-lesson-forked-no-credit-badge"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("my-lesson-forked-no-credit-credit"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("deletes a user lesson after confirmation", async () => {
+    listSetsMock.mockResolvedValue({ sets: [USER_ENTRY], sources: [] });
+    deleteSetMock.mockResolvedValue(undefined);
+    renderPanel();
+    await screen.findByTestId("my-lesson-analysis-conv-1-delete");
+    fireEvent.click(screen.getByTestId("my-lesson-analysis-conv-1-delete"));
+    expect(screen.getByTestId("my-lesson-delete-modal")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("my-lesson-delete-confirm"));
+    });
+    await waitFor(() =>
+      expect(deleteSetMock).toHaveBeenCalledWith("user-generated", "analysis-conv-1"),
+    );
+  });
+});
+
+describe("ImportActionsPanel — community share", () => {
+  it("walks the wizard and shares a flagged lesson anyway", async () => {
+    listSetsMock.mockResolvedValue({ sets: [USER_ENTRY], sources: [] });
+    listLessonsMock.mockResolvedValue({ lessons: ["01.json"] });
+    getLessonMock.mockResolvedValue({
+      id: "01",
+      title: "x",
+      estimated_minutes: 10,
+      cards: [{ id: "c", front: "a", back: "b", tags: [] }],
+      steps: [
+        { id: "s", type: "theory", body: "x" },
+        {
+          id: "ex",
+          type: "exercise",
+          exercise: {
+            id: "ex",
+            type: "free_text",
+            prompt: "p",
+            card_ids: ["c"],
+            accept: ["a"],
+            distractors: [],
+          },
+        },
+      ],
+    });
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    renderPanel();
+    await screen.findByTestId("my-lesson-analysis-conv-1-share");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("my-lesson-analysis-conv-1-share"));
+    });
+    await screen.findByTestId("share-wizard-step-1");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    await screen.findByTestId("share-wizard-unique");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    expect(screen.getByTestId("share-wizard-quality-issues")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    fireEvent.click(screen.getByTestId("share-wizard-share"));
+    expect(openSpy).toHaveBeenCalled();
+    expect(screen.getByTestId("share-wizard-celebration")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("auto-computes placement and opens the PR fast lane for a clean lesson", async () => {
+    const valid = { ...USER_ENTRY, title_native: "Español A1" };
+    listSetsMock.mockResolvedValue({ sets: [valid], sources: [] });
+    listLessonsMock.mockResolvedValue({ lessons: ["01.json"] });
+    getLessonMock.mockResolvedValue(shareableLesson());
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    renderPanel();
+    await screen.findByTestId("my-lesson-analysis-conv-1-share");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("my-lesson-analysis-conv-1-share"));
+    });
+    await screen.findByTestId("share-wizard-step-1");
+    expect(screen.getByTestId("share-wizard-placement")).toHaveTextContent("sets/de/es-a1");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    await screen.findByTestId("share-wizard-unique");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    expect(screen.getByTestId("share-wizard-quality-ok")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    fireEvent.click(screen.getByTestId("share-wizard-share"));
+    const url = openSpy.mock.calls[0][0] as string;
+    expect(url).toMatch(/github\.com\/astrapi69\/adaptive-learner-content\/new\/main\?/);
+    vi.unstubAllGlobals();
+  });
+
+  it("offers opt-in AI validation in the quality step (key present)", async () => {
+    apiKeyStatusMock.mockReturnValue({
+      ready: true,
+      hasKey: true,
+      activeProvider: "anthropic",
+      refresh: vi.fn(),
+    });
+    const valid = { ...USER_ENTRY, title_native: "Español A1" };
+    listSetsMock.mockResolvedValue({ sets: [valid], sources: [] });
+    listLessonsMock.mockResolvedValue({ lessons: ["01.json"] });
+    getLessonMock.mockResolvedValue(shareableLesson());
+    aiValidateMock.mockResolvedValue({
+      overall: "review_needed",
+      translation_issues: [{ card_id: "c1", issue: "x", suggestion: "Guten Morgen" }],
+      distractor_issues: [],
+      grammar_issues: [],
+      level_issues: [],
+      cultural_flags: [],
+      quality_score: 0.78,
+    });
+    renderPanel();
+    await screen.findByTestId("my-lesson-analysis-conv-1-share");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("my-lesson-analysis-conv-1-share"));
+    });
+    await screen.findByTestId("share-wizard-step-1");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    await screen.findByTestId("share-wizard-unique");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    expect(screen.getByTestId("content-ai-validation")).toBeInTheDocument();
+    // #3812 - the note names what goes to the provider and links the privacy policy.
+    // How the provider is named is pinned in ContentShareDialog.test.tsx; this
+    // test renders without a catalog, where every label falls back to its id.
+    // #3840 - IP address and key are named as examples, not as the complete list.
+    const note = screen.getByTestId("content-ai-privacy");
+    expect(note).toHaveTextContent(
+      "as with every AI request, anthropic receives, among other things, your IP address and your API key",
+    );
+    expect(note).not.toHaveTextContent(/no personal data/i);
+    expect(screen.getByTestId("content-ai-privacy-link").getAttribute("href")).toMatch(
+      /\/legal\/privacy\/$/,
+    );
+  });
+
+  it("records a local contribution after sharing", async () => {
+    const valid = { ...USER_ENTRY, title_native: "Español A1" };
+    listSetsMock.mockResolvedValue({ sets: [valid], sources: [] });
+    listLessonsMock.mockResolvedValue({ lessons: ["01.json"] });
+    getLessonMock.mockResolvedValue(shareableLesson());
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    renderPanel();
+    await screen.findByTestId("my-lesson-analysis-conv-1-share");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("my-lesson-analysis-conv-1-share"));
+    });
+    await screen.findByTestId("share-wizard-step-1");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    await screen.findByTestId("share-wizard-unique");
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    fireEvent.click(screen.getByTestId("share-wizard-next"));
+    fireEvent.click(screen.getByTestId("share-wizard-share"));
+    await waitFor(() => expect(listContributions().length).toBe(1));
+    vi.unstubAllGlobals();
+  });
+});
+
+// #1741 — combine several own sets' lessons into one set.
+describe("ImportActionsPanel — combine into a set (#1741)", () => {
+  const SET_A = { ...USER_ENTRY, id: "created-a", title: "Set A", domain: "imported" };
+  const SET_B = { ...USER_ENTRY, id: "created-b", title: "Set B", domain: "imported" };
+
+  function primeTwoUserSets() {
+    listSetsMock.mockResolvedValue({ sets: [SET_A, SET_B], sources: [] });
+    listLessonsMock.mockResolvedValue({
+      set_id: "x",
+      source: "user-generated",
+      version: "1.0.0",
+      lessons: ["01-lektion.json"],
+    });
+    getLessonMock.mockResolvedValue(shareableLesson());
+    saveUserSetMock.mockResolvedValue({
+      id: "created-combo",
+      source: "user-generated",
+      title: "Combo",
+    });
+  }
+
+  it("select-mode only shows checkboxes after toggling Combine", async () => {
+    primeTwoUserSets();
+    renderPanel();
+    await screen.findByTestId("my-lesson-created-a");
+    expect(
+      screen.queryByTestId("my-lesson-created-a-select"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("my-lessons-combine-toggle"));
+    expect(screen.getByTestId("my-lesson-created-a-select")).toBeInTheDocument();
+    expect(screen.getByTestId("my-lesson-created-b-select")).toBeInTheDocument();
+  });
+
+  it("combines the selected sets' lessons into a NEW set", async () => {
+    primeTwoUserSets();
+    renderPanel();
+    await screen.findByTestId("my-lesson-created-a");
+    fireEvent.click(screen.getByTestId("my-lessons-combine-toggle"));
+    fireEvent.click(screen.getByTestId("my-lesson-created-a-select"));
+    fireEvent.click(screen.getByTestId("my-lesson-created-b-select"));
+    fireEvent.click(screen.getByTestId("my-lessons-combine-open"));
+    expect(screen.getByTestId("combine-lessons-dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("combine-new-title"), {
+      target: { value: "My Bundle" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("combine-confirm"));
+    });
+    await waitFor(() => expect(saveUserSetMock).toHaveBeenCalled());
+    const input = saveUserSetMock.mock.calls[0][0] as {
+      set_id: string;
+      title: string;
+      lessons: { id: string }[];
+    };
+    expect(input.title).toBe("My Bundle");
+    expect(input.set_id).toBe("created-my-bundle");
+    // Both sets contributed a lesson; the id collision is de-duplicated.
+    expect(input.lessons).toHaveLength(2);
+    expect(new Set(input.lessons.map((l) => l.id)).size).toBe(2);
+  });
+
+  it("does not offer 'existing set' when the whole selection is chosen", async () => {
+    primeTwoUserSets();
+    renderPanel();
+    await screen.findByTestId("my-lesson-created-a");
+    fireEvent.click(screen.getByTestId("my-lessons-combine-toggle"));
+    fireEvent.click(screen.getByTestId("my-lesson-created-a-select"));
+    fireEvent.click(screen.getByTestId("my-lesson-created-b-select"));
+    fireEvent.click(screen.getByTestId("my-lessons-combine-open"));
+    // Every user set is selected, so there is no target left to extend.
+    expect(screen.getByTestId("combine-mode-existing")).toBeDisabled();
+  });
+});

@@ -1,0 +1,859 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# Defensive opt-in: any JavaScript-runtime action still declaring
+# Node 20 (third-party or stragglers) is coerced to Node 24. After
+# the 2026-05-14 standard-action bumps (checkout v5, setup-python v6,
+# setup-node v5, upload-artifact v6, cache v5, configure-pages v6,
+# upload-pages-artifact v5, deploy-pages v5, softprops/action-gh-release v3)
+# every action we use natively runs on Node 24, so this is now a
+# safety net for future additions rather than an active fix.
+# Default Node 20 is removed September 16th 2026 per
+# https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # Path-detection so a frontend-only / CSS PR skips the backend + plugin
+  # test STEPS (their poetry install + suite), which cover none of those
+  # changes. The jobs still RUN, so the required checks report success (no
+  # pending-required-check trap) - they just exit fast when nothing
+  # backend-relevant changed. Push to develop/main always runs the full
+  # suite (the merge gate) via the ``!= 'pull_request'`` half of each gate.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      scripts: ${{ steps.filter.outputs.scripts }}
+      plugins: ${{ steps.filter.outputs.plugins }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+      data_model: ${{ steps.filter.outputs.data_model }}
+      i18n_only: ${{ steps.scope.outputs.i18n_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          # schema/** is a SHARED both-sides path (#1658): the backend drift
+          # test regenerates lesson.schema.json from the Pydantic models, and
+          # the frontend schema-mirror check reads the same file - a change
+          # there must run BOTH suites.
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'plugins/**'
+              - 'scripts/**'
+              - '**/*.py'
+              - 'Makefile'
+              - 'schema/**'
+              - '.github/workflows/ci.yml'
+            # #3250: testmon's graph never covers these two trees, so the
+            # backend job runs the tests naming them by a fixed step.
+            scripts:
+              - 'scripts/**'
+            plugins:
+              - 'plugins/**'
+            # #3342: e2e TypeScript (configs, specs, helpers) is read by
+            # two backend guard tests through read_text; neither the
+            # backend filter nor testmon ever selects them for it.
+            e2e:
+              - 'e2e/**/*.ts'
+            # #3828: the ER diagrams of docs/help/<lang>/developer/data-model.md
+            # are generated from the SQLAlchemy models AND the Dexie schema.
+            # A Dexie upgrade touches only frontend/, which the backend filter
+            # does not match, so this output starts the backend install and
+            # the drift gate for it; a hand edit of a page or the mapping too.
+            data_model:
+              - 'backend/app/models/**'
+              - 'frontend/src/storage/dexie/**'
+              - 'scripts/generate_er_diagrams.py'
+              - 'scripts/data_model_*'
+              - 'docs/help/*/developer/data-model.md'
+            frontend:
+              - 'frontend/**'
+              - 'Makefile'
+              - 'schema/**'
+              - '.github/workflows/ci.yml'
+
+      # i18n_only (translation-PR-policy): true only when EVERY changed file
+      # is a translation catalog - backend/config/i18n/*.yaml (the authoring
+      # surface) or the generated frontend/src/data/i18n/*.json. i18n files
+      # live under backend/** and frontend/**, so they already trip the SAME
+      # filters as code (PR #1754: a 14-file, catalog-only PR ran the FULL
+      # backend + frontend suites, ~6 minutes each, for a text-only change).
+      # dorny/paths-filter answers "did ANY file match", not "did ALL files
+      # match ONLY this", so a plain diff walk does the "only" part. Mixed
+      # changes (any file outside the two globs) fall through to `false`
+      # unchanged - the full suite, same as any other PR.
+      - name: Detect i18n-only changeset
+        id: scope
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+          if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+            FILES=$(git diff --name-only "$BASE"...HEAD)
+          else
+            echo "::warning::base ref $BASE unresolved - treating as mixed (full scope)"
+            FILES="unresolved"
+          fi
+          i18n_only=true
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              backend/config/i18n/*.yaml|frontend/src/data/i18n/*.json) ;;
+              *) i18n_only=false ;;
+            esac
+          done <<< "$FILES"
+          echo "::notice::i18n_only=$i18n_only"
+          echo "i18n_only=$i18n_only" >> "$GITHUB_OUTPUT"
+
+  backend-tests:
+    name: Backend Tests
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Cache Poetry's virtualenv keyed on poetry.lock + python
+      # version. Saves ~15-30s per run on the backend job
+      # (test-infrastructure-audit 2026-05-12 finding 0.5.1).
+      # The frontend job already does this via setup-node's
+      # ``cache: "npm"``; backend was the asymmetry.
+      - name: Cache Poetry virtualenv (backend)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-backend-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            poetry-backend-${{ runner.os }}-py3.12-
+
+      - name: Install Poetry
+        if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.data_model == 'true'
+        run: pip install poetry
+
+      - name: Install backend dependencies
+        if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.data_model == 'true'
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      # Test Impact Analysis (#615): on a PR we run only the tests whose
+      # covered source changed, via pytest-testmon. The .testmondata DB is
+      # cached; a PR's first run restores the one the testmon-seed job wrote
+      # on the develop push (#3901), later runs their own. The key carries the run id so
+      # each run writes a FRESH cache entry; restore-keys falls back to the
+      # most recent matching prefix, keeping the DB warm + current. A
+      # cache-miss leaves no .testmondata, so testmon runs the FULL suite and
+      # builds the DB — the natural fallback (no silent skip). Push to
+      # develop/main + nightly + release always run the full suite (below).
+      - name: Restore testmon data (PR only)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.backend == 'true' && needs.changes.outputs.i18n_only != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: backend/.testmondata
+          key: testmon-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            testmon-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}-
+
+      - name: Run backend tests (selective on PR, full on push)
+        if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+        working-directory: backend
+        # On PR: pytest --testmon runs only impacted tests (Test Impact
+        # Analysis, #615). On push to develop/main: the FULL suite, the merge
+        # gate. ``-q`` keeps the green-run log quiet (failures still print full
+        # tracebacks). testmon is order-independent, so pytest-randomly is left
+        # on. Exit code 5 ("no tests collected") is only reachable via testmon
+        # deselecting everything (nothing impacted) — treated as success, not a
+        # silent skip; the nightly full suite is the safety net for false
+        # negatives.
+        #
+        # i18n_only (translation-PR-policy): a translation catalog is not a
+        # Python file, so testmon's coverage-based dependency graph never
+        # associates it with any test - the selective branch above would
+        # silently deselect test_i18n_parity.py instead of running it. Run
+        # that one file directly, bypassing testmon, on both PR and push.
+        run: |
+          if [ "${{ needs.changes.outputs.i18n_only }}" = "true" ]; then
+            echo "::notice::i18n-only changeset, running test_i18n_parity.py only"
+            poetry run pytest tests/test_i18n_parity.py -q
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::notice::PR detected — Test Impact Analysis (pytest --testmon)"
+            set +e
+            poetry run pytest tests/ -q --testmon
+            code=$?
+            set -e
+            if [ "$code" = "5" ]; then
+              echo "::notice::testmon selected no impacted tests — OK"
+              exit 0
+            fi
+            exit $code
+          else
+            echo "::notice::Push to ${{ github.ref_name }} — FULL backend suite"
+            poetry run pytest tests/ -q
+          fi
+
+      # #3250: testmon's dependency graph is built from coverage of
+      # backend/app and backend/tests, so a PR changing scripts/ or plugins/
+      # selects nothing above although backend tests drive those scripts as
+      # subprocesses and load the plugins through PluginForge (CI run
+      # 36006903648: "no tests ran" on a plugins/ push). The selector names
+      # such tests by their source and this step runs them, bypassing
+      # testmon; a push runs the full suite anyway.
+      - name: Backend tests exercising changed scripts/ or plugins/ (#3250)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.i18n_only != 'true' && (needs.changes.outputs.scripts == 'true' || needs.changes.outputs.plugins == 'true')
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          areas=""
+          if [ "${{ needs.changes.outputs.scripts }}" = "true" ]; then areas="$areas scripts"; fi
+          if [ "${{ needs.changes.outputs.plugins }}" = "true" ]; then areas="$areas plugins"; fi
+          files="$(python3 ../scripts/select_impacted_tests.py $areas)"
+          echo "::notice::running the backend tests that name$areas/"
+          # shellcheck disable=SC2086
+          poetry run pytest -q $files
+
+      # #3342: the e2e guard tests (run isolation #3316, no committed
+      # test.only #3439) read e2e/playwright*.config.ts and the specs through
+      # read_text. A PR touching only e2e/ trips no backend filter, and
+      # testmon could not select them anyway (the selection gap of
+      # lessons/ci-gates.md, #1620/#1665), so reintroducing a reused server
+      # would merge green and turn develop red afterwards. A push runs the
+      # full suite, which includes both files.
+      - name: E2E guard tests on e2e changes (#3342)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.e2e == 'true'
+        working-directory: backend
+        run: poetry run pytest -q tests/test_e2e_path_isolation.py tests/test_e2e_no_focused_tests.py
+
+      # #2281: the committed schema/openapi.json must match the spec the
+      # booted app serves (13/13 plugins asserted before comparing; fails
+      # closed). Runs as an explicit step, not only via the pytest suite,
+      # so PR testmon deselection can never skip it — the subprocess-based
+      # gate tests are exactly the selection-mechanics blind spot class
+      # (#1620/#1665).
+      - name: OpenAPI snapshot drift gate (#2281)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run python ../scripts/sync_openapi.py --check
+
+      # Generated Pydantic layer drift gate (#3650): the content-loader's
+      # schema_generated.py / manifest_generated.py have exactly one writer,
+      # the generator. This ran only inside make release-test, so a ruff
+      # --fix that re-sorted their imports (#3625) sat red until a release.
+      # Explicit step, like the OpenAPI gate, so test selection never skips it.
+      - name: Generated Pydantic layer drift gate (#3650)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run python ../scripts/generate_pydantic_models.py --check
+
+      # Data-model ER diagram drift gate (#3828): docs/help/<lang>/developer/
+      # data-model.md is generated from the SQLAlchemy models and the final
+      # Dexie schema. Fails on a stale page, a table or store without an area,
+      # and a *_id field the mapping does not resolve. Explicit step, so test
+      # selection never skips it, and it runs on a Dexie-only PR through the
+      # data_model filter.
+      - name: Data-model ER diagram drift gate (#3828)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.data_model == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run python ../scripts/generate_er_diagrams.py --check
+
+      # Dead-code ratchet, Python side (#3047): vulture over backend/app plus
+      # every plugin package against the list baseline. The weekly
+      # dead-code.yml stays the full-scope report; running the side a PR can
+      # change here means the author who adds an export banks or removes it
+      # in the same PR instead of a resync days later (#2917, #2988, #3046).
+      - name: Dead-code ratchet, Python side (#3047)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run python ../scripts/check_dead_code.py --only python
+
+  # Testmon seed (#3901). The PR step above restores .testmondata, but a run
+  # reads only the caches of its own ref and of the base branch, and only PR
+  # runs wrote one: every PR's first run started cold and ran the whole suite
+  # (#3899: 2716 tests in 11:00 against the 15-minute job limit). This job
+  # writes the data on the develop push, under the key the PR step restores.
+  # It starts from the previous develop data, so after its first (cold) run
+  # testmon re-runs only what the push affected. The full merge run above
+  # stays without testmon: testmon roughly doubles a full run (develop pushes
+  # took 3:49 to 6:56 without it, the cold PR run 11:00 with it).
+  testmon-seed:
+    name: Testmon seed (develop)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache Poetry virtualenv (backend)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-backend-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            poetry-backend-${{ runner.os }}-py3.12-
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Restore and save testmon data (develop)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: backend/.testmondata
+          key: testmon-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            testmon-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}-
+
+      - name: Record testmon data
+        working-directory: backend
+        run: |
+          set +e
+          poetry run pytest tests/ -q --testmon
+          code=$?
+          set -e
+          if [ "$code" = "5" ]; then
+            echo "::notice::testmon found nothing impacted since the last seed, data unchanged"
+            exit 0
+          fi
+          exit $code
+
+  # Plugin tests (#434 Goal A): run every plugin's own suite in CI via
+  # `make test-plugins`, which executes each `plugins/*/tests/` through the
+  # BACKEND venv (PLUGIN_PYTHON). The backend `poetry install` path-installs
+  # every plugin (develop = true) and carries pytest, so no per-plugin
+  # dev-group or lockfile is needed. This closes the gap where the ~808
+  # plugin test functions ran only locally (`make test-plugins`) with zero CI
+  # coverage. Goal B (the isolated per-plugin matrix as a lock-drift gate)
+  # stays deferred — see issue #434.
+  #
+  # Trigger note: GitHub Actions has no native per-job `paths` filter, and a
+  # path-detector job / separate workflow would breach the "one job only"
+  # scope of #434, so this runs on the standard CI triggers (push / PR to
+  # develop + main), which already cover plugins/** and backend/** changes.
+  # It is cheap — seconds over the cached backend venv, free public minutes.
+  #
+  # Test Impact Analysis (#615) deliberately does NOT apply here: the plugin
+  # suite (~37s) is too cheap to optimise, and `make test-plugins` runs each
+  # plugin's pytest in its own dir (per-dir .testmondata = no shared gain).
+  # Plugins always run the full suite on every trigger.
+  plugin-tests:
+    name: Plugin Tests
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Same cache key as backend-tests: make test-plugins reuses the backend
+      # venv, so the two jobs share the warmed virtualenv cache.
+      - name: Cache Poetry virtualenv (backend)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-backend-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            poetry-backend-${{ runner.os }}-py3.12-
+
+      # i18n_only PRs (translation-PR-policy) skip this job entirely: the
+      # plugin suites cover no i18n catalog behaviour.
+      - name: Install Poetry
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        run: pip install poetry
+
+      - name: Install backend dependencies (path-installs every plugin)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Run plugin tests (make test-plugins via the backend venv)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        run: make test-plugins
+
+  frontend-tests:
+    name: Frontend Tests
+    # #1658 - symmetric to the #1617 backend gate: on a pure-backend PR the
+    # expensive steps below skip; the JOB still runs and reports success, so
+    # a (future) required-check setup can never hit the skipped-job trap.
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth: 0 — full history so `vitest run --changed origin/<base>`
+      # (#615 Test Impact Analysis) can diff the PR against its base branch.
+      # Shallow (depth 1) would leave origin/<base> unresolvable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Node 24 stays the RUNTIME (Vite build, Vitest, tsc); Bun is only the
+      # package manager + script runner (#1492 Phase 1). No npm cache on
+      # setup-node — the bun install cache below replaces it.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
+        # --frozen-lockfile is the bun equivalent of `npm ci` (no lockfile
+        # mutation). No --legacy-peer-deps needed: bun resolves the tree
+        # without npm's peer-dep strictness (#1492).
+        run: bun install --frozen-lockfile
+
+      # i18n_only PRs (translation-PR-policy) skip the five steps below:
+      # none of tsc, the ajv schema mirror, ESLint, the circular-dep guard
+      # or Stylelint say anything about a translation catalog's content.
+      - name: TypeScript type check
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bunx tsc --noEmit
+
+      # D1b (#1521) drift gate (frontend half): the TS lesson types now come
+      # from learn-content-engine, so this gate only keeps the bundle-local
+      # ajv schema mirror in sync with schema/lesson.schema.json. Fails if the
+      # mirror is stale vs the committed schema. The Python half
+      # (schema/quality-rules/doc) is covered by backend
+      # test_lesson_schema_drift.py.
+      - name: Lesson schema mirror drift check
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: node scripts/sync-schema-mirror.mjs --check
+
+      # ESLint (#222, #220). The ratchet reached zero: the suite is clean,
+      # so the ceiling is 0 — any new warning fails CI. Blocking errors
+      # (react-hooks/rules-of-hooks, react/jsx-key) also have zero violations.
+      - name: ESLint
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bunx eslint src/ --max-warnings 0
+
+      # Dead-code ratchet, TypeScript side (#3047): knip over frontend against
+      # the list baseline; the script resolves the repo root through git and
+      # runs knip from frontend/ itself. Same rationale as the Python step in
+      # the backend job.
+      - name: Dead-code ratchet, TypeScript side (#3047)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        run: python3 scripts/check_dead_code.py --only typescript
+
+      # Circular-dependency guard (#251). Fails only when import cycles
+      # EXCEED the documented baseline, so a NEW cycle is a hard error while
+      # the pre-existing debt (#252) doesn't block CI. Uses npx-pinned madge
+      # (peer-incompatible with TS 6 as a devDependency; CI-only tool).
+      - name: Circular dependency check
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bun run check:circular
+
+      # Prettier (#254). Declared OFF in .claude/rules/checks.yaml
+      # (prettier-ci-check): it only lists unformatted files in the log.
+      # Most of src/ fails: it was never formatted and mixes 2- and 4-space.
+      # The style is decided (Prettier defaults, 2026-09-25, #3270) and
+      # .prettierrc states it; only the one-time reformat remains, and that
+      # PR makes this step blocking. Nothing here turns it on by itself.
+      - name: Prettier check (non-blocking)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bun run format:check
+        continue-on-error: true
+
+      # Stylelint (#257). Focused config: color-no-invalid-hex is a hard
+      # error (clean baseline blocks new invalid hex); no-duplicate-selectors
+      # / no-descending-specificity / declaration-no-important are warnings
+      # (36 pre-existing, reported not blocked — drive to zero then promote).
+      - name: Stylelint
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bun run lint:css
+
+      # Build-context boundary guard (#3239), a fixed step on every frontend
+      # PR. The guard reads frontend/src, backend/Dockerfile and the alias
+      # configs through fs, not imports, so the selective run below
+      # (`vitest --changed`) never selects it unless the guard file itself
+      # changed: the "selection mechanics" sub-class of lessons/ci-gates.md
+      # "PR-CI vs nightly gates" (#1620/#1665). A PR adding an import from
+      # frontend/src into e2e/ would otherwise run green without the guard
+      # ever seeing it. Push runs the full suite, which includes it. Skipped
+      # on i18n_only PRs like the other code steps: catalog JSON carries no
+      # imports.
+      - name: Build-context boundary guard (#3239)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.frontend == 'true' && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bunx vitest run src/test/build-context-boundary.test.ts
+
+      # Full-tree i18n key coverage (#3249), a fixed step on every frontend
+      # PR, i18n_only ones included. The test walks frontend/src and reads
+      # the catalogs through fs, so `vitest --changed` below never selects
+      # it for a component that adds a t() key (same selection gap as the
+      # guard above), and an i18n_only PR that drops a key still in use
+      # runs only i18n-sync.test.ts. Push runs the full suite, which
+      # includes it.
+      # Theme token gate (#3251), a fixed step on every frontend change.
+      # scripts/verify_theme.py (token completeness, undefined var() refs,
+      # WCAG contrast, the .theme-baseline.json ratchet) used to run only in
+      # a backend test and in make release-test, so a CSS-only PR under
+      # frontend/src/styles never tripped it: probed with an undefined
+      # var(--probe-...) that a forced full Vitest run did not catch. Stdlib
+      # only, seconds. The four Vitest theme guards stay in the Vitest step
+      # (forceRerunTriggers covers src/styles/**/*.css for the selective run).
+      - name: Theme token gate (#3251)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: .
+        run: python3 scripts/verify_theme.py --enforce
+
+      - name: i18n key coverage, full tree (#3249)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
+        run: bunx vitest run src/i18n/full-tree-key-coverage.test.ts
+
+      # #3433: one term per concept in every catalog. The test reads the
+      # catalogs through fs, so `vitest --changed` never selects it, and an
+      # i18n_only PR (exactly where a rejected term comes back) runs only
+      # the parity pins below. A fixed step on every frontend PR, like the
+      # key coverage above; push runs the full suite, which includes it.
+      - name: i18n one term per concept (#3433)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
+        run: bunx vitest run src/data/i18n/terms.test.ts
+
+      # Test Impact Analysis (#615): on a PR run only the Vitest files related
+      # to files changed since the base branch (`--changed origin/<base>`).
+      # Real test failures propagate (no masking). The ONLY fallback to the
+      # full suite is an unresolvable base ref — a hard guard against a silent
+      # skip. Push to develop/main always runs the full suite (the merge gate);
+      # nightly + release run full too.
+      # i18n_only (translation-PR-policy): a translation catalog is not a
+      # source file the changed-files diff picks up as "related" the same
+      # way `--changed` resolves for .ts/.tsx, so route straight to the one
+      # file that actually verifies it: the backend-YAML <-> frontend-JSON
+      # parity pin (i18n-sync.test.ts). Same on PR and push - no reason to
+      # run testmon-equivalent selection for a single fixed target.
+      - name: Run Vitest (selective on PR, full on push)
+        if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
+        run: |
+          if [ "${{ needs.changes.outputs.i18n_only }}" = "true" ]; then
+            echo "::notice::i18n-only changeset, running i18n-sync.test.ts + fallbacks.test.ts only"
+            # fallbacks.test.ts: the first-paint subset still equals the catalogs (#3378)
+            bunx vitest run src/data/i18n/i18n-sync.test.ts src/i18n/fallbacks.test.ts
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+            if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+              echo "::notice::PR detected — Vitest --changed against $BASE"
+              bunx vitest run --changed "$BASE"
+            else
+              echo "::warning::base ref $BASE unresolved — running FULL Vitest suite"
+              bunx vitest run
+            fi
+          else
+            echo "::notice::Push to ${{ github.ref_name }} — FULL Vitest suite"
+            bunx vitest run
+          fi
+
+      - name: Build
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: bunx vite build
+
+      # Dependency vulnerability scan (#224). --audit-level=high so
+      # moderate/low advisories surface in the log without blocking the
+      # build; a high/critical advisory fails CI for immediate triage.
+      #
+      # #2933: the registry request behind `bun audit` dropped four times
+      # during the v2.14.0 release chain ("ConnectionClosed: audit request
+      # failed") with 0 advisories on every manual re-run, each costing a
+      # rerun of this 15-20 minute job. Bounded retry in the #2117 launcher
+      # shape, but ONLY on the transport signature: a real advisory exits
+      # non-zero without it and fails on the first attempt, so the retry
+      # can mask a dropped connection, never a finding. Each attempt is
+      # visible in the log; three transport failures in a row are an error.
+      - name: npm audit (high+)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: frontend
+        run: |
+          # Without pipefail the `| tee` below would report tee's exit code,
+          # and a failed audit would read as success.
+          set -o pipefail
+          log="$RUNNER_TEMP/bun-audit.log"
+          # #3549: advisories with no patched release that only reach a
+          # dev-only chain are exempted by ID in audit-ignore.txt, each with
+          # its reason (the pip-audit convention below: document the ID,
+          # never drop the gate). A missing file fails the step here.
+          ignores=$(grep -vE '^[[:space:]]*(#|$)' audit-ignore.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
+          echo "exempted advisories: ${ignores:-none}"
+          for attempt in 1 2 3; do
+            echo "::group::bun audit --audit-level=high (attempt $attempt/3)"
+            # shellcheck disable=SC2086 # word-split on purpose: one flag per ID
+            if bun audit --audit-level=high $ignores 2>&1 | tee "$log"; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if ! grep -qiE "ConnectionClosed|audit request failed|ECONNRESET|ETIMEDOUT|fetch failed" "$log"; then
+              echo "::error::bun audit reported a finding (not the #2933 registry flake) - triage the advisory above"
+              exit 1
+            fi
+            echo "::warning::bun audit registry request failed on attempt $attempt/3 (#2933)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::bun audit registry request failed three times - this is not the #2933 blip"
+          exit 1
+
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run hooks on all files
+        # SKIP `eslint` (#268): the hook runs `npx eslint src/`, which needs
+        # frontend/node_modules, and this job installs no frontend deps, so it would
+        # fail with `Cannot find package '@eslint/js'`. The Frontend Tests
+        # job already runs ESLint with deps installed. (The Prettier hook
+        # this list also named was removed in #318.)
+        env:
+          SKIP: eslint
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  lint-and-type-check:
+    name: Backend ruff + mypy
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # Reuse the same backend Poetry cache as the test job
+      # (same key). Mypy needs the SQLAlchemy + Pydantic
+      # stub-bearing venv that ``poetry install`` produces.
+      - name: Cache Poetry virtualenv (backend)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-backend-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            poetry-backend-${{ runner.os }}-py3.12-
+      # i18n_only PRs (translation-PR-policy) skip this job entirely: ruff
+      # and mypy say nothing about a YAML catalog value, and pip-audit below
+      # audits the same venv regardless of what changed.
+      - name: Install Poetry
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        run: pip install poetry
+      - name: Install backend dependencies
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+      # #3423: the plugins are linted too, with the backend config (run from
+      # backend/ so ruff falls back to its pyproject). #3658: and formatted.
+      - name: ruff check
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run ruff check app/ ../plugins/
+      - name: ruff format
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run ruff format --check app/ ../plugins/
+      - name: mypy
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: poetry run mypy app/
+      # Dependency vulnerability scan (#224). pip-audit is a backend dev
+      # dep; --skip-editable skips the local path-dep plugins (no PyPI
+      # advisories). Audits the third-party dependency tree; a known
+      # advisory fails CI for triage.
+      #
+      # #268 — pip-audit audits the whole venv, including the build
+      # toolchain (pip/setuptools/wheel). Those get advisories on their own
+      # cadence (e.g. pip 26.1.1 PYSEC-2026-196), which are not OUR deps and
+      # are fixable by keeping the toolchain current — so upgrade it first.
+      # A toolchain advisory with no fix yet can be parked with
+      # `--ignore-vuln <ID>` (document the ID), never by dropping the gate.
+      - name: pip-audit (backend deps)
+        if: (github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true') && needs.changes.outputs.i18n_only != 'true'
+        working-directory: backend
+        run: |
+          poetry run pip install --quiet --upgrade pip setuptools wheel
+          poetry run pip-audit --skip-editable
+
+  docs-verification:
+    name: Docs drift verifier
+    runs-on: ubuntu-latest
+    # #3802: 10, not 5 - the job now also installs the docs environment and
+    # builds the site, which needs PyPI on top of the stdlib checks.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # verify_docs.py is stdlib-only; PyYAML is needed only for the
+      # _meta.yaml <-> mkdocs.yml nav-sync check below.
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Verify documentation for drift
+        run: python3 scripts/verify_docs.py
+      # #3823: a changed privacy policy carries a date no older than its
+      # change. The checkout is the depth-1 synthetic merge commit, so the
+      # resolver (#3884) fetches the PR head and enough history for the merge
+      # base; the check exits 2 (cannot check) when it still finds none.
+      - name: Changed privacy policies carry the date of their change (#3823)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          python3 scripts/resolve_pr_range.py --base "$BASE" --head "$HEAD_SHA" > /dev/null
+          python3 scripts/check_privacy_date.py --base "origin/$BASE" --head "$HEAD_SHA"
+      # #3800 - every ```mermaid block in docs/help parses with the Mermaid the
+      # docs site serves (vendored, pinned by hash) and carries accTitle +
+      # accDescr. Mermaid needs a DOM, so happy-dom is installed at the
+      # version frontend/bun.lock pins; the script self-tests on every run.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Verify Mermaid diagrams in the help pages (#3800)
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 -o '"happy-dom@[0-9.]*"' frontend/bun.lock | tr -d '"' | cut -d@ -f2)
+          npm install --no-save --silent --prefix "$RUNNER_TEMP/mermaid-gate" "happy-dom@${version}"
+          node scripts/verify_mermaid_blocks.mjs --happy-dom "$RUNNER_TEMP/mermaid-gate/node_modules/happy-dom"
+      # #3253: the Docker-context rules are probed with synthesized paths
+      # (a CI checkout has no node_modules to walk), so the check is worth
+      # running on every PR, not only behind the Docker path filter.
+      - name: Verify the Docker build context rules
+        run: python3 scripts/verify_docker_context.py
+      - name: Verify mkdocs nav is in sync with _meta.yaml
+        run: python3 scripts/generate_mkdocs_nav.py --check
+      # #3802: the docs site is published like the app, so the built site is
+      # scanned for resources a browser fetches from a third-party host on
+      # its own: a Google Fonts link (Material's default unless theme.font is
+      # false), Material's repository widget (its script calls
+      # api.github.com), any external script, image or stylesheet. Built
+      # from docs/poetry.lock and the mkdocs.yml checked above, as
+      # deploy-gh-pages.yml builds it. What Material's JavaScript would load
+      # on its own (the unpkg.com polyfill) no scan of the files can see;
+      # verify_docs' docs-third-party check pins the overrides against it.
+      - name: Install the docs build environment (#3802)
+        working-directory: docs
+        run: |
+          pipx install poetry
+          poetry install --no-interaction
+      - name: Docs site fetches nothing from a third-party host (#3802)
+        run: |
+          set -euo pipefail
+          (cd docs && poetry run mkdocs build -f ../mkdocs.yml)
+          make verify-docs-external-hosts
+      # #2075: a gate may not enforce a rule section that does not exist,
+      # and a rule may not cite a workflow that is gone. Both directions.
+      - name: Verify gate <-> rule links
+        run: python3 scripts/verify_gate_rule_links.py
+      # #2073: the themed lessons catalogue must stay complete - no section
+      # silently lost in a reorganization.
+      - name: Verify lessons inventory
+        run: python3 scripts/verify_lessons_inventory.py --compare .claude/rules/lessons/.inventory-baseline.json
+      # #2077: an inventoried check may not be silently unwired or degraded
+      # into a no-op; turning one off requires a declared reason.
+      - name: Verify check inventory
+        run: python3 scripts/verify_check_inventory.py
+      # #2091: the rule corpus is injected into every prompt, so its size is
+      # paid on every turn. It may shrink; growing it is a deliberate act.
+      - name: Verify rule corpus size
+        run: python3 scripts/verify_rule_corpus_size.py
+      # #2087: declared rule changes must converge in docs/rule-change-log.md.
+      # #3252 step 3: this FAILS. Rows are keyed by PR number, so a declaring
+      # PR carries its own row (make rule-change-log, then commit it): on a
+      # pull_request run the number comes from the event (--pr), on the push
+      # after the merge from the squash subject or the merge commit. Red means
+      # a declaration has no row, and nothing else.
+      - name: Check the rule change log is current
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        env:
+          # #3506: the squash copies the body into develop, so its
+          # declarations need a row too. Via env, never interpolated.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # #3506: the checkout is the depth-1 synthetic merge commit, whose
+            # parents are absent, so "base..HEAD" listed only that merge
+            # commit and never the PR's own commits: the check printed "up to
+            # date" for every PR (#3480, #3333 merged without their row). Fetch
+            # the PR head itself and walk base..head; fail closed when that
+            # range holds none of the PR's commits.
+            # #3884: a depth-200 fetch cut develop above the merge base of a
+            # hotfix branch (cut from main), and the range listed 2389 commits
+            # instead of 10. The resolver fetches the full history only when
+            # the range reaches a shallow root, and fails when it still does.
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            RANGE="$(python3 scripts/resolve_pr_range.py --base "${{ github.event.pull_request.base.ref }}" --head "${HEAD_SHA}")"
+            if [ "$(git rev-list --count "$RANGE")" -eq 0 ]; then
+              echo "::error::rule-change-log check: $RANGE holds no commits, nothing was checked"
+              exit 1
+            fi
+            python3 scripts/append_rule_change_log.py \
+              --range "$RANGE" \
+              --pr "${{ github.event.pull_request.number }}" --pr-body "${PR_BODY:-}" --check
+          else
+            # The pushed range's ends must be in the shallow clone. Fetching
+            # develop alone left "before" missing on a main push whose
+            # previous head never reached develop (the v2.16.0 release merge:
+            # v2.15.0's back-merge was lost, #3159), and git log rejected the
+            # range as invalid. Fetch both ends by sha.
+            git fetch --no-tags --depth=200 origin develop "${{ github.event.before }}" "${{ github.sha }}" >/dev/null 2>&1 || true
+            python3 scripts/append_rule_change_log.py --range "${{ github.event.before }}..${{ github.sha }}" --check
+          fi
+      # #2079: a binding rule may not change inside an undeclared diff.
+      # Declare via the 'rule-change-declared' label or a
+      # "RULE-CHANGE DECLARED: ..." line in the PR body.
+      - name: Verify normative + gate-status changes are declared
+        if: github.event_name == 'pull_request'
+        env:
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'rule-change-declared') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+          ARGS=(--base "origin/${{ github.base_ref }}" --pr-body "$PR_BODY")
+          [ "$HAS_LABEL" = "true" ] && ARGS+=(--declared)
+          python3 scripts/verify_normative_changes.py "${ARGS[@]}"

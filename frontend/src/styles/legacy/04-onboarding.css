@@ -1,0 +1,57 @@
+/* --- Onboarding page ------------------------------------------- */
+@layer legacy { /* EXP-044 Tranche 2 (#1485): utilities must win over this block */
+
+.onboarding-page {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.onboarding-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.onboarding-intro {
+  margin: 0;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+
+.onboarding-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The form-family variants (toggle / label-stack / required / actions,
+ * incl. the #1817 toggle-checkbox pin) were converted to token-backed
+ * Tailwind utilities at their app consumers (Option C, #2735); the
+ * checkbox pin lives as utilities on each toggle checkbox, which win
+ * over the @layer base input rule the same way this block did.
+ *
+ * The TWO rules below stay as a PACKAGE CLASSNAME CONTRACT (the #2477
+ * headless-styled pattern, same as the Settings section head, #2725):
+ * `@astrapi69/ai-key-vault-react`'s dist renders markup carrying these
+ * classNames and relies on the host app for their styling
+ * (docs/development/package-classname-consumers.md). No file under
+ * frontend/src uses them any more - do NOT delete them until the
+ * package ships its own styles (upstream follow-up tracked on #1485). */
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.form-label {
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+} /* @layer legacy */

@@ -1,0 +1,105 @@
+/**
+ * NavAvatar — the learner's profile picture in the top Navigation bar
+ * (#508), beside the XP badge.
+ *
+ * App-specific glue around the presentational ``shared/InitialsAvatar``:
+ * it resolves the active learner, reads the name + the avatar from
+ * whichever storage backing is active (ApiStorage / DexieStorage), and
+ * renders the saved picture (or the generated initials when none is
+ * set). The whole avatar links to Settings, where the picture is
+ * managed. Refreshes on route change + tab focus so a freshly-saved
+ * picture shows without a reload.
+ *
+ * Renders nothing until a learner exists, so it never flashes on a
+ * fresh / anonymous install.
+ */
+
+import { useEffect, useState } from "react";
+import { NavLink, useLocation } from "react-router";
+
+import InitialsAvatar, { nameLeadingWithInitials } from "../../shared/media/InitialsAvatar";
+import { useI18n } from "../../hooks/ui/useI18n";
+import { avatarFrameById } from "../../lib/avatar/avatar-frames";
+import { readAvatarFrameState } from "../../lib/avatar/avatar-frame-store";
+import { readLearnerState } from "../../lib/learning/learnerState";
+import { PROFILE_UPDATED_EVENT } from "../../lib/learning/profileSignal";
+import { getStorage } from "../../storage";
+
+const SIZE = 28;
+
+export default function NavAvatar() {
+  const { t } = useI18n();
+  const { pathname } = useLocation();
+  const [name, setName] = useState<string | null>(null);
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [frameRing, setFrameRing] = useState<string | null>(null);
+
+  useEffect(() => {
+    const userId = readLearnerState().userId;
+    if (!userId) {
+      setName(null);
+      return;
+    }
+    let cancelled = false;
+    async function refresh() {
+      // #2850 — the decorative frame; read inside refresh so the
+      // PROFILE_UPDATED_EVENT after a picker save re-applies it live.
+      setFrameRing(
+        avatarFrameById(readAvatarFrameState(userId!).selected).ring,
+      );
+      try {
+        const [user, settings] = await Promise.all([
+          getStorage().users.get(userId!),
+          getStorage().settings.get(userId!),
+        ]);
+        if (cancelled) return;
+        setName(user.name);
+        setAvatar(settings.avatar ?? null);
+      } catch {
+        // Chrome-only adornment — never surface a read failure.
+      }
+    }
+    void refresh();
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
+    // Live update when Settings saves a new name / picture (#579).
+    window.addEventListener(PROFILE_UPDATED_EVENT, onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener(PROFILE_UPDATED_EVENT, onFocus);
+    };
+  }, [pathname]);
+
+  if (!name) return null;
+
+  const label = t("nav.profile", "Your profile");
+  const accessibleName = nameLeadingWithInitials(label, name, !avatar);
+  return (
+    <NavLink
+      to="/settings?tab=general"
+      className="nav-avatar inline-flex items-center"
+      data-testid="nav-avatar"
+      title={label}
+      aria-label={accessibleName}
+    >
+      <span
+        className="m-1 max-sm:mx-0 inline-flex rounded-full"
+        style={frameRing ? { boxShadow: frameRing } : undefined}
+        data-testid={frameRing ? "nav-avatar-frame" : undefined}
+      >
+        {avatar ? (
+          <img
+            src={avatar}
+            alt=""
+            aria-hidden="true"
+            className="size-7 rounded-full object-cover"
+            data-testid="nav-avatar-image"
+          />
+        ) : (
+          <InitialsAvatar name={name} size={SIZE} testId="nav-avatar-initials" />
+        )}
+      </span>
+    </NavLink>
+  );
+}

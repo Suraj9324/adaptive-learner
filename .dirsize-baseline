@@ -1,0 +1,10 @@
+# Directory-size baseline (#809) — flat SOURCE-file counts > 15 that are
+# tolerated until migrated (ratchet: may only shrink, never grow; a NEW
+# oversized directory fails `check-directory-size.sh --gate`, aliased as
+# `check-folder-size.sh`). This file IS the folder-size whitelist; every
+# entry below is a known god-folder with a follow-up issue tracking its split.
+# Format: path  # reason / tracking issue
+#
+# Punkt-5-Pruefung (#2135, 2026-07-29): zaehlt ausschliesslich
+# `git ls-files`, also den Commit-Stand, nicht den Arbeitsbaum. Zwei Laeufe
+# identisch. GEPRUEFT - nicht erneut pruefen.

@@ -1,0 +1,349 @@
+import {act, fireEvent, render, screen} from "@testing-library/react";
+import {MemoryRouter} from "react-router";
+import {afterAll, afterEach, beforeEach, describe, expect, it} from "vitest";
+
+import {stubMatchMedia} from "../../test-utils/match-media-stub";
+import Navigation from "./Navigation";
+
+// #1390 — the hamburger + drawer only exist in the DOM below the breakpoint
+// (or in lesson-compact mode). These suites exercise the drawer, so run them
+// on a stubbed MOBILE viewport; the desktop variant is pinned by
+// Navigation.viewport.test.tsx.
+const media = stubMatchMedia(true);
+afterAll(() => media.restore());
+
+function renderAt(path: string) {
+    return render(
+        <MemoryRouter initialEntries={[path]}>
+            <Navigation />
+        </MemoryRouter>,
+    );
+}
+
+describe("Navigation", () => {
+    it("hides itself on the pre-onboarding funnel routes", () => {
+        for (const path of ["/", "/onboarding", "/assessment"]) {
+            const {unmount} = renderAt(path);
+            expect(screen.queryByTestId("app-nav")).not.toBeInTheDocument();
+            unmount();
+        }
+    });
+
+    // EXP-037 (#850) reduced the primary nav to grouped-order entries; #856
+    // merged "My content" + "Discover" into one "Content" entry; #1129 re-added
+    // Session; #1494 dropped Contribute (the gap section moved into /content).
+    // The bar now carries Dashboard, Learning Path, Session, Content,
+    // Progress + Settings + Help. Curriculum/Statistics/Import/Anki/Discover/
+    // Contribute are reachable via redirects/tabs/actions.
+    it("renders the grouped-order primary entries on /dashboard", () => {
+        renderAt("/dashboard");
+        expect(screen.getByTestId("app-nav")).toBeInTheDocument();
+        // Present: the primary destinations + Settings + Help.
+        for (const id of [
+            "nav-dashboard",
+            "nav-learning-path",
+            "nav-session",
+            "nav-content",
+            "nav-progress",
+            "nav-settings",
+            "nav-help",
+        ]) {
+            expect(screen.getByTestId(id)).toBeInTheDocument();
+        }
+        // Removed from the bar (no longer rendered).
+        for (const id of [
+            "nav-curriculum",
+            "nav-statistics",
+            "nav-import",
+            "nav-anki",
+            "nav-discover",
+            "nav-contribute",
+        ]) {
+            expect(screen.queryByTestId(id)).not.toBeInTheDocument();
+        }
+    });
+
+    it("groups the primary entries (NavGroup sections present)", () => {
+        renderAt("/dashboard");
+        expect(screen.getByTestId("nav-group-learn")).toBeInTheDocument();
+        expect(screen.getByTestId("nav-group-content")).toBeInTheDocument();
+        expect(screen.getByTestId("nav-group-progress")).toBeInTheDocument();
+    });
+
+    it("highlights the active route via NavLink isActive", () => {
+        renderAt("/settings");
+        const active = screen.getByTestId("nav-settings");
+        const other = screen.getByTestId("nav-dashboard");
+        expect(active.className).toContain("is-active");
+        expect(other.className).not.toContain("is-active");
+    });
+
+    it("exposes a theme toggle button", () => {
+        renderAt("/dashboard");
+        expect(screen.getByTestId("nav-theme-toggle")).toBeInTheDocument();
+    });
+
+    // --- v0.6.0 / 9A: hamburger drawer ----------------------------------
+
+    it("renders the hamburger button with correct aria attributes", () => {
+        renderAt("/dashboard");
+        const burger = screen.getByTestId("nav-hamburger");
+        expect(burger).toBeInTheDocument();
+        // Closed initially.
+        expect(burger.getAttribute("aria-expanded")).toBe("false");
+        expect(burger.getAttribute("aria-controls")).toBe("app-nav-links");
+    });
+
+    it("toggles the nav-links drawer open/closed on hamburger click", () => {
+        renderAt("/dashboard");
+        const burger = screen.getByTestId("nav-hamburger");
+        const links = screen.getByTestId("nav-links");
+        // Closed initially.
+        expect(links.className).not.toContain("is-open");
+        // Open.
+        fireEvent.click(burger);
+        expect(links.className).toContain("is-open");
+        expect(burger.getAttribute("aria-expanded")).toBe("true");
+        // Close again.
+        fireEvent.click(burger);
+        expect(links.className).not.toContain("is-open");
+        expect(burger.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("app-nav class reflects menu-open state", () => {
+        renderAt("/dashboard");
+        const nav = screen.getByTestId("app-nav");
+        expect(nav.className).not.toContain("is-menu-open");
+        fireEvent.click(screen.getByTestId("nav-hamburger"));
+        expect(nav.className).toContain("is-menu-open");
+    });
+
+    // --- lesson-mode compact nav ---------------------------------------
+
+    it("does NOT mark the nav compact on non-lesson routes", () => {
+        renderAt("/dashboard");
+        const nav = screen.getByTestId("app-nav");
+        expect(nav.className).not.toContain("is-lesson-compact");
+        expect(nav.getAttribute("data-lesson-compact")).toBe("false");
+    });
+
+    it("marks the nav compact on lesson / review / adaptive routes", () => {
+        for (const path of [
+            "/lesson/astrapi69--adaptive-learner-content/es-a1/01.json",
+            "/review/es-a1",
+            "/adaptive-lesson/es-a1",
+        ]) {
+            const {unmount} = renderAt(path);
+            const nav = screen.getByTestId("app-nav");
+            expect(nav.className).toContain("is-lesson-compact");
+            expect(nav.getAttribute("data-lesson-compact")).toBe("true");
+            unmount();
+        }
+    });
+
+    it("keeps the brand link accessibly named in compact mode (#622)", () => {
+        // The brand WORD (`.nav-brand-name`) is `display:none` in the
+        // lesson-compact nav, leaving only the decorative aria-hidden logo.
+        // The link must still expose an accessible name (aria-label), or axe
+        // flags a `link-name` violation on /lesson.
+        const {container} = renderAt(
+            "/lesson/astrapi69--adaptive-learner-content/es-a1/01.json",
+        );
+        const brand = container.querySelector(".nav-brand");
+        expect(brand).not.toBeNull();
+        expect(brand?.getAttribute("aria-label")).toBe("Adaptive Learner");
+        // The link is reachable by its accessible name regardless of the
+        // visually-hidden text node.
+        expect(
+            screen.getByRole("link", {name: "Adaptive Learner"}),
+        ).toBeInTheDocument();
+    });
+
+    it("keeps the nav links in the DOM (behind the hamburger) in compact mode", () => {
+        // CSS hides them; the markup stays so keyboard users and the
+        // drawer toggle still reach every destination during a lesson.
+        renderAt("/lesson/astrapi69--adaptive-learner-content/es-a1/01.json");
+        expect(screen.getByTestId("nav-links")).toBeInTheDocument();
+        expect(screen.getByTestId("nav-dashboard")).toBeInTheDocument();
+        expect(screen.getByTestId("nav-settings")).toBeInTheDocument();
+        expect(screen.getByTestId("nav-hamburger")).toBeInTheDocument();
+    });
+
+    // Nav status dots (sync + online) were removed in #852: sync state
+    // lives in Settings > Data > Sync, offline state is the
+    // OfflineIndicator banner. The nav no longer renders either dot.
+
+    // --- Issue 3: Help in navigation menu -----------------------------
+
+    it("exposes a Help menu button that opens the drawer without route change", async () => {
+        // Mount with the full provider tree so useHelp() sees a
+        // real HelpProvider (the nav button calls openHelp which
+        // would otherwise no-op in the bare hook fallback).
+        const {HelpProvider} = await import("../../contexts/HelpContext");
+        const HelpDrawer = (await import("../help/HelpDrawer")).default;
+        render(
+            <MemoryRouter initialEntries={["/dashboard"]}>
+                <HelpProvider>
+                    <Navigation />
+                    <HelpDrawer />
+                </HelpProvider>
+            </MemoryRouter>,
+        );
+        const helpBtn = screen.getByTestId("nav-help");
+        expect(helpBtn).toBeInTheDocument();
+        // Before click: drawer not mounted.
+        expect(screen.queryByTestId("help-drawer")).not.toBeInTheDocument();
+        fireEvent.click(helpBtn);
+        // After click: drawer is mounted (no route change).
+        expect(screen.getByTestId("help-drawer")).toBeInTheDocument();
+    });
+
+    it("no longer renders the sync or online status dots (#852)", () => {
+        renderAt("/dashboard");
+        expect(
+            screen.queryByTestId("nav-online-indicator"),
+        ).not.toBeInTheDocument();
+        expect(
+            screen.queryByTestId("nav-sync-indicator"),
+        ).not.toBeInTheDocument();
+    });
+});
+
+// --- lesson header auto-hide on scroll --------------------------------
+
+describe("Navigation: lesson header auto-hide", () => {
+    // The nav observes the #root scroll container (html/body are
+    // overflow-locked; #root provides the scroll). Provide one + drive it.
+    let root: HTMLElement;
+
+    beforeEach(() => {
+        root = document.createElement("div");
+        root.id = "root";
+        document.body.appendChild(root);
+    });
+
+    afterEach(() => {
+        root.remove();
+    });
+
+    function scrollTo(y: number): void {
+        root.scrollTop = y;
+        act(() => {
+            root.dispatchEvent(new Event("scroll"));
+        });
+    }
+
+    const LESSON_PATH = "/lesson/astrapi69--content/es-a1/01.json";
+
+    it("hides the header on scroll-down during a lesson", () => {
+        renderAt(LESSON_PATH);
+        const nav = screen.getByTestId("app-nav");
+        expect(nav.getAttribute("data-nav-hidden")).toBe("false");
+        scrollTo(120);
+        expect(nav.getAttribute("data-nav-hidden")).toBe("true");
+        expect(nav.className).toContain("-translate-y-full");
+    });
+
+    it("reveals the header on scroll-up during a lesson", () => {
+        renderAt(LESSON_PATH);
+        const nav = screen.getByTestId("app-nav");
+        scrollTo(120); // down -> hidden
+        expect(nav.getAttribute("data-nav-hidden")).toBe("true");
+        scrollTo(40); // up -> visible
+        expect(nav.getAttribute("data-nav-hidden")).toBe("false");
+        expect(nav.className).not.toContain("-translate-y-full");
+    });
+
+    it("keeps the header visible at the top of a lesson", () => {
+        renderAt(LESSON_PATH);
+        const nav = screen.getByTestId("app-nav");
+        scrollTo(120); // down
+        scrollTo(0); // back to top
+        expect(nav.getAttribute("data-nav-hidden")).toBe("false");
+    });
+
+    it("also auto-hides on /error-replay (a lesson surface)", () => {
+        renderAt("/error-replay/astrapi69--content/es-a1/01.json");
+        const nav = screen.getByTestId("app-nav");
+        scrollTo(120);
+        expect(nav.getAttribute("data-nav-hidden")).toBe("true");
+    });
+
+    it("never hides the header outside a lesson, even on scroll-down", () => {
+        renderAt("/dashboard");
+        const nav = screen.getByTestId("app-nav");
+        scrollTo(200);
+        expect(nav.getAttribute("data-nav-hidden")).toBe("false");
+        expect(nav.className).not.toContain("-translate-y-full");
+    });
+
+    it("keeps the header visible while the menu drawer is open", () => {
+        renderAt(LESSON_PATH);
+        const nav = screen.getByTestId("app-nav");
+        fireEvent.click(screen.getByTestId("nav-hamburger")); // open drawer
+        scrollTo(200); // scrolling down, but the drawer is open
+        expect(nav.getAttribute("data-nav-hidden")).toBe("false");
+    });
+
+    it("applies a reduced-motion-safe slide transition", () => {
+        renderAt(LESSON_PATH);
+        const nav = screen.getByTestId("app-nav");
+        expect(nav.className).toContain("transition-transform");
+        expect(nav.className).toContain("motion-reduce:transition-none");
+    });
+});
+
+describe("Navigation: phone header keeps the menu button + logo (#3123)", () => {
+    // happy-dom runs no layout, so the flex contract is pinned on the
+    // classes that carry it: the hamburger and the logo never shrink, and
+    // the right-hand status cluster is the wrapping, shrinkable group
+    // (display:contents from xl up, #3355, so the desktop row is untouched).
+    it("marks the hamburger and the brand logo as non-shrinking flex items", () => {
+        renderAt("/dashboard");
+        expect(screen.getByTestId("nav-hamburger").className).toContain("shrink-0");
+        const logo = screen.getByTestId("app-nav").querySelector(".nav-brand img");
+        expect(logo).not.toBeNull();
+        expect(logo!.className).toContain("shrink-0");
+    });
+
+    it("groups the badges, avatar and theme toggle in a wrapping status cluster", () => {
+        renderAt("/dashboard");
+        const cluster = screen.getByTestId("nav-status");
+        for (const cls of ["flex", "flex-wrap", "min-w-0", "justify-end", "xl:contents"]) {
+            expect(cluster.className).toContain(cls);
+        }
+        // The theme toggle lives INSIDE the cluster and the cluster closes
+        // the bar (the XP badge and the avatar render nothing without a
+        // seeded learner state, so they are not asserted here - their
+        // placement is pinned by the e2e spec ``nav-header-fit``); the
+        // hamburger and the brand stay outside it.
+        const nav = screen.getByTestId("app-nav");
+        expect(cluster.contains(screen.getByTestId("nav-theme-toggle"))).toBe(true);
+        expect(nav.lastElementChild).toBe(cluster);
+        expect(cluster.contains(screen.getByTestId("nav-hamburger"))).toBe(false);
+        expect(cluster.contains(nav.querySelector(".nav-brand")!)).toBe(false);
+    });
+});
+
+describe("Navigation: desktop bar keeps the badges whole (#3339)", () => {
+    // At 1280 px with a due-reviews badge the single-row desktop bar ran
+    // out of room and flexbox shrank every shrinkable item: both badge
+    // icons became slivers and the XP badge wrapped onto four lines. The
+    // contract (layout itself is measured by the FeatureShot
+    // ``nav-badges/dashboard``): the status items never shrink, and the
+    // brand word is the one item that yields (it truncates from xl up, #3355).
+    it("keeps the theme toggle at full size and lets the brand word yield from xl up", () => {
+        renderAt("/dashboard");
+        expect(screen.getByTestId("nav-theme-toggle").className).toContain("shrink-0");
+        const brand = screen.getByTestId("app-nav").querySelector<HTMLElement>(".nav-brand")!;
+        // The link may shrink down to the logo, never below. Not logo + gap:
+        // where the word is display:none (lesson-compact, short landscape)
+        // a gap-sized floor widened the link and moved every item after it.
+        expect(brand.className).toContain("xl:min-w-7");
+        expect(brand.className).not.toContain("md:min-w-9");
+        expect(brand.className).toContain("xl:flex-initial");
+        expect(brand.className).not.toContain("md:flex-none");
+        const brandName = brand.querySelector<HTMLElement>(".nav-brand-name")!;
+        expect(brandName.className).toContain("xl:truncate");
+    });
+});

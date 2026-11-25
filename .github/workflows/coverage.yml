@@ -1,0 +1,172 @@
+name: Coverage
+
+on:
+  # Night-shift only (#575): coverage is a report, not a merge gate, so it no
+  # longer runs on every push/PR. It runs daily and on demand; the artifacts
+  # are pulled with `gh run download` when needed.
+  schedule:
+    # Daily at 03:00 UTC.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# Defensive opt-in: any JavaScript-runtime action still declaring
+# Node 20 (third-party or stragglers) is coerced to Node 24. After
+# the 2026-05-14 standard-action bumps (checkout v5, setup-python v6,
+# setup-node v5, upload-artifact v6, cache v5, configure-pages v6,
+# upload-pages-artifact v5, deploy-pages v5, softprops/action-gh-release v3)
+# every action we use natively runs on Node 24, so this is now a
+# safety net for future additions rather than an active fix.
+# Default Node 20 is removed September 16th 2026 per
+# https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  backend-coverage:
+    name: Backend Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Run backend coverage
+        working-directory: backend
+        # --cov-fail-under=88 (#225): a ratchet floor 5% below the current
+        # 93% so it can't fail now but blocks erosion. Raise it as coverage
+        # climbs; never lower it.
+        run: |
+          poetry run pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            --cov-fail-under=88
+
+      - name: Upload backend coverage artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-coverage
+          path: |
+            backend/htmlcov/
+            backend/coverage.xml
+          retention-days: 14
+
+  # Plugin coverage (#3447): one job per plugin directory, listed at run
+  # time so a new plugin is covered without editing this file. Each runs the
+  # plugin's own tests through the backend venv (the backend path-installs
+  # every plugin, the same env make test-plugins uses, #434) and uploads
+  # <plugin-dir>-coverage, the artifact name test-coverage-audits.md cites.
+  plugin-list:
+    name: List plugins
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.list.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: list
+        run: |
+          set -euo pipefail
+          plugins=$(find plugins -maxdepth 1 -type d -name 'adaptive-learner-plugin-*' -printf '%f\n' | sort | jq -R . | jq -cs .)
+          echo "::notice::plugins=$plugins"
+          test "$(echo "$plugins" | jq length)" -gt 0
+          echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+
+  plugin-coverage:
+    name: Plugin Coverage (${{ matrix.plugin }})
+    needs: plugin-list
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.plugin-list.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache Poetry virtualenv (backend)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-backend-${{ runner.os }}-py3.12-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            poetry-backend-${{ runner.os }}-py3.12-
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install backend dependencies (path-installs every plugin)
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Run plugin coverage
+        working-directory: plugins/${{ matrix.plugin }}
+        run: |
+          set -euo pipefail
+          python_bin="$(cd ../../backend && poetry env info -p)/bin/python"
+          package=$(find . -maxdepth 1 -type d -name 'adaptive_learner_*' -printf '%f\n' | head -1)
+          test -n "$package"
+          "$python_bin" -m pytest tests/ -q \
+            --cov="$package" \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term
+
+      - name: Upload plugin coverage artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.plugin }}-coverage
+          path: |
+            plugins/${{ matrix.plugin }}/htmlcov/
+            plugins/${{ matrix.plugin }}/coverage.xml
+          retention-days: 14
+
+  frontend-coverage:
+    name: Frontend Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Run frontend coverage
+        working-directory: frontend
+        # --coverage.thresholds.lines=81 (#225): a ratchet floor 5% below
+        # the current ~86% lines. Raise as coverage climbs; never lower.
+        run: bun run test:coverage -- --coverage.thresholds.lines=81
+
+      - name: Upload frontend coverage artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          retention-days: 14

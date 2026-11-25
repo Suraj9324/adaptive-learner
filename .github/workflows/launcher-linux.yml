@@ -1,0 +1,161 @@
+name: Launcher (Linux)
+
+# Builds the Linux launcher binary and publishes a SHA256 checksum next
+# to it. Runs on:
+#   - push to develop/main when launcher/ changes (smoke build, uploads
+#     an artifact to the workflow run for download + manual verification)
+#   - pull_request touching launcher/ (same smoke build)
+#   - workflow_dispatch (on-demand smoke build)
+# Release assets are NOT attached here: the release manager takes the
+# artifacts of the GREEN main-push build of the tag commit and attaches
+# them via `gh release upload` (release-workflow.md Step 8), never a
+# rebuild (bit-drift between identical-content builds).
+#
+# Parallels launcher-windows.yml. The launcher source code is platform-
+# agnostic (platformdirs, subprocess, tkinter) so both jobs run the
+# same pyproject.toml, tests, and PyInstaller spec file.
+
+# green-gate-exclusion: release-racing - this build runs on the tag
+# commit's main push while the publish gate asks "is the commit green";
+# the green-gate script derives this workflow's job names into its
+# exclusion set via this marker line (#2482).
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-linux.yml"
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-linux.yml"
+  # NO release: trigger (v2.8.0 decision, Option 1): created never fires
+  # for drafts, published would re-run the chain on draft-publish and
+  # re-build a NON-bit-identical artifact (~48k bytes drift between
+  # identical-content builds) - verified one thing, shipped another.
+  # The chain runs ON DEMAND via workflow_dispatch; the release
+  # checklist carries the trigger. Foot-gun this documents: creating
+  # a release directly produces NO image and NO assets by itself.
+  workflow_dispatch:
+
+permissions:
+  # Read-only is sufficient: the only step that wrote to releases
+  # (action-gh-release attach) was removed with the dead release-event
+  # gates (#2472); the smoke build only checks out and uploads a workflow
+  # artifact. Release assets are attached out-of-band by the RM.
+  contents: read
+
+# Defensive opt-in: any JavaScript-runtime action still declaring
+# Node 20 (third-party or stragglers) is coerced to Node 24. After
+# the 2026-05-14 standard-action bumps (checkout v5, setup-python v6,
+# setup-node v5, upload-artifact v6, cache v5, configure-pages v6,
+# upload-pages-artifact v5, deploy-pages v5, softprops/action-gh-release v3)
+# every action we use natively runs on Node 24, so this is now a
+# safety net for future additions rather than an active fix.
+# Default Node 20 is removed September 16th 2026 per
+# https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: Build launcher binary
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: launcher
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies
+        # tkinter is not bundled with the manylinux Python wheels used
+        # by actions/setup-python on Linux runners. Install the system
+        # tk package so PyInstaller can detect and bundle it.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install GObject system libraries (PyGObject in the tray extra)
+        run: sudo apt-get update && sudo apt-get install -y libgirepository1.0-dev libcairo2-dev pkg-config
+
+      # #2117: the backend job caches its Poetry virtualenv (ci.yml); this one
+      # never did, so every run rebuilds pycairo/pygobject from source over
+      # the network - the exposure the retry below papers over. Keyed on the
+      # lockfile, so a dependency change still gets a clean resolve.
+      - name: Cache Poetry virtualenv (launcher)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: poetry-launcher-linux-py3.12-${{ hashFiles('launcher/poetry.lock') }}
+          restore-keys: |
+            poetry-launcher-linux-py3.12-
+
+      # #2117: pycairo ships NO Linux wheel (17 wheels, all Windows, plus one
+      # sdist), so every run compiles it - and pygobject - from source,
+      # fetching build requirements into an isolated env. A truncated fetch
+      # anywhere in that chain surfaces as "BadZipFile / File is not a zip
+      # file" or "Cannot install build-system.requires". Seen three times in
+      # one day, twice on this job. Bounded retry, and each attempt is
+      # visible: a silent retry would hide a real, permanent breakage.
+      - name: Install launcher dependencies
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::poetry install (attempt $attempt/3)"
+            if poetry install --no-interaction --no-ansi; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::poetry install failed on attempt $attempt/3"
+            sleep $((attempt * 15))
+          done
+          echo "::error::poetry install failed three times - this is not the #2117 flake"
+          exit 1
+
+      - name: Run launcher unit tests
+        run: poetry run pytest tests/ -v
+
+      - name: Generate launcher icon from brand mark
+        run: poetry run python scripts/make_icon.py
+
+      - name: Build adaptive-learner-launcher binary
+        # The spec file is cross-platform aware (icon + version metadata
+        # are Windows-only and are skipped on Linux). Same spec as the
+        # Windows build, same entrypoint, same excludes.
+        run: poetry run pyinstaller adaptive-learner-launcher.spec --clean --noconfirm
+
+      # #2101: same gap as macOS/Windows - the artifact was never started.
+      # Linux is the one platform where the binary is the primary
+      # distribution path, so it gets the same proof, not less.
+      - name: Smoke-run the built binary (#2101)
+        run: |
+          set -e
+          ./dist/adaptive-learner-launcher --version
+          ./dist/adaptive-learner-launcher --verify-bundle
+          echo "RESULT: the binary starts and its bundle is complete"
+
+      - name: Compute SHA256 checksum
+        run: |
+          hash=$(sha256sum dist/adaptive-learner-launcher | awk '{print $1}')
+          echo "$hash  adaptive-learner-launcher" > dist/adaptive-learner-launcher.sha256
+          echo "SHA256: $hash"
+
+      - name: Upload smoke artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: adaptive-learner-launcher-linux
+          path: |
+            launcher/dist/adaptive-learner-launcher
+            launcher/dist/adaptive-learner-launcher.sha256
+          if-no-files-found: error
+          retention-days: 14

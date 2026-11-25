@@ -1,0 +1,132 @@
+/**
+ * NavReviewsBadge — a small header badge that appears next to the XP
+ * badge when the learner has spaced-repetition reviews due (#588).
+ *
+ * Reads the SRS review queue from whichever storage backing is active
+ * and shows the count of OVERDUE elements; it links to that set's
+ * review session. Renders nothing when nothing is due, so it never adds
+ * header clutter on a fresh install. Refreshes on mount, route change,
+ * tab focus, and after a lesson-complete celebration (reviews change as
+ * elements are answered).
+ */
+
+import {RefreshCw} from "lucide-react";
+import {useEffect, useState} from "react";
+import {NavLink, useLocation} from "react-router";
+
+import {useI18n} from "../../hooks/ui/useI18n";
+import {
+    buildContentAvailability,
+    filterAvailableSetId,
+} from "../../lib/content/browse/lifecycle/content-availability";
+import {readLearnerState} from "../../lib/learning/learnerState";
+import {dedupeReviewQueueByElement} from "../../lib/review/review-lesson";
+import {subscribeCelebration} from "../../lib/praise/celebration-bus";
+import {loadReviewQueue} from "../../lib/review/review-queue";
+import {REVIEWS_CHANGED_EVENT} from "../../lib/review/reviewsChanged";
+import {getStorage} from "../../storage";
+import {splitAroundCount} from "./split-around-count";
+import type {CelebrationType} from "../../lib/praise/celebration-bus";
+
+const REVIEW_AFFECTING: ReadonlySet<CelebrationType> = new Set<CelebrationType>(
+    ["lesson_complete"],
+);
+
+interface DueState {
+    overdue: number;
+    firstSetId: string | null;
+}
+
+export default function NavReviewsBadge() {
+    const {t} = useI18n();
+    const {pathname} = useLocation();
+    const [state, setState] = useState<DueState | null>(null);
+
+    useEffect(() => {
+        const userId = readLearnerState().userId;
+        if (!userId) {
+            setState(null);
+            return;
+        }
+        let cancelled = false;
+        async function refresh() {
+            try {
+                const [queue, setsRes] = await Promise.all([
+                    loadReviewQueue(userId!),
+                    getStorage().contentLoader.listSets(),
+                ]);
+                if (cancelled) return;
+                // #1445 Part A — never badge a review whose set is no longer
+                // loadable (its source repo was removed); the SRS rows stay in
+                // Dexie but must not lead into a dead review.
+                const availability = buildContentAvailability(setsRes.sets);
+                const loadable = filterAvailableSetId(queue, availability);
+                // #664 — dedup by element_key so the badge counts UNIQUE due
+                // elements, consistent with the session. Without this, the
+                // per-direction EXP-018 rows (receptive + productive of one
+                // card = 2 rows, same element_key) double-count and inflate
+                // the badge far past what a session can ever present.
+                const overdueItems = dedupeReviewQueueByElement(
+                    loadable.filter((q) => q.overdue),
+                );
+                setState({
+                    overdue: overdueItems.length,
+                    firstSetId: overdueItems[0]?.set_id ?? null,
+                });
+            } catch {
+                // Supplementary chrome — never surface a read failure.
+            }
+        }
+        void refresh();
+        const onFocus = () => void refresh();
+        window.addEventListener("focus", onFocus);
+        // #629 BUG 3c — a review session moved an element's next-review
+        // time; recompute the due count live (the user is still on the
+        // review page, so the route-change refresh hasn't fired yet).
+        const onReviewsChanged = () => void refresh();
+        window.addEventListener(REVIEWS_CHANGED_EVENT, onReviewsChanged);
+        const unsubscribe = subscribeCelebration((event) => {
+            if (REVIEW_AFFECTING.has(event.type)) void refresh();
+        });
+        return () => {
+            cancelled = true;
+            window.removeEventListener("focus", onFocus);
+            window.removeEventListener(REVIEWS_CHANGED_EVENT, onReviewsChanged);
+            unsubscribe();
+        };
+    }, [pathname]);
+
+    if (!state || state.overdue === 0) return null;
+
+    const href = state.firstSetId
+        ? `/review/${encodeURIComponent(state.firstSetId)}`
+        : "/dashboard";
+    const template = t("srs.due_badge", "{n} due");
+    const label = template.replace("{n}", String(state.overdue));
+    // #3123 - on phones the badge shows only the count (the word around
+    // the number is hidden, the icon carries the meaning); the full label
+    // stays in the accessible name and the tooltip. Split on the
+    // placeholder so every catalog's word order works. #3339 - the same
+    // holds below 2xl: with the word, the single-row 1280px desktop bar
+    // ran out of room. `shrink-0` keeps a crowded bar from squeezing the
+    // badge (the icon became a sliver).
+    const [wordBefore, wordAfter] = splitAroundCount(template);
+    return (
+        <NavLink
+            to={href}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-warning/30 bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
+            data-testid="nav-reviews-badge"
+            title={t("srs.due_badge_tooltip", "Reviews due")}
+            // WCAG 2.5.3 (#2539): compose the name from the VISIBLE label
+            // plus the action. The previous parallel string interposed a
+            // word ("2 Wiederholungen fällig" vs a visible "2 fällig"), so
+            // speech input could not address the badge by what it shows.
+            aria-label={`${label}, ${t("srs.due_badge_action", "view reviews")}`}
+        >
+            <RefreshCw size={12} aria-hidden="true" />
+            <span className="max-2xl:hidden">{wordBefore}</span>
+            <span data-testid="nav-reviews-badge-count">{state.overdue}</span>
+            <span className="max-2xl:hidden">{wordAfter}</span>
+        </NavLink>
+    );
+}

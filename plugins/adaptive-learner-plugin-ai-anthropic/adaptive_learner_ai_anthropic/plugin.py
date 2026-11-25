@@ -1,0 +1,105 @@
+"""AiAnthropicPlugin - PluginForge entry point.
+
+Owns the ``ai_complete`` hook for any model starting with
+``claude-``. Returns ``None`` for any other model so pluggy falls
+through to the next AI provider plugin (firstresult dispatch).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pluggy
+from pluginforge import BasePlugin
+
+from . import CLAUDE_MODEL_PREFIX
+from .client import complete as _complete
+from .client import stream as _stream
+
+hookimpl = pluggy.HookimplMarker("adaptive_learner.plugins")
+
+
+class AiAnthropicPlugin(BasePlugin):
+    name = "ai-anthropic"
+    version = "0.1.0"
+    target_application = "adaptive_learner"
+    description = "Anthropic Claude provider for the ai_complete hook."
+    author = "Asterios Raptis"
+
+    @hookimpl
+    def ai_complete(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        api_key: str,
+        max_tokens: int | None = None,
+    ) -> str | None:
+        if not isinstance(model, str) or not model.startswith(CLAUDE_MODEL_PREFIX):
+            # Not for us. firstresult=True semantics: None tells
+            # pluggy to try the next plugin (a future ai-openai
+            # or ai-gemini).
+            return None
+        if not isinstance(api_key, str) or not api_key:
+            # Wrong provider routed here, or settings UI handed us
+            # an empty string. Defer to the global error handler by
+            # raising a typed exception.
+            from app.exceptions import ValidationError
+
+            raise ValidationError("ai-anthropic: api_key must be a non-empty string.")
+        # v0.5.0: optional caller-supplied cap. The 8B dual-prompt
+        # uses 256 for the evaluator call. ``None`` (the default)
+        # leaves the provider's own default in place.
+        client_kwargs: dict[str, Any] = {}
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            client_kwargs["max_tokens"] = max_tokens
+        try:
+            return _complete(messages, model, api_key, **client_kwargs)
+        except Exception as exc:
+            # Wrap any SDK exception (auth, network, rate-limit, ...)
+            # into the typed external-service error so the FastAPI
+            # response carries a stable shape. Lazy import to keep
+            # the plugin class importable from its own standalone
+            # tests dir (app.* isn't on sys.path there).
+            from app.exceptions import ExternalServiceError
+
+            raise ExternalServiceError("anthropic", str(exc)) from exc
+
+    @hookimpl
+    def ai_complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        api_key: str,
+        max_tokens: int | None = None,
+    ):
+        """v1.6.0 / Phase 19 - streaming variant of :meth:`ai_complete`.
+
+        Returns an async generator yielding text deltas as
+        Anthropic streams them. Returns ``None`` when the requested
+        model isn't ours so pluggy moves on to the next provider
+        plugin (firstresult dispatch).
+        """
+        if not isinstance(model, str) or not model.startswith(CLAUDE_MODEL_PREFIX):
+            return None
+        if not isinstance(api_key, str) or not api_key:
+            from app.exceptions import ValidationError
+
+            raise ValidationError("ai-anthropic: api_key must be a non-empty string.")
+        kwargs: dict[str, Any] = {}
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            kwargs["max_tokens"] = max_tokens
+
+        async def _generator():
+            # Wrap the underlying SDK errors so the SSE handler
+            # sees a typed exception identical to the non-stream
+            # path. The wrapper is per-stream rather than per-yield
+            # so the first failed delta is reported once.
+            try:
+                async for chunk in _stream(messages, model, api_key, **kwargs):
+                    yield chunk
+            except Exception as exc:
+                from app.exceptions import ExternalServiceError
+
+                raise ExternalServiceError("anthropic", str(exc)) from exc
+
+        return _generator()

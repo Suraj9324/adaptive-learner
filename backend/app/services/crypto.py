@@ -1,0 +1,275 @@
+"""Symmetric encryption for stored API keys (Phase 1C).
+
+Wraps :class:`cryptography.fernet.Fernet` so the settings router /
+service have a single typed entry point and tests get a clean
+``reset_fernet_cache`` hook for swapping the in-process key.
+
+Key resolution:
+
+- The machine-local ``secret.key`` file (``~/.config/adaptive_learner/
+  secret.key``, see :func:`secret_key_path`) is the source of truth.
+  Once it exists it is read verbatim and the env var is intentionally
+  ignored, so a changed ``ADAPTIVE_LEARNER_SECRET_KEY`` can never orphan
+  ciphertext the file's key still decrypts. See
+  :func:`_read_or_create_key_file`.
+- On FIRST use, when no file exists yet, the key is SEEDED from
+  ``ADAPTIVE_LEARNER_SECRET_KEY`` if that env var is set, otherwise a
+  fresh key is GENERATED; either way it is persisted to ``secret.key``.
+  A fresh install therefore comes up with a working key and no env var
+  set — this is intended, not an error (see "Error surface" below).
+- That first-boot seed value can come from three feeder paths that
+  populate the env var (any one works; first hit wins):
+
+  1. **Local dev (recommended)** — ``make dev-secret`` generates a
+     Fernet key and persists it to ``.adaptive-learner/dev-secret.env``
+     (gitignored). ``make dev`` / ``make dev-bg`` source the file
+     before launching uvicorn.
+  2. **Inline export** — ``export ADAPTIVE_LEARNER_SECRET_KEY=…``
+     in whatever shell you launch uvicorn from.
+  3. **Production** — set ``secret_key: <key>`` at the top of
+     ``~/.config/adaptive_learner/secrets.yaml``. The layered-config
+     loader in :mod:`app.main` (via ``_hydrate_env_from_config``)
+     populates ``ADAPTIVE_LEARNER_SECRET_KEY`` from this value at
+     startup when the env is unset.
+
+- Tests bypass all of this by writing the env var (or the key file)
+  directly in ``conftest.py`` before any ``app.*`` import.
+- Generate a key with::
+
+      python3 -c "from cryptography.fernet import Fernet; \
+                  print(Fernet.generate_key().decode())"
+
+Error surface (typed):
+
+- A **missing key is NOT an error**: with no ``secret.key`` file and no
+  ``ADAPTIVE_LEARNER_SECRET_KEY`` set, a fresh key is generated and
+  persisted (see :func:`_read_or_create_key_file`) — nothing is raised.
+- :class:`CryptoConfigurationError` — raised only when a key is present
+  but unusable, or cannot be established at all:
+
+    * an existing ``secret.key`` file cannot be READ (OSError), or
+    * a new ``secret.key`` file cannot be WRITTEN and no
+      ``ADAPTIVE_LEARNER_SECRET_KEY`` value exists to fall back on
+      in-memory, or
+    * the resolved key value is not a valid Fernet key.
+
+  Raised at the first call to :func:`get_fernet`, and eagerly from
+  :func:`validate_at_startup`, which the FastAPI lifespan invokes once
+  per process so a real misconfiguration surfaces at boot rather than
+  from a random ``encrypt_api_key`` callsite hours later.
+- :class:`CryptoDecryptionError` — the ciphertext could not be
+  decrypted (likely the key was rotated / lost, or the row is
+  corrupted). Callers in :mod:`app.services.secrets_service` catch this
+  at read time, warn that the stored key must be re-entered, and fall
+  through rather than crash.
+- :class:`ValidationError` — input is empty / not a string. Re-uses
+  the global validation error class so the API surface stays
+  consistent.
+
+The Fernet instance is cached via ``lru_cache`` for the lifetime of
+the process; :func:`reset_fernet_cache` clears it so tests can
+rotate the key under monkeypatch.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from functools import lru_cache
+from pathlib import Path
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from app.exceptions import AdaptiveLearnerError, ValidationError
+from app.paths import get_config_dir
+
+logger = logging.getLogger(__name__)
+
+ENV_VAR = "ADAPTIVE_LEARNER_SECRET_KEY"
+
+_SECRET_KEY_FILENAME = "secret.key"
+
+
+class CryptoConfigurationError(AdaptiveLearnerError):
+    """The encryption key is present but unusable, or cannot be
+    established at all: an existing ``secret.key`` file that cannot be
+    read, a new one that cannot be written with no env-var fallback, or
+    a value that is not a valid Fernet key. A merely ABSENT key is NOT
+    this error — it is generated (see :func:`_read_or_create_key_file`).
+    Raised eagerly at startup so the deployer sees a real failure before
+    the first settings request lands."""
+
+    status_code = 500
+
+
+class CryptoDecryptionError(AdaptiveLearnerError):
+    """Stored ciphertext could not be decrypted. Indicates either
+    a key rotation without re-encrypting existing rows, or row-
+    level corruption."""
+
+    status_code = 500
+
+
+def secret_key_path() -> Path:
+    """Canonical ``~/.config/adaptive_learner/secret.key`` path.
+
+    Resolved fresh via :func:`app.paths.get_config_dir` so test
+    overrides via ``ADAPTIVE_LEARNER_CONFIG_DIR`` take effect.
+    """
+    return get_config_dir() / _SECRET_KEY_FILENAME
+
+
+def _read_or_create_key_file() -> str:
+    """Return the machine-local Fernet key, creating ``secret.key`` on
+    first use.
+
+    The FILE is the source of truth, so encrypted data survives
+    restarts independent of any env var — the real fix for "API keys
+    lost on restart". Resolution:
+
+    1. The file already exists -> read it. The env var is intentionally
+       ignored here, so a changed ``ADAPTIVE_LEARNER_SECRET_KEY`` can't
+       orphan ciphertext that the file's key can still decrypt.
+    2. No file yet -> SEED it from ``ADAPTIVE_LEARNER_SECRET_KEY`` when
+       that env var is set (so data already encrypted under the env key
+       stays decryptable across the upgrade), otherwise GENERATE a fresh
+       key. Either way it is PERSISTED to ``secret.key`` (0o600 in a
+       0o700 dir) so it is stable from now on.
+
+    Generate-once: an existing file is never overwritten; deleting it
+    loses the keys it protected (documented, acceptable).
+
+    If the file cannot be written but the env var IS set, the env key
+    is used in-memory with a WARNING (read-only FS / locked-down
+    container) instead of crashing — the operator then owns keeping the
+    env value stable.
+    """
+    path = secret_key_path()
+    if path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise CryptoConfigurationError(
+                f"Could not read the secret key file at {path}: {exc}."
+            ) from exc
+        if content:
+            return content
+        # An empty file is treated as absent and re-created below.
+
+    env_value = os.environ.get(ENV_VAR, "").strip()
+    key = env_value or Fernet.generate_key().decode("utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:  # noqa: S110 — perms are best-effort on exotic FS
+            pass
+        path.write_text(key, encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as exc:
+        if env_value:
+            logger.warning(
+                "Could not persist the secret key to %s: %s. Falling back "
+                "to %s in-memory; it MUST stay stable across restarts or "
+                "stored keys become unreadable.",
+                path,
+                exc,
+                ENV_VAR,
+            )
+            return env_value
+        raise CryptoConfigurationError(
+            f"Could not create the secret key file at {path}: {exc}."
+        ) from exc
+    logger.info(
+        "%s the machine-local encryption key at %s",
+        "Persisted env-provided" if env_value else "Generated",
+        path,
+    )
+    return key
+
+
+@lru_cache(maxsize=1)
+def get_fernet() -> Fernet:
+    """Return the process-wide Fernet instance.
+
+    First call resolves the key from the persistent ``secret.key``
+    file (created on first use — seeded from ``ADAPTIVE_LEARNER_SECRET_KEY``
+    if set, else generated) and validates it; subsequent calls are
+    cache hits. Raises :class:`CryptoConfigurationError` on a malformed
+    key value or an unwritable key file (when no env fallback exists).
+    """
+    key = _read_or_create_key_file()
+    try:
+        return Fernet(key.encode("utf-8"))
+    except (ValueError, TypeError) as exc:
+        raise CryptoConfigurationError(
+            f"The encryption key is not a valid Fernet key: {exc}. "
+            f"If it came from {ENV_VAR}, re-generate it; if from the "
+            f"secret.key file at {secret_key_path()}, the file is "
+            f"corrupt - delete it to regenerate (existing encrypted "
+            f"keys will be lost and must be re-entered)."
+        ) from exc
+
+
+def reset_fernet_cache() -> None:
+    """Clear the cached Fernet instance.
+
+    Test-only helper: lets a fixture monkeypatch
+    ``ADAPTIVE_LEARNER_SECRET_KEY`` and force the next
+    :func:`get_fernet` call to re-read it.
+    """
+    get_fernet.cache_clear()
+
+
+def validate_at_startup() -> None:
+    """Establish the secret key eagerly, before any request.
+
+    Called once from the FastAPI lifespan. Creating the key file when
+    absent is part of this (a fresh install comes up with a working
+    key), so a missing key is NOT surfaced as an error. Raises
+    :class:`CryptoConfigurationError` only for a genuinely unusable key
+    — an unreadable / unwritable file, or a malformed value — so the
+    deployer sees that failure at boot rather than from a random
+    settings-PATCH handler hours later.
+    """
+    get_fernet()
+
+
+def encrypt_api_key(plaintext: str) -> str:
+    """Encrypt an API key plaintext into a base64 ciphertext string.
+
+    Two encryptions of the same plaintext yield different
+    ciphertexts (Fernet embeds a random IV). The result is safe to
+    store in a ``Text`` column and survives JSON round-trips.
+    """
+    if not isinstance(plaintext, str) or not plaintext:
+        raise ValidationError("API key must be a non-empty string.")
+    fernet = get_fernet()
+    return fernet.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_api_key(ciphertext: str) -> str:
+    """Decrypt a ciphertext back to the original plaintext."""
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise ValidationError("Ciphertext must be a non-empty string.")
+    fernet = get_fernet()
+    try:
+        return fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise CryptoDecryptionError(
+            "Could not decrypt API key. The encryption key may have "
+            "been rotated, or the stored ciphertext is corrupted."
+        ) from exc
+
+
+__all__ = [
+    "ENV_VAR",
+    "CryptoConfigurationError",
+    "CryptoDecryptionError",
+    "decrypt_api_key",
+    "encrypt_api_key",
+    "get_fernet",
+    "reset_fernet_cache",
+    "secret_key_path",
+    "validate_at_startup",
+]

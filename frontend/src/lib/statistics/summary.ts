@@ -1,0 +1,236 @@
+/**
+ * statistics/summary — pure aggregation layer behind the Learning
+ * Statistics page (``/statistics``).
+ *
+ * Everything here is synchronous + side-effect-free so it unit-tests
+ * without a DOM: the page does the storage reads (lesson progress,
+ * element errors, the personal-path sets) and feeds the rows in. The
+ * shared presentational components (``ActivityHeatmap`` /
+ * ``WeakAreasList`` / ``ProgressByPair``) render the view models these
+ * functions produce.
+ *
+ * Storage-mode-agnostic by construction: the inputs are the same
+ * domain rows in both API and Dexie mode.
+ */
+
+import type {ElementError, LessonProgress} from "../../storage/types";
+import type {PersonalPathSet} from "../learning-path/personal-path";
+
+/** Headline counters for the overview cards. */
+export interface OverviewStats {
+    /** Total tracked learning time across all lessons, in seconds. */
+    totalTimeSeconds: number;
+    /** Lessons with ``status === "completed"``. */
+    completedLessons: number;
+    /** Lessons the learner has scored at least one answer on. */
+    attemptedLessons: number;
+    /** Mean accuracy over attempted lessons, 0-100 (rounded), or
+     *  ``null`` when nothing has been scored yet. */
+    averageAccuracy: number | null;
+}
+
+/**
+ * Fold the learner's lesson-progress rows into the four headline
+ * counters. Accuracy is the pooled ``correct / total`` over every row
+ * that scored at least one answer (so a 9/10 and a 1/10 weigh by
+ * volume, not equally).
+ */
+export function computeOverview(rows: readonly LessonProgress[]): OverviewStats {
+    let totalTimeSeconds = 0;
+    let completedLessons = 0;
+    let attemptedLessons = 0;
+    let correct = 0;
+    let total = 0;
+    for (const row of rows) {
+        totalTimeSeconds += Math.max(0, row.time_spent_seconds ?? 0);
+        if (row.status === "completed") completedLessons += 1;
+        if ((row.score_total ?? 0) > 0) {
+            attemptedLessons += 1;
+            correct += row.score_correct ?? 0;
+            total += row.score_total ?? 0;
+        }
+    }
+    return {
+        totalTimeSeconds,
+        completedLessons,
+        attemptedLessons,
+        averageAccuracy: total > 0 ? Math.round((correct / total) * 100) : null,
+    };
+}
+
+/** One day of the activity heatmap. */
+export interface ActivityDay {
+    /** ``YYYY-MM-DD`` (UTC). */
+    date: string;
+    /** Lessons completed on that day. */
+    count: number;
+}
+
+function utcDateKey(d: Date): string {
+    return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Build a continuous ``days``-long activity series ending on
+ * ``today`` (inclusive), counting lessons COMPLETED per UTC day from
+ * the ``completed_at`` timestamp. Every day in the window is present
+ * (count 0 when nothing happened) so the heatmap grid is dense.
+ */
+export function buildLessonActivity(
+    rows: readonly LessonProgress[],
+    days: number,
+    today: Date = new Date(),
+): ActivityDay[] {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+        if (row.status !== "completed") continue;
+        const stamp = row.completed_at ?? row.updated_at;
+        if (!stamp) continue;
+        const parsed = new Date(stamp);
+        if (Number.isNaN(parsed.getTime())) continue;
+        const key = utcDateKey(parsed);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const series: ActivityDay[] = [];
+    const end = new Date(
+        Date.UTC(
+            today.getUTCFullYear(),
+            today.getUTCMonth(),
+            today.getUTCDate(),
+        ),
+    );
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(end);
+        d.setUTCDate(end.getUTCDate() - i);
+        const key = utcDateKey(d);
+        series.push({date: key, count: counts.get(key) ?? 0});
+    }
+    return series;
+}
+
+/** A single weak-area row for the {@link WeakArea} list. */
+export interface WeakArea {
+    elementKey: string;
+    setId: string;
+    /** The learner's most recent wrong answer for this element. */
+    lastAnswer: string;
+    correctAnswer: string;
+    errorCount: number;
+    mastered: boolean;
+}
+
+/**
+ * The top ``limit`` weakest elements: still-unmastered elements first,
+ * then by error count (descending), tie-broken by most-recent attempt.
+ * Elements that never produced an error are dropped.
+ */
+export function topWeakAreas(
+    errors: readonly ElementError[],
+    limit = 10,
+): WeakArea[] {
+    return errors
+        .filter((e) => (e.error_count ?? 0) > 0)
+        .slice()
+        .sort((a, b) => {
+            if (a.mastered !== b.mastered) return a.mastered ? 1 : -1;
+            if (b.error_count !== a.error_count) {
+                return b.error_count - a.error_count;
+            }
+            return (b.last_attempt_at ?? "").localeCompare(
+                a.last_attempt_at ?? "",
+            );
+        })
+        .slice(0, limit)
+        .map((e) => ({
+            elementKey: e.element_key,
+            setId: e.set_id,
+            lastAnswer: e.user_answer ?? "",
+            correctAnswer: e.correct_answer ?? "",
+            errorCount: e.error_count,
+            mastered: e.mastered,
+        }));
+}
+
+/** CEFR ladder used to order the per-level breakdown of a pair. */
+const CEFR_LADDER = ["a1", "a2", "b1", "b2", "c1", "c2"];
+
+/** Per-level completion within a language pair. */
+export interface PairLevel {
+    /** Original (display) level string, e.g. ``"A1"``. */
+    level: string;
+    completed: number;
+    total: number;
+    /** 0-100, rounded. */
+    percent: number;
+}
+
+/** Aggregate completion for one source→target language pair. */
+export interface PairProgress {
+    source: string;
+    target: string;
+    completed: number;
+    total: number;
+    /** 0-100, rounded over all the pair's lessons. */
+    percent: number;
+    levels: PairLevel[];
+}
+
+function levelRank(level: string): number {
+    const idx = CEFR_LADDER.indexOf(level.toLowerCase());
+    return idx < 0 ? CEFR_LADDER.length : idx;
+}
+
+function percentOf(completed: number, total: number): number {
+    return total > 0 ? Math.round((completed / total) * 100) : 0;
+}
+
+/**
+ * Group the personal-path sets into source→target language pairs, each
+ * broken down by CEFR level. Language domains where source === target
+ * (knowledge sets) are still grouped honestly by their declared pair.
+ * Pairs are ordered by target then source; levels follow the CEFR
+ * ladder (unknown levels sink to the end).
+ */
+export function progressByPair(
+    sets: readonly PersonalPathSet[],
+): PairProgress[] {
+    const pairs = new Map<string, PairProgress>();
+    for (const set of sets) {
+        const key = `${set.sourceLanguage}\u0000${set.targetLanguage}`;
+        let pair = pairs.get(key);
+        if (!pair) {
+            pair = {
+                source: set.sourceLanguage,
+                target: set.targetLanguage,
+                completed: 0,
+                total: 0,
+                percent: 0,
+                levels: [],
+            };
+            pairs.set(key, pair);
+        }
+        pair.completed += set.completedCount;
+        pair.total += set.totalCount;
+        let level = pair.levels.find((l) => l.level === set.level);
+        if (!level) {
+            level = {level: set.level, completed: 0, total: 0, percent: 0};
+            pair.levels.push(level);
+        }
+        level.completed += set.completedCount;
+        level.total += set.totalCount;
+    }
+    const result = [...pairs.values()];
+    for (const pair of result) {
+        pair.percent = percentOf(pair.completed, pair.total);
+        for (const level of pair.levels) {
+            level.percent = percentOf(level.completed, level.total);
+        }
+        pair.levels.sort((a, b) => levelRank(a.level) - levelRank(b.level));
+    }
+    result.sort(
+        (a, b) =>
+            a.target.localeCompare(b.target) ||
+            a.source.localeCompare(b.source),
+    );
+    return result;
+}

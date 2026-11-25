@@ -1,0 +1,82 @@
+/**
+ * Lesson Enter-key shortcut (#103, shared by #154).
+ *
+ * Installs a window keydown listener that turns Enter into the
+ * lesson's primary action: check an answered exercise (via
+ * ``exerciseRef.current.submit()``), then advance. The pure decision
+ * (`decideLessonEnterAction`) is shared with the Settings toggle, so
+ * this hook only owns the DOM wiring. Mounted once per runner through
+ * ``useLessonStepState`` (the lesson and, via the ``LessonRunner`` shell,
+ * every other run, EXP-052) and by the ``CorrectionBlock``, so Enter
+ * behaves identically everywhere.
+ *
+ * It steps aside for controls that own Enter (button / link /
+ * textarea / select / contenteditable / role=button) and for
+ * modifier or IME composition keystrokes. ``enterLockRef`` blocks a
+ * double Check between ``submit()`` and the ``checked`` flip; the
+ * caller resets it on each step change.
+ */
+
+import {useEffect, type RefObject} from "react";
+
+import type {ExerciseHandle} from "../../../components/exercises/shell/exercise-control";
+import {
+    decideLessonEnterAction,
+    type LessonEnterState,
+} from "../../../lib/lesson/prefs/lessonShortcutsPref";
+import {focusOwnsEnter, isPlainEnter} from "./enterKeyGuards";
+
+/** The decision state plus the advance callback the listener needs. */
+export type LessonEnterNav = LessonEnterState & {goNext: () => void};
+
+export interface UseLessonEnterKeyOptions {
+    /** Gated by the Settings > Learning "Enter shortcut" toggle. */
+    enabled: boolean;
+    /** The active exercise; ``submit()`` grades the current answer. */
+    exerciseRef: RefObject<ExerciseHandle | null>;
+    /** Current decision state, refreshed by the caller every render. */
+    enterStateRef: RefObject<LessonEnterNav | null>;
+    /** Double-Check guard, reset by the caller on each step change. */
+    enterLockRef: RefObject<boolean>;
+}
+
+export function useLessonEnterKey({
+    enabled,
+    exerciseRef,
+    enterStateRef,
+    enterLockRef,
+}: UseLessonEnterKeyOptions): void {
+    useEffect(() => {
+        if (!enabled) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (!isPlainEnter(e)) return;
+            if (focusOwnsEnter(document.activeElement as HTMLElement | null)) {
+                return;
+            }
+            const nav = enterStateRef.current;
+            if (!nav) return;
+            const action = decideLessonEnterAction(nav);
+            if (action === "none") return;
+            e.preventDefault();
+            if (action === "check") {
+                if (enterLockRef.current) return;
+                enterLockRef.current = true;
+                exerciseRef.current?.submit();
+            } else if (action === "submit-next") {
+                // #1007 Phase 2 — exam: submit + advance in one keystroke,
+                // so the per-question feedback never shows (revealed at the
+                // end). Mirrors the single-button footer.
+                if (enterLockRef.current) return;
+                enterLockRef.current = true;
+                exerciseRef.current?.submit();
+                nav.goNext();
+            } else {
+                nav.goNext();
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+        // The refs are stable; only the enabled flag re-subscribes.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [enabled]);
+}

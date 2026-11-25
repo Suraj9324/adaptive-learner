@@ -1,0 +1,885 @@
+/**
+ * Lesson-completion summary card (extracted from Lesson.tsx, #404).
+ *
+ * After the last step: the star rating + count-up score bar + time, the
+ * per-exercise breakdown (with token-diff on wrong text answers), result
+ * export (Markdown / file / JSON), the SRS correction round, the smart
+ * next-step suggestions, and the secondary next / repeat / exit actions.
+ * Fires the lesson-complete celebration once on mount.
+ *
+ * #1411 — every non-essential section is individually toggleable via the
+ * Settings → Learning "Lesson summary" sub-area (``summarySectionsPref``).
+ * #3124 - the default is the compact set: result and XP on, every other
+ * section off, so a fresh install's summary is one phone screen. The
+ * heading, the mark-as-complete action and the secondary next / repeat /
+ * exit actions are always rendered so the panel never becomes a dead end.
+ *
+ * #3031 — the "Detailed evaluation" toggle under the heading renders the
+ * complete evaluation on demand: the switched-off sections included, the
+ * answers overview expanded, the mistake explanations regardless of their
+ * own toggle and without the compact 5-entry cap. It is view state only,
+ * derived from this run's data on every render - no preference is written.
+ *
+ * #3124 — the detailed view opens with the set-style review of this lesson
+ * (``LessonReviewReport``: key figures, mistakes per exercise type, weak
+ * spots, the jump to practice), the same aggregator and renderer the
+ * set-completion page uses.
+ */
+
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import { CheckCircle2, ChevronRight, RotateCcw } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+
+import FormHint from "../../../shared/forms/FormHint";
+import {CorrectionBlock} from "../../exercises";
+import LessonAnswersDetail from "./LessonAnswersDetail";
+import LessonReviewReport from "./LessonReviewReport";
+import MentorNotesSummary from "./MentorNotesSummary";
+import SummaryFixMistakes from "./SummaryFixMistakes";
+import CorrectionSummaryPanel from "./CorrectionSummaryPanel";
+import SummaryTicketReward from "./SummaryTicketReward";
+import NextStepSuggestions from "./NextStepSuggestions";
+import RetryResultComparison from "./RetryResultComparison";
+import {
+  SummaryConfetti,
+  SummaryDetailedToggle,
+  SummaryExamPanel,
+  SummaryExplanations,
+  SummaryExportActions,
+  SummaryFavorite,
+  SummaryScoreboard,
+  SummaryShare,
+  SummaryStatsList,
+  SummaryTimedStats,
+  SummaryXp,
+} from "./LessonSummarySections";
+import { useCountUp } from "../../../hooks/ui/useCountUp";
+import { useFeedbackIntensity } from "../../../hooks/settings/useFeedbackIntensity";
+import { useSummarySections } from "../../../hooks/settings/useSummarySections";
+import {
+  isSummarySectionEnabled,
+  type SummarySectionKey,
+} from "../../../lib/learning/summarySectionsPref";
+import { useI18n } from "../../../hooks/ui/useI18n";
+import { useNextStepSuggestions } from "../../../hooks/learning/useNextStepSuggestions";
+import {
+  collectFailedExercises,
+  narrowReplayExercises,
+  openFailedExercises,
+} from "../../../lib/lesson/error-replay";
+import { useErrorReplayScope } from "../../../hooks/lesson/interaction/useErrorReplayScope";
+import { useLessonSessionErrors } from "../../../hooks/learning/useLessonSessionErrors";
+import { buildExerciseBreakdown } from "../../../lib/lesson/lesson-summary";
+import {
+  deriveSummaryStats,
+  detailedCorrectionMarks,
+  isSectionShown,
+  offersFixMistakes,
+} from "../../../lib/lesson/summary/summary-view";
+import { resolveSummaryScoreDisplay } from "../../../lib/lesson/correction-adjusted-score";
+import {
+  buildCorrectionSummary,
+  collectRunMistakes,
+  type CorrectionSummary,
+} from "../../../lib/lesson/correction/correction-summary";
+import type { LessonResultLabels } from "../../../lib/lesson/export/result-export";
+import {
+  buildLessonJsonExport,
+  buildLessonMarkdownExport,
+  downloadBlob,
+} from "../../../lib/lesson/export/result-download";
+import { isFirstAttempt } from "../../../lib/gamification/first-attempt";
+import { calculateLessonSessionXp } from "../../../lib/gamification/lesson-xp";
+import { configForMode } from "../../../lib/learning/lessonModeConfig";
+import {
+  readExamPassThreshold,
+  type LessonMode,
+} from "../../../lib/learning/lessonModePref";
+import {
+  resolveDetailedView,
+  resolveExamVerdict,
+  showsStarScale,
+  type SetEvaluation,
+} from "../../../lib/lesson/summary/author-evaluation";
+import type { TimedRunStats } from "../../../lib/learning/timedMode";
+import { useSummaryCelebration } from "../../../hooks/lesson/useSummaryCelebration";
+import { getStorage } from "../../../storage";
+import type { ContentLesson, LessonProgress } from "../../../storage/types";
+import { notify } from "../../../utils/notify";
+
+interface LessonSummaryProps {
+  lesson: ContentLesson;
+  progress: LessonProgress | null;
+  /** #1007 — the mode the run was played in. In ``exam`` mode the summary
+   *  adds a Passed / Not-passed line against the configured threshold.
+   *  Defaults to ``practice`` so existing callers are unaffected. */
+  lessonMode?: LessonMode;
+  /** #1009 — timed-mode per-question timing summary (answered-in-time,
+   *  average / fastest / slowest). Null outside timed mode. */
+  timedStats?: TimedRunStats | null;
+  /** Next lesson's filename within the set, or null when
+   *  there is no successor (last lesson OR list not yet
+   *  fetched). When null, the "Next lesson" button hides. */
+  nextLessonFilename: string | null;
+  /** Phase 52F / v1.35.0 — user + set + lesson identifiers
+   *  forwarded to the CorrectionBlock so it can load
+   *  ElementError rows and persist new ElementAttempt rows
+   *  against the same SRS keys. ``userId`` empty disables
+   *  the block (anonymous lesson runs have no SRS history). */
+  userId: string;
+  setId: string;
+  /** Set title, stored on the favorite entry when saved from the summary
+   *  (#1648 — carried through so removing the duplicate top-right star
+   *  doesn't drop the favorite's set-name metadata). */
+  setTitle: string;
+  /** #3736 - the set's evaluation block. In ``exam`` mode it replaces the
+   *  learner's own pass threshold; other modes ignore it. ``null`` (the
+   *  default) keeps today's summary. */
+  setEvaluation?: SetEvaluation | null;
+  /** Resolved set source path (slug with ``--`` → ``/``). */
+  source: string;
+  /** Raw route slug (``--``-encoded), for the next-lesson href. */
+  setSlug: string;
+  lessonFilename: string;
+  /** #2893 - game-mode combo bonus for this run (already capped by
+   *  the client). Included in the displayed XP so the summary matches
+   *  the credited award. Default 0 keeps existing callers unaffected. */
+  comboBonusXp?: number;
+  /** #2889 - the hearts system ran and no heart was lost, the
+   *  full-hearts ticket condition. Default false keeps existing
+   *  callers unaffected. */
+  fullHeartsRun?: boolean;
+  onNextLesson: () => void;
+  onRepeat: () => void;
+  onExit: () => void;
+}
+
+/**
+ * The correction section with the record of what was corrected under the
+ * round (#3575): once the round is finished in this view, or as soon as
+ * anything of this run is corrected. Without a correction section, or
+ * before either holds, the section is returned unchanged.
+ */
+function withCorrectionSummary(
+  section: ReactNode,
+  summary: CorrectionSummary,
+  roundDone: boolean,
+  t: (key: string, fallback?: string) => string,
+): ReactNode {
+  if (!section) return section;
+  if (!roundDone && summary.correctedCount === 0) return section;
+  return (
+    <>
+      {section}
+      <CorrectionSummaryPanel summary={summary} t={t} />
+    </>
+  );
+}
+
+export default function LessonSummary({
+  lesson,
+  progress,
+  lessonMode = "practice",
+  timedStats = null,
+  nextLessonFilename,
+  userId,
+  setId,
+  setTitle,
+  setEvaluation,
+  source,
+  setSlug,
+  lessonFilename,
+  comboBonusXp = 0,
+  fullHeartsRun = false,
+  onNextLesson,
+  onRepeat,
+  onExit,
+}: LessonSummaryProps) {
+  const { t, lang } = useI18n();
+  const intensity = useFeedbackIntensity();
+  const {
+    correct,
+    total,
+    minutes,
+    isCompleted,
+    scorePct,
+    attempts,
+    attemptHistory,
+    bestCorrect,
+    bestTotal,
+  } = deriveSummaryStats(progress);
+
+  // #1007 — exam-mode pass/fail against the configured threshold. An exam
+  // result is first-pass by design (you cannot pass an exam by correcting
+  // afterwards), so it stays on the immediate score — see the
+  // correction-adjustment display resolver below.
+  const examThreshold = useMemo(() => readExamPassThreshold(), []);
+  // #3736 - a set's evaluation block wins over the learner's threshold in
+  // exam mode, on the same first-pass score. Derived on render, like the
+  // learner verdict; nothing new is persisted.
+  const examVerdict = useMemo(
+    () =>
+      resolveExamVerdict({
+        lessonMode,
+        evaluation: setEvaluation,
+        correct,
+        total,
+        learnerThreshold: examThreshold,
+      }),
+    [lessonMode, setEvaluation, correct, total, examThreshold],
+  );
+  const { authorEvaluation, examPass } = examVerdict;
+
+  // #594 Hint Economy — how many steps this run was answered with a hint
+  // revealed. Read from the persisted step results.
+  const hintsUsed = useMemo(
+    () =>
+      Object.values(progress?.step_results ?? {}).filter((r) => r.hint_used)
+        .length,
+    [progress],
+  );
+  const breakdown = useMemo(
+    () => buildExerciseBreakdown(lesson, progress),
+    [lesson, progress],
+  );
+
+  // Phase 64 — Smart Next-Step Suggestions. Load this lesson's
+  // ElementError rows (lesson_id === filename) so the adaptive
+  // suggestion can count + classify the run's mistakes, then
+  // derive the full suggestion set. Reads are guarded so the
+  // summary still renders if storage is unreachable; the
+  // demoted action links below remain a working exit.
+  const sessionErrors = useLessonSessionErrors(userId, setId, lessonFilename);
+
+  // #2479 — fold the correction round (and error-replay / SRS advances) into
+  // the displayed result. The frozen ``score_correct`` counts only the first
+  // pass; the correction round lifts SRS ``ElementError`` rows but never that
+  // number, so the summary showed "1 von 3 Sternen / Guter Anfang" on the
+  // same screen that reported "Alle Fehler korrigiert". ``deriveCorrection‑
+  // AdjustedScore`` derives the final view WITHOUT mutating the frozen score,
+  // so the two-segment bar keeps "where it stalled" visible. Exam mode is
+  // exempt: an exam result is first-pass by design (SUMMARY-CORRECTION §Part3).
+  // #2479 — resolve the displayed score view in one tested place: the
+  // correction-adjusted breakdown (for the two-segment bar) plus the stars /
+  // correct-count / percentage the stars, message and XP follow. Exam mode is
+  // exempt (an exam result is the first pass). ``immediateStars`` (the mount
+  // celebration + confetti + exam verdict) rides along.
+  const {
+    adjusted: adjustedScore,
+    immediateStars,
+    stars,
+    displayCorrect,
+    displayPct: displayScorePct,
+    correctedCount: displayCorrectedCount,
+  } = useMemo(
+    () =>
+      resolveSummaryScoreDisplay(progress, sessionErrors, {
+        isExam: lessonMode === "exam",
+      }),
+    [progress, sessionErrors, lessonMode],
+  );
+
+  // #505 — the XP this run is worth. Computed with the same pure,
+  // parity-tested gamification calculator the award path uses
+  // (stars + first-attempt + streak multiplier), so the "+N XP"
+  // shown here matches what was credited. The streak is the one
+  // async input; it defaults to 0 (no multiplier) for an anonymous
+  // run or an unreachable read, and refines once fetched.
+  const [streakDays, setStreakDays] = useState(0);
+  // #1073 — the learner's level + total XP for the share card. Both default
+  // to undefined (no level line on the card) for an anonymous / unreachable
+  // run and refine once fetched, alongside the streak.
+  const [level, setLevel] = useState<number | undefined>(undefined);
+  const [totalXp, setTotalXp] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (!userId) {
+      setStreakDays(0);
+      setLevel(undefined);
+      setTotalXp(undefined);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const storage = getStorage();
+      try {
+        const streak = await storage.gamification.getStreak(userId);
+        if (!cancelled) setStreakDays(streak?.current_streak_days ?? 0);
+      } catch {
+        if (!cancelled) setStreakDays(0);
+      }
+      try {
+        const state = await storage.gamification.getState(userId);
+        if (!cancelled) {
+          setLevel(state?.level);
+          setTotalXp(state?.total_xp);
+        }
+      } catch {
+        if (!cancelled) {
+          setLevel(undefined);
+          setTotalXp(undefined);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  const xpGain = useMemo(() => {
+    if (total <= 0) return 0;
+    const firstAttempt = isFirstAttempt(
+      JSON.stringify(progress?.step_results ?? null),
+    );
+    return calculateLessonSessionXp({
+      stars,
+      first_attempt: firstAttempt,
+      streak_days: streakDays,
+      // #1007 Phase 2 — show the mode-weighted XP (exam = 1.5×) so the
+      // summary matches the XP actually awarded.
+      xp_multiplier: configForMode(lessonMode).xpMultiplier,
+      // #2893 — the game-mode combo bonus rides the same calculator,
+      // so display and credit stay one number.
+      combo_bonus: comboBonusXp,
+    }).xp_earned;
+  }, [total, progress, stars, streakDays, lessonMode, comboBonusXp]);
+
+  // #1007 Phase 2 — the mode reward weight as a percent bonus (exam = 50),
+  // surfaced in the exam result card. 0 for practice (no bonus note).
+  const modeBonusPct = Math.round(
+    (configForMode(lessonMode).xpMultiplier - 1) * 100,
+  );
+
+
+  // #1426 (generalises #1411 / #1376) — which summary sections are shown AND
+  // in which order, from the Settings → Learning "Lesson summary" sub-area.
+  // #3124 - the default is the compact set (result + XP); the essential
+  // completion navigation below is never gated and stays pinned at the bottom.
+  const sections = useSummarySections();
+  const nextStepsEnabled = isSummarySectionEnabled(sections, "next_steps");
+  const correctionEnabled = isSummarySectionEnabled(sections, "correction");
+  // #3575 - the compact view's "Fix mistakes" button opens the correction
+  // round for this view without touching the stored section flags.
+  const [fixOpen, setFixOpen] = useState(false);
+  // #3575 - the correction round reported it is finished in this view.
+  const [correctionDone, setCorrectionDone] = useState(false);
+
+  // #3031 — the detailed-evaluation view. The compact summary holds three
+  // things back: sections switched off in Settings, the collapsed answers
+  // overview, and the mistake explanations (own toggle + a 5-entry cap). One
+  // button lifts all three at once, for THIS view only: every stored
+  // preference is left exactly as it is, and the detailed view is derived
+  // from the run's data on each render, so there is nothing to persist.
+  // #3736 - an author's ``report: detailed`` opens it by default; the
+  // learner's toggle still wins once used.
+  const [detailedChoice, setDetailedChoice] = useState<boolean | null>(null);
+  const detailed = resolveDetailedView(detailedChoice, authorEvaluation);
+
+  // The exact exercises failed in THIS run — drives the
+  // "Retry Errors" card + the ErrorReplay page (via router state).
+  const failedExercises = useMemo(
+    () => collectFailedExercises(lesson, progress),
+    [lesson, progress],
+  );
+
+  // #1372 — of the exercises failed in this run, the ones STILL open in
+  // the live SRS state (a correct error-replay attempt drops one out).
+  // Drives the replay CTA + payload; the historical count (failedExercises)
+  // is left intact for the statistics.
+  const openFailed = useMemo(
+    () => openFailedExercises(failedExercises, sessionErrors),
+    [failedExercises, sessionErrors],
+  );
+
+  // #1874 — the replay payload is scoped by the "only errors / whole set"
+  // preference. Matching exercises are trimmed to their wrong pairs (with a
+  // REPLAY_MIN_MATCHING_PAIRS distractor fill for playability); the count/CTA above
+  // still reflects the number of failed exercises, not the trimmed pairs.
+  const errorReplayErrorsOnly = useErrorReplayScope();
+  const replayExercises = useMemo(
+    () =>
+      narrowReplayExercises(openFailed, sessionErrors, {
+        errorsOnly: errorReplayErrorsOnly,
+      }),
+    [openFailed, sessionErrors, errorReplayErrorsOnly],
+  );
+
+  // #3575 - the run's first pass (frozen) and its live correction verdict;
+  // the first pass also rides the Retry-errors payload so that page can
+  // show the same summary at its end.
+  const correctionRun = useMemo(
+    () => collectRunMistakes(lesson, progress),
+    [lesson, progress],
+  );
+  const correctionSummary = useMemo(
+    () => buildCorrectionSummary(correctionRun, sessionErrors),
+    [correctionRun, sessionErrors],
+  );
+  const correctionMarks = useMemo(
+    () => detailedCorrectionMarks(detailed, correctionSummary),
+    [detailed, correctionSummary],
+  );
+
+  const suggestions = useNextStepSuggestions({
+    source,
+    setId,
+    lessonFilename,
+    userId,
+    stars,
+    sessionErrors,
+    failedExerciseCount: openFailed.length,
+    correctedExerciseCount: failedExercises.length - openFailed.length,
+  });
+
+  // #138 — export the result (score + mistakes + weak areas) as
+  // Markdown so the learner can paste it into an AI assistant to
+  // drill the weak spots. Both actions reuse the breakdown already
+  // computed for the on-screen list; no new storage read. The
+  // builders live in lib/lesson/export/result-download (#354); only the
+  // i18n label resolution stays here.
+  const buildResultMarkdown = useCallback(() => {
+    const labels: LessonResultLabels = {
+      title: t("lesson.summary.export.title", "Lesson result"),
+      date: t("lesson.summary.export.date", "Date"),
+      score: t("lesson.summary.score", "Score"),
+      correctWord: t("lesson.summary.export.correct", "correct"),
+      mistakesHeading: t("lesson.summary.export.mistakes", "Mistakes"),
+      noMistakes: t(
+        "lesson.summary.export.no_mistakes",
+        "No mistakes - perfect run!",
+      ),
+      question: t("lesson.summary.export.question", "Question"),
+      yourAnswer: t("lesson.summary.export.your_answer", "Your answer"),
+      noAnswer: t("lesson.summary.export.no_answer", "(none)"),
+      correctAnswer: t("lesson.summary.export.correct_answer", "Correct"),
+      weakAreasHeading: t("lesson.summary.export.weak_areas", "Weak areas"),
+    };
+    return buildLessonMarkdownExport({
+      lesson,
+      correct,
+      total,
+      pct: scorePct,
+      sessionErrors,
+      breakdown,
+      labels,
+    });
+  }, [
+    t,
+    lesson,
+    correct,
+    total,
+    scorePct,
+    breakdown,
+    sessionErrors,
+  ]);
+
+  const handleCopyResult = useCallback(async () => {
+    const { markdown } = buildResultMarkdown();
+    try {
+      await navigator.clipboard.writeText(markdown);
+      notify.success(
+        t("lesson.summary.export.copied", "Result copied to clipboard"),
+      );
+    } catch {
+      notify.error(
+        t("lesson.summary.export.copy_failed", "Could not copy to clipboard"),
+      );
+    }
+  }, [buildResultMarkdown, t]);
+
+  const handleDownloadResult = useCallback(() => {
+    const { markdown, filename } = buildResultMarkdown();
+    downloadBlob(markdown, filename, "text/markdown");
+  }, [buildResultMarkdown]);
+
+  // #167 bug 3 — structured JSON twin of the Markdown export.
+  const handleDownloadJson = useCallback(() => {
+    const { json, filename } = buildLessonJsonExport({
+      lesson,
+      progress,
+      correct,
+      total,
+      pct: scorePct,
+      sessionErrors,
+    });
+    downloadBlob(json, filename, "application/json");
+  }, [lesson, progress, correct, total, scorePct, sessionErrors]);
+
+  // Count the score percentage up from 0 (instant under
+  // "subtle" / reduced motion - see useCountUp). #2479 — counts to the
+  // correction-adjusted final percentage.
+  const animatedPct = useCountUp(displayScorePct, 1000, intensity !== "subtle");
+
+  // The mount celebration (confetti gate, once-picked praise phrase,
+  // per-star headline, one-shot bus emits). #2479 — the burst follows the
+  // first-pass stars, the headline the correction-adjusted final stars.
+  const { celebrateConfetti, celebrateMessage } = useSummaryCelebration({
+    immediateStars,
+    stars,
+    intensity,
+    lang,
+    t,
+  });
+
+  // #1426 — each configurable section as a self-contained render node, keyed
+  // by its stable id. The panel renders them in the user-configured order
+  // (below); a node that maps to several sub-components (``result``) groups
+  // them so the section moves as one unit. ``enabled`` is passed literally
+  // true because the order loop only renders sections the config marks ON;
+  // each node still self-gates on its own data (zero XP, wrong mode, ...).
+  const sectionNodes: Record<SummarySectionKey, ReactNode> = {
+    favorite: (
+      <SummaryFavorite
+        enabled
+        userId={userId}
+        source={source}
+        setId={setId}
+        setTitle={setTitle}
+        filename={lessonFilename}
+        title={lesson.title}
+        t={t}
+      />
+    ),
+    // "Result and statistics": stars + message + score bar, the exam / timed
+    // result panels, the retry comparison and the time / hints stat list — all
+    // one toggle (#1411), rendered as one contiguous block (#1426).
+    result: (
+      <>
+        <SummaryScoreboard
+          enabled
+          stars={stars}
+          message={celebrateMessage}
+          showStarScale={showsStarScale(examVerdict)}
+          animatedPct={animatedPct}
+          scorePct={displayScorePct}
+          correct={displayCorrect}
+          total={total}
+          immediateCorrect={adjustedScore.immediateCorrect}
+          correctedCount={displayCorrectedCount}
+          immediatePct={adjustedScore.immediatePct}
+          t={t}
+        />
+        {/* #1007 Phase 2 — dedicated exam result panel (verdict + score +
+            time + XP incl. bonus + retry). */}
+        <SummaryExamPanel
+          enabled
+          lessonMode={lessonMode}
+          total={total}
+          examPass={examPass}
+          examThreshold={examThreshold}
+          authorEvaluation={authorEvaluation}
+          correct={correct}
+          scorePct={scorePct}
+          minutes={minutes}
+          xpGain={xpGain}
+          bonusPct={modeBonusPct}
+          onRetry={onRepeat}
+        />
+        {/* #1009 — timed-mode timing stats. */}
+        <SummaryTimedStats
+          enabled
+          lessonMode={lessonMode}
+          timedStats={timedStats}
+          t={t}
+        />
+        {/* #983 — improvement vs the previous run + best score. */}
+        <RetryResultComparison
+          enabled
+          attempts={attempts}
+          attemptHistory={attemptHistory}
+          bestCorrect={bestCorrect}
+          bestTotal={bestTotal}
+        />
+        <SummaryStatsList
+          enabled
+          minutes={minutes}
+          hintsUsed={hintsUsed}
+          t={t}
+        />
+      </>
+    ),
+    xp: (
+      <SummaryXp enabled xpGain={xpGain} animate={intensity !== "subtle"} t={t} />
+    ),
+    // #1073 — share the result (lesson title + score). #2479 — shares the
+    // correction-adjusted final (correct/pct/stars all follow the same
+    // displayed result), so a shared card can never contradict the on-screen
+    // stars.
+    share: (
+      <SummaryShare
+        enabled
+        total={total}
+        result={{
+          lessonTitle: lesson.title,
+          correct: displayCorrect,
+          total,
+          scorePct: displayScorePct,
+          stars,
+          level,
+          xp: totalXp,
+          streakDays,
+        }}
+      />
+    ),
+    // #1007 Phase 2 — the collected-answers "View all answers" detail.
+    answers: (
+      <LessonAnswersDetail
+        enabled
+        open={detailed}
+        breakdown={breakdown}
+        correction={correctionMarks.byStep}
+      />
+    ),
+    // #138 — export the result for AI-assisted practice.
+    export: (
+      <SummaryExportActions
+        enabled
+        lesson={lesson}
+        t={t}
+        onCopy={() => {
+          void handleCopyResult();
+        }}
+        onDownload={handleDownloadResult}
+        onDownloadJson={handleDownloadJson}
+      />
+    ),
+    // #599 — the "why you missed these" mistake review. #3124 - a section
+    // of its own (default OFF, directly above ``correction`` in the default
+    // order so review and drill stay adjacent, #1432); the #599 Settings
+    // toggle stays its master switch, the detailed view lifts both.
+    explanations: (
+      <SummaryExplanations
+        sessionErrors={sessionErrors}
+        lesson={lesson}
+        detailed={detailed}
+        correction={correctionMarks.summary}
+        t={t}
+      />
+    ),
+    // Phase 64 — Smart Next-Step Suggestions. The primary navigation surface;
+    // the standalone Next fallback in the pinned continue-actions below covers
+    // the case where this card is off or not surfacing a successor.
+    next_steps: (
+      <NextStepSuggestions
+        enabled
+        suggestions={suggestions}
+        setId={setId}
+        setSlug={setSlug}
+      />
+    ),
+    // Phase 52F / v1.35.0 — the SINGLE "your mistakes" section (#1376/#1411,
+    // reworked #2496). Lands collapsed so it never pops the mobile keyboard;
+    // folds the inline correction drills AND the full "redo the exact
+    // exercises" replay (retired NextStepSuggestions error-replay card) into
+    // one opt-in entry. Self-hides on a perfect score / when there is nothing
+    // to drill or replay.
+    correction:
+      progress && userId ? (
+        <CorrectionBlock
+          lesson={lesson}
+          progress={progress}
+          userId={userId}
+          setId={setId}
+          lessonFilename={lessonFilename}
+          replayHref={
+            replayExercises.length > 0
+              ? `/error-replay/${setSlug}/${setId}/${lessonFilename}`
+              : null
+          }
+          replayState={
+            replayExercises.length > 0
+              ? {
+                  exercises: replayExercises,
+                  cards: lesson.cards,
+                  lessonTitle: lesson.title,
+                  firstPass: correctionRun,
+                }
+              : null
+          }
+          errorCount={suggestions.errorReplay.errorCount}
+          correctedCount={suggestions.errorReplay.correctedCount}
+          allCorrected={suggestions.errorReplay.allCorrected}
+          initiallyExpanded={fixOpen}
+          onComplete={() => setCorrectionDone(true)}
+          onSkip={() => {
+            // Skip is purely a UI dismissal — the pinned action row is always
+            // visible below.
+          }}
+        />
+      ) : null,
+  };
+  sectionNodes.correction = withCorrectionSummary(
+    sectionNodes.correction,
+    correctionSummary,
+    correctionDone,
+    t,
+  );
+
+  return (
+    <section
+      className={`lesson-summary${immediateStars === 3 ? " is-celebrating" : ""}`}
+      data-testid="lesson-summary"
+      data-stars={String(stars)}
+      data-detailed={String(detailed)}
+      aria-label={t("lesson.summary.aria_label", "Lesson summary")}
+    >
+      <SummaryConfetti active={celebrateConfetti} />
+      {/* #2761 — ``wrap-anywhere`` (not ``break-words``): this heading is
+          inline-flex, and only ``overflow-wrap: anywhere`` shrinks the text
+          item's min-content width so a long unbreakable title word wraps
+          instead of overflowing the viewport on mobile. */}
+      <h2 className="wrap-anywhere">
+        {isCompleted && (
+          <CheckCircle2
+            size={20}
+            aria-hidden="true"
+            data-testid="lesson-summary-completed"
+          />
+        )}
+        {t("lesson.summary.heading", "You finished")}: {lesson.title}
+      </h2>
+
+      {/* #3031 — the detailed-evaluation toggle. Sits directly under the
+          heading on purpose: everything it reveals grows BELOW it, so the
+          button keeps its position and the page does not jump under the
+          learner's finger when the view expands. */}
+      <SummaryDetailedToggle
+        detailed={detailed}
+        onToggle={() => setDetailedChoice(!detailed)}
+        t={t}
+      />
+
+      {/* #3124 — the actual evaluation, first thing in the detailed view: the
+          set-completion review scoped to this lesson. Self-gated on
+          ``detailed``. */}
+      <LessonReviewReport
+        detailed={detailed}
+        lesson={lesson}
+        setId={setId}
+        lessonFilename={lessonFilename}
+        sessionErrors={sessionErrors}
+        progress={progress}
+        userId={userId}
+        t={t}
+      />
+
+      {/* #2889 — the ticket-economy banner: banks the tickets this run
+          earned (full score / full hearts / streak milestones) and offers
+          the jump into the arcade. Self-gating (game mode + ticket switch
+          + something actually granted); the already-completed guard keeps
+          a revisited summary from re-awarding. */}
+      <SummaryTicketReward
+        userId={userId}
+        scoreCorrect={correct}
+        scoreTotal={total}
+        fullHeartsRun={fullHeartsRun}
+        alreadyCompleted={isCompleted}
+        streakDays={streakDays}
+      />
+
+      {/* #1426 — the configurable sections, in the user-configured order.
+          Only sections the config marks ON are rendered (#3031: the detailed
+          view renders them all); each keeps its own data self-gate. #3124 -
+          the #599 mistake review is one of them now (``explanations``,
+          directly above ``correction`` by default, #1432), no longer spliced
+          in relative to the correction round. */}
+      {sections.map(({ id, enabled }) => {
+        // #3031 — the detailed view renders every section, including the ones
+        // the learner switched off; their stored flags are untouched and take
+        // effect again the moment the view returns to compact.
+        if (!isSectionShown(id, enabled, detailed, fixOpen)) return null;
+        return <Fragment key={id}>{sectionNodes[id]}</Fragment>;
+      })}
+
+      {/* #3575 - the compact view's way into the correction round. Rendered
+          only while the correction section itself is not on screen; it is
+          navigation, so it ignores the section toggles like the actions
+          below. */}
+      {offersFixMistakes({ hasRun: Boolean(progress && userId), correctionEnabled, detailed, fixOpen }) && (
+        <SummaryFixMistakes
+          openCount={openFailed.length}
+          correctedCount={failedExercises.length - openFailed.length}
+          totalCount={failedExercises.length}
+          onFix={() => setFixOpen(true)}
+          t={t}
+        />
+      )}
+
+      {/* #2768 — mentor-mode punch list: the author's per-step notes from
+          this run, with the editor deep link. Self-gated (own set + notes
+          present), deliberately outside the configurable-section registry. */}
+      <MentorNotesSummary
+        source={source}
+        setId={setId}
+        filename={lessonFilename}
+      />
+
+      {/* Essential completion navigation — never toggleable, never in the
+          reorder list, always pinned at the bottom so the panel can never
+          become a dead end (#1426, "Weitermachen-Aktionen bleiben fix"). */}
+      {/* #3792 - reaching the summary completes the lesson
+          (LessonSummaryScreen), so there is no completion button. #1787 -
+          an anonymous run (no learner profile) has nowhere to persist the
+          completion, so it says why instead of staying silent. */}
+      {!isCompleted && !userId && (
+        <div className="lesson-summary-actions">
+          <FormHint data-testid="lesson-summary-mark-complete-hint">
+            {t(
+              "lesson.summary.mark_complete_needs_profile",
+              "Create a learner profile to save your progress",
+            )}
+          </FormHint>
+        </div>
+      )}
+
+      <div className="lesson-summary-secondary-actions">
+        {/* Fallback Next link — when the smart card is not surfacing a
+            successor (hook still loading, a storage read failed, or the
+            next-steps section is disabled, #1426) but one exists, so forward
+            navigation never disappears. */}
+        {/* #230 — outline, not ghost: ghost has no border/background so on
+            the dark summary surface these read as faint text rather than
+            buttons. Outline gives a visible border + keeps readable text. */}
+        {(!nextStepsEnabled || !suggestions.nextLesson.available) &&
+          nextLessonFilename && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onNextLesson}
+              data-testid="lesson-summary-next"
+            >
+              {t("lesson.summary.next_lesson", "Next lesson")}
+              <ChevronRight aria-hidden="true" />
+            </Button>
+          )}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRepeat}
+          data-testid="lesson-summary-repeat"
+        >
+          <RotateCcw aria-hidden="true" />
+          {t("lesson.summary.retry", "Practice again")}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onExit}
+          data-testid="lesson-summary-exit"
+        >
+          {t("lesson.summary.back_to_browser", "Back to content browser")}
+        </Button>
+      </div>
+    </section>
+  );
+}

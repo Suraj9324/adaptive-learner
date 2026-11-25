@@ -1,0 +1,99 @@
+/**
+ * About tab parent (Phase 14B).
+ *
+ * Composes the five About sub-sections. Single source of system
+ * data: fetches ``SystemInfo`` from the storage layer once on
+ * mount; the ApiStorage path hits ``/api/system/info`` and the
+ * DexieStorage path returns a synthesised payload, so the parent
+ * doesn't branch on storage mode beyond the ``storageMode`` prop
+ * passed down to ``SystemInfoSection``.
+ */
+
+import { useEffect, useState } from "react";
+
+import { isDevMode } from "../../hooks/settings/useDevMode";
+import { inlineErrorText } from "../../utils/errorMessages";
+import { useI18n } from "../../hooks/ui/useI18n";
+import { getStorage, resolveStorageMode } from "../../storage";
+import { SettingsSection } from "../settings/SettingsSection";
+import type { SystemInfo } from "../../types/domain";
+
+import ContributeSection from "./ContributeSection";
+import CreditsSection from "./CreditsSection";
+import DonationSection from "./DonationSection";
+import ShareAppSection from "./ShareAppSection";
+import LicenseResourcesSection from "./LicenseResourcesSection";
+import StrangBadge from "./StrangBadge";
+import SystemInfoSection from "./SystemInfoSection";
+import VersionSection from "./VersionSection";
+
+export default function AboutTab() {
+  const { t, lang } = useI18n();
+  const storageMode = resolveStorageMode();
+  const [info, setInfo] = useState<SystemInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getStorage().system.info();
+        if (cancelled) return;
+        setInfo(result);
+      } catch (err) {
+        if (cancelled) return;
+        setError(inlineErrorText(err, t("common.error"), isDevMode()));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // ``t`` omitted on purpose: the fetch runs once on mount; an unstable
+    // ``t`` (test i18n mocks) would re-fire it (lessons/frontend.md).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <SettingsSection
+      title={t("about.section_heading", "About Adaptive Learner")}
+      testid="settings-about"
+      className="mt-6"
+    >
+      {loading && (
+        <p
+          data-testid="about-loading"
+          className="muted py-4 px-0"
+        >
+          {t("about.loading", "Loading information…")}
+        </p>
+      )}
+      {error && !info && (
+        <p
+          data-testid="about-error"
+          role="alert"
+          className="py-4 px-0 text-[var(--danger)]"
+        >
+          {t("about.load_failed", "Could not load system info:")} {error}
+        </p>
+      )}
+      {info && (
+        <div
+          data-testid="about-content"
+          className="flex flex-col gap-4"
+        >
+          <StrangBadge t={t} />
+          <VersionSection info={info} t={t} />
+          <SystemInfoSection info={info} storageMode={storageMode} t={t} />
+          <CreditsSection t={t} />
+          <ShareAppSection t={t} />
+          <DonationSection t={t} />
+          <ContributeSection t={t} />
+          <LicenseResourcesSection info={info} t={t} lang={lang} />
+        </div>
+      )}
+    </SettingsSection>
+  );
+}

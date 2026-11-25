@@ -1,0 +1,1318 @@
+/**
+ * Tests for the Matching exercise component
+ * (Phase 44 / EXP-002 / 3C / F-106).
+ *
+ * Pins the tap-to-pair UX + scoring contract:
+ * - Counter updates on each pair.
+ * - Tapping a paired tile selects it; re-pairing overwrites, and a
+ *   collision swaps partners, so the count never drops (#3237).
+ * - Submit disabled until all pairs are made.
+ * - Submit reports {correct, total} to the parent via
+ *   onComplete with the right count.
+ * - 'Try again' resets state so the user can retry.
+ * - Empty pairs surface the empty-state testid.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import {act, fireEvent, render, screen, within} from "@testing-library/react";
+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
+
+import MatchingExercise, {
+    MATCHING_PAIR_COLORS,
+    matchingPairColorVar,
+} from "./MatchingExercise";
+import type {ContentLessonExercise} from "../../../../storage/types";
+import {readLegacyCssSum} from "../../../../styles/legacy-css-sum";
+import {LessonModeProvider} from "../../../../hooks/lesson/modes/useLessonMode";
+import {writeMatchingSeparateCorrections} from "../../../../lib/lesson/prefs/matchingReviewViewsPref";
+import {
+    FooterStatusLine,
+    FooterStatusProvider,
+} from "../../../lesson/runner/footer-status";
+
+/** Convert ``#rrggbb`` to its HSL hue (degrees) + saturation (0-1). */
+function hexToHsl(hex: string): {hue: number; sat: number} {
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    const lightness = (max + min) / 2;
+    if (delta === 0) return {hue: 0, sat: 0};
+    const sat = delta / (1 - Math.abs(2 * lightness - 1));
+    let hue: number;
+    if (max === r) hue = ((g - b) / delta) % 6;
+    else if (max === g) hue = (b - r) / delta + 2;
+    else hue = (r - g) / delta + 4;
+    hue *= 60;
+    if (hue < 0) hue += 360;
+    return {hue, sat};
+}
+
+const EXERCISE: ContentLessonExercise = {
+    id: "ex-match",
+    type: "matching",
+    prompt: "Match each French word with its English translation.",
+    card_ids: [],
+    pairs: [
+        {left: "Bonjour", right: "Hello"},
+        {left: "Merci", right: "Thank you"},
+        {left: "Au revoir", right: "Goodbye"},
+    ],
+    distractors: [],
+};
+
+beforeEach(() => {
+    vi.useRealTimers();
+});
+
+/** Tap left ``left`` then right ``right`` (by original index). */
+function pair(left: number, right: number): void {
+    fireEvent.click(screen.getByTestId(`matching-left-${left}`));
+    fireEvent.click(screen.getByTestId(`matching-right-${right}`));
+}
+
+function counter(): HTMLElement {
+    return screen.getByTestId("matching-counter");
+}
+
+/** The pair number shown on a tile, or null when it is not paired. */
+function badgeOf(testId: string): string | null {
+    const badge = within(screen.getByTestId(testId)).queryByTestId(
+        /^matching-pair-badge-\d+$/,
+    );
+    return badge?.getAttribute("data-testid")?.replace("matching-pair-badge-", "") ?? null;
+}
+
+describe("MatchingExercise: pair lifecycle", () => {
+    it("renders the prompt + counter + columns", () => {
+        const onComplete = vi.fn();
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={onComplete}
+            />,
+        );
+        expect(screen.getByTestId("matching-prompt")).toHaveTextContent(
+            "Match each French word",
+        );
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent(
+            /0\s*\/\s*3/,
+        );
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-right")).toBeInTheDocument();
+    });
+
+    it("#2443 renders no hint button (every option is already visible)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        expect(
+            screen.queryByTestId("matching-hint-button"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("#692 takes no unwanted text-input focus (no field to auto-focus)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        const active = document.activeElement;
+        expect(active?.tagName).not.toBe("INPUT");
+        expect(active?.tagName).not.toBe("TEXTAREA");
+    });
+
+    it("shows instructions + visible column headers (UX bugfix)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        expect(
+            screen.getByTestId("matching-instructions"),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByTestId("matching-left-header"),
+        ).toHaveTextContent("Term");
+        expect(
+            screen.getByTestId("matching-right-header"),
+        ).toHaveTextContent("Translation");
+    });
+
+    it("hides the first-pair flow hint once a pair is made", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        expect(screen.getByTestId("matching-flow-hint")).toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        expect(
+            screen.queryByTestId("matching-flow-hint"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("counter increments on each tap-pair", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+            />,
+        );
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent(
+            /1\s*\/\s*3/,
+        );
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent(
+            /2\s*\/\s*3/,
+        );
+    });
+
+    it.each(["matching-left-0", "matching-right-0"])(
+        "tapping the paired tile %s selects it instead of undoing (#3237)",
+        (testId) => {
+            render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+            pair(0, 0);
+            const tile = screen.getByTestId(testId);
+            fireEvent.click(tile);
+            expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+            expect(tile).toHaveAttribute("aria-pressed", "true");
+            fireEvent.click(tile);
+            expect(tile).toHaveAttribute("aria-pressed", "false");
+            expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+        },
+    );
+
+    it("submit button disabled until all pairs made", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+            />,
+        );
+        const submit = screen.getByTestId("matching-submit");
+        expect(submit).toBeDisabled();
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        expect(submit).toBeDisabled();
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        expect(submit).not.toBeDisabled();
+    });
+});
+
+describe("MatchingExercise: mobile space (#2391)", () => {
+    it("collapses the how-to + flow hint behind a closed disclosure", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const help = screen.getByTestId("matching-help");
+        // Native <details>, closed by default -> the how-to does not eat the
+        // space above the first tile until the learner asks for it.
+        expect(help.tagName).toBe("DETAILS");
+        expect(help).not.toHaveAttribute("open");
+        expect(screen.getByTestId("matching-help-toggle")).toBeInTheDocument();
+        // The operating manual + flow hint live INSIDE the disclosure.
+        expect(help).toContainElement(screen.getByTestId("matching-instructions"));
+        expect(help).toContainElement(screen.getByTestId("matching-flow-hint"));
+    });
+
+    it("#2453 puts the how-to toggle in the top row next to the theory link", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+                theoryLink={
+                    <button data-testid="stub-theory-link">Re-read theory</button>
+                }
+            />,
+        );
+        // The chrome's conditional "Re-read theory" link is passed down and
+        // shares one button row under the title with the how-to toggle.
+        const topRow = screen.getByTestId("matching-top-actions");
+        expect(topRow).toContainElement(screen.getByTestId("stub-theory-link"));
+        expect(topRow).toContainElement(screen.getByTestId("matching-help-toggle"));
+    });
+
+    it("#2453 keeps the how-to toggle in the top row without a theory link", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        // Without a preceding theory chapter no link is passed; the toggle
+        // still sits in the same top row (consistent position).
+        const topRow = screen.getByTestId("matching-top-actions");
+        expect(topRow).toContainElement(screen.getByTestId("matching-help-toggle"));
+        expect(screen.queryByTestId("stub-theory-link")).toBeNull();
+    });
+
+    it("#2453 no longer nests the how-to disclosure in the instruction row", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        // The instruction row keeps the direction text but not the disclosure.
+        const metaRow = screen.getByTestId("matching-meta-row");
+        expect(metaRow).toContainElement(
+            screen.getByTestId("direction-instruction-matching"),
+        );
+        expect(metaRow).not.toContainElement(screen.getByTestId("matching-help"));
+    });
+
+    it("#2445 shows the running counter at the top, not in the footer", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const counter = screen.getByTestId("matching-counter");
+        // Not in the footer row with the Check button — attention during
+        // solving is at the top, not at the bottom next to Check.
+        const check = screen.getByTestId("matching-submit");
+        expect(check.closest("div")).not.toContainElement(counter);
+        // It sits at the top, before the tile columns in DOM order.
+        const left = screen.getByTestId("matching-left");
+        expect(
+            counter.compareDocumentPosition(left) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+        // Once submitted the score replaces the counter (no duplicate progress).
+        for (let i = 0; i < 3; i++) {
+            fireEvent.click(screen.getByTestId(`matching-left-${i}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${i}`));
+        }
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.queryByTestId("matching-counter")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-result")).toBeInTheDocument();
+    });
+});
+
+describe("MatchingExercise: scoring + completion", () => {
+    it("reports {correct, total} on submit with all correct", () => {
+        const onComplete = vi.fn();
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={onComplete}
+            />,
+        );
+        for (let i = 0; i < 3; i++) {
+            fireEvent.click(screen.getByTestId(`matching-left-${i}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${i}`));
+        }
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({correct: 3, total: 3}));
+        expect(screen.getByTestId("matching-result")).toHaveTextContent(
+            /3\s*\/\s*3/,
+        );
+    });
+
+    it("scores wrong pairs as incorrect", () => {
+        const onComplete = vi.fn();
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={onComplete}
+            />,
+        );
+        // 0→1 (wrong), 1→0 (wrong), 2→2 (correct)
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({correct: 1, total: 3}));
+    });
+
+    it("accepts duplicate right-column values regardless of which identical tile is matched (#480)", () => {
+        const onComplete = vi.fn();
+        // libro + coche both take "el" — the two "el" right tiles are
+        // interchangeable. The right column is shuffled, so a learner
+        // pairing libro with coche's "el" tile (and vice versa) is still
+        // correct: both display "el".
+        const dupExercise: ContentLessonExercise = {
+            id: "ex-dup-value",
+            type: "matching",
+            prompt: "Match each noun with its article.",
+            card_ids: [],
+            pairs: [
+                {left: "libro", right: "el"},
+                {left: "coche", right: "el"},
+                {left: "casa", right: "la"},
+            ],
+            distractors: [],
+        };
+        render(
+            <MatchingExercise exercise={dupExercise} onComplete={onComplete} />,
+        );
+        // Cross-match the two identical "el" tiles: libro→pair-1's "el"
+        // tile, coche→pair-0's "el" tile. Pre-#480 this scored 1/3 (the
+        // index check 0!==1 / 1!==0 failed); both must now count.
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(
+            expect.objectContaining({correct: 3, total: 3}),
+        );
+        // The per-element SRS attempts must all be correct too.
+        const scored = onComplete.mock.calls[0][0];
+        expect(scored.attempts.every((a: {correct: boolean}) => a.correct)).toBe(
+            true,
+        );
+    });
+
+    it("stacks wrong-pair feedback inside a flex-column <li> so it can't overlap the next tile (#242)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        // 0→1 (wrong) so left tile 0 renders the feedback block.
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // #3233 - the feedback block renders in the graded Corrections view.
+        fireEvent.click(screen.getByTestId("matching-corrections"));
+        // The button and the feedback must share ONE <li> that is a flex
+        // column. Pre-#242 the button was ``h-full`` in a ``grid-auto-rows:1fr``
+        // row, so the sibling feedback overflowed into the next tile at 375px.
+        const button = screen.getByTestId("matching-left-0");
+        const feedback = screen.getByTestId("matching-feedback-0");
+        const li = button.closest("li");
+        expect(li).not.toBeNull();
+        expect(li).toBe(feedback.closest("li"));
+        expect(li!.className).toContain("flex-col");
+        expect(button.className).toContain("flex-1");
+        expect(button.className).not.toContain("h-full");
+    });
+
+    it("keeps pair badges visible and marks correct pairs green on BOTH sides after checking (#183)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        for (let i = 0; i < 3; i++) {
+            fireEvent.click(screen.getByTestId(`matching-left-${i}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${i}`));
+        }
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // Badges persist after submit (used to vanish), once per side.
+        expect(screen.getAllByTestId("matching-pair-badge-1")).toHaveLength(2);
+        // Both tiles of each correct pair are flagged correct.
+        expect(screen.getByTestId("matching-left-0").className).toContain(
+            "is-correct",
+        );
+        expect(screen.getByTestId("matching-right-0").className).toContain(
+            "is-correct",
+        );
+        // No spurious correct-partner hint when everything is right.
+        expect(
+            screen.queryByTestId("matching-correct-hint-0"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("marks wrong pairs red on both sides and shows the correct partner (#183)", () => {
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />,
+        );
+        // 0→1 (wrong), 1→0 (wrong), 2→2 (correct)
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // #3186 / #3233 - grading and the correct partner live in the
+        // Corrections view; "My answers" shows the ungraded pairs.
+        fireEvent.click(screen.getByTestId("matching-corrections"));
+        // The wrongly-paired left + the right it chose are both flagged wrong.
+        expect(screen.getByTestId("matching-left-0").className).toContain(
+            "is-wrong",
+        );
+        expect(screen.getByTestId("matching-right-1").className).toContain(
+            "is-wrong",
+        );
+        // #191 — the wrong pair spells out BOTH sides: the learner picked
+        // right-1 ("Thank you") for left-0, whose correct partner is "Hello".
+        expect(
+            screen.getByTestId("matching-your-answer-0"),
+        ).toHaveTextContent("Thank you");
+        expect(
+            screen.getByTestId("matching-correct-hint-0"),
+        ).toHaveTextContent("Hello");
+        // The one correct pair stays green on both sides.
+        expect(screen.getByTestId("matching-left-2").className).toContain(
+            "is-correct",
+        );
+        expect(screen.getByTestId("matching-right-2").className).toContain(
+            "is-correct",
+        );
+        // Badges still present after checking.
+        expect(
+            screen.getAllByTestId("matching-pair-badge-1").length,
+        ).toBeGreaterThan(0);
+    });
+
+    it("'Try again' resets state and re-enables interaction", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+            />,
+        );
+        for (let i = 0; i < 3; i++) {
+            fireEvent.click(screen.getByTestId(`matching-left-${i}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${i}`));
+        }
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        fireEvent.click(screen.getByTestId("matching-retry"));
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent(
+            /0\s*\/\s*3/,
+        );
+        expect(screen.getByTestId("matching-submit")).toBeDisabled();
+    });
+});
+
+describe("MatchingExercise: edge cases", () => {
+    it("renders empty state when pairs is missing", () => {
+        render(
+            <MatchingExercise
+                exercise={{
+                    ...EXERCISE,
+                    pairs: [],
+                }}
+                onComplete={vi.fn()}
+            />,
+        );
+        expect(screen.getByTestId("matching-empty")).toBeInTheDocument();
+    });
+});
+
+describe("MatchingExercise: selection visibility + language labels + a11y (UX bugfix)", () => {
+    it("selecting a left tile marks it is-selected + aria-pressed", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const tile = screen.getByTestId("matching-left-0");
+        expect(tile).toHaveAttribute("aria-pressed", "false");
+        fireEvent.click(tile);
+        expect(tile.className).toContain("is-selected");
+        expect(tile).toHaveAttribute("aria-pressed", "true");
+        // Sibling left tiles are not selected.
+        expect(screen.getByTestId("matching-left-1")).toHaveAttribute(
+            "aria-pressed",
+            "false",
+        );
+    });
+
+    it("announces the current selection to screen readers", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const status = screen.getByTestId("matching-sr-status");
+        expect(status).toHaveTextContent("");
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        expect(status).toHaveTextContent(/Bonjour/);
+    });
+
+    it("a paired tile gets the is-paired class", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        expect(screen.getByTestId("matching-left-0").className).toContain(
+            "is-paired",
+        );
+    });
+
+    it("column headers show language NAMES when the pair is known", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                targetLanguage="fr"
+                sourceLanguage="en"
+                onComplete={vi.fn()}
+            />,
+        );
+        // Receptive default: left = target (fr), right = source (en).
+        // The exact localised name depends on the UI language; the
+        // contract is only that the generic fallbacks are replaced.
+        const left = screen.getByTestId("matching-left-header");
+        const right = screen.getByTestId("matching-right-header");
+        expect(left).not.toHaveTextContent("Term");
+        expect(right).not.toHaveTextContent("Translation");
+        expect(left.textContent?.length ?? 0).toBeGreaterThan(0);
+        expect(right.textContent?.length ?? 0).toBeGreaterThan(0);
+    });
+
+    it("falls back to generic labels when the language pair is unknown", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        expect(screen.getByTestId("matching-left-header")).toHaveTextContent(
+            "Term",
+        );
+        expect(
+            screen.getByTestId("matching-right-header"),
+        ).toHaveTextContent("Translation");
+    });
+});
+
+describe("MatchingExercise: side distinction (#108)", () => {
+    it("each header carries a non-color A / B letter cue", () => {
+        // The two sides are tinted via design tokens; an aria-hidden
+        // letter chip in each header reinforces the distinction for
+        // color-vision-deficient users (color is not the only signal).
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const leftChip = screen
+            .getByTestId("matching-left-header")
+            .querySelector("[aria-hidden='true']");
+        const rightChip = screen
+            .getByTestId("matching-right-header")
+            .querySelector("[aria-hidden='true']");
+        expect(leftChip).not.toBeNull();
+        expect(rightChip).not.toBeNull();
+        expect(leftChip).toHaveTextContent("A");
+        expect(rightChip).toHaveTextContent("B");
+    });
+});
+
+describe("MatchingExercise: knowledge-domain wording (#149)", () => {
+    it("omits the term/definition subtitle + column labels for a knowledge domain (#2392)", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+                domain="psychology"
+                targetLanguage="de"
+                sourceLanguage="de"
+            />,
+        );
+        // The generic "Term/Definition" wording is wrong for e.g.
+        // senses->organs; it is dropped, not merely re-worded.
+        expect(
+            screen.getByTestId("matching-left-header"),
+        ).not.toHaveTextContent("Term");
+        expect(
+            screen.getByTestId("matching-right-header"),
+        ).not.toHaveTextContent("Definition");
+        // The wrong subtitle is gone entirely.
+        expect(
+            screen.queryByTestId("direction-instruction-matching"),
+        ).not.toBeInTheDocument();
+        // The A / B letter cues stay so the columns remain distinguishable,
+        // and the lists keep a neutral accessible name.
+        expect(screen.getByTestId("matching-left-header")).toHaveTextContent(
+            "A",
+        );
+        expect(screen.getByTestId("matching-right-header")).toHaveTextContent(
+            "B",
+        );
+        expect(screen.getByTestId("matching-left")).toHaveAttribute(
+            "aria-label",
+            "Column A",
+        );
+    });
+
+    it("treats source==target as knowledge and drops the definition label (#2392)", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+                targetLanguage="de"
+                sourceLanguage="de"
+            />,
+        );
+        expect(
+            screen.getByTestId("matching-right-header"),
+        ).not.toHaveTextContent("Definition");
+        expect(
+            screen.queryByTestId("direction-instruction-matching"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("keeps the translation wording for a real language pair", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+                domain="language"
+                targetLanguage="es"
+                sourceLanguage="de"
+            />,
+        );
+        // Language names render when the pair is known; the generic
+        // 'Definition' knowledge label must NOT appear.
+        expect(
+            screen.getByTestId("matching-right-header").textContent,
+        ).not.toContain("Definition");
+    });
+
+    it("keeps the direction subtitle for a language exercise (regression, #2392)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        // The omission is knowledge-only; the language path keeps its subtitle.
+        expect(
+            screen.getByTestId("direction-instruction-matching"),
+        ).toBeInTheDocument();
+    });
+});
+
+describe("MatchingExercise: per-pair color + label (#145)", () => {
+    it("matchingPairColorVar cycles through the red-free matching-pair tokens (#181)", () => {
+        expect(matchingPairColorVar(0)).toBe("var(--matching-pair-1)");
+        expect(matchingPairColorVar(2)).toBe("var(--matching-pair-3)");
+        // Wraps after the last palette entry, never touches --chart-*
+        // (which carries red in several themes).
+        expect(matchingPairColorVar(MATCHING_PAIR_COLORS)).toBe(
+            "var(--matching-pair-1)",
+        );
+        for (let slot = 0; slot < MATCHING_PAIR_COLORS * 2; slot += 1) {
+            expect(matchingPairColorVar(slot)).not.toContain("--chart-");
+        }
+    });
+
+    it("the --matching-pair-* palette carries no red/orange (warning) hue (#181, #199)", () => {
+        // #199 — orange reads as warning/error on a correct pairing, just
+        // like red (#181). Pin the whole pair palette to non-warning hues
+        // so neither can creep back in. Warning band: hue <= 40 (red+orange)
+        // or >= 346 (deep red), at meaningful saturation. Yellow (~45) and
+        // pink (~330) stay allowed.
+        const css = readLegacyCssSum();
+        const matches = [
+            ...css.matchAll(/--matching-pair-(\d+):\s*(#[0-9a-fA-F]{6})/g),
+        ];
+        expect(matches.length).toBe(MATCHING_PAIR_COLORS);
+        for (const [, index, hex] of matches) {
+            const {hue, sat} = hexToHsl(hex);
+            const isWarning = sat > 0.2 && (hue <= 40 || hue >= 346);
+            expect(
+                isWarning,
+                `--matching-pair-${index} (${hex}) is a red/orange warning hue (${hue.toFixed(0)} deg)`,
+            ).toBe(false);
+        }
+    });
+
+    it("the --matching-pair-* palette carries no green (correct) hue (#3261)", () => {
+        // #3261 - since #3233 the ungraded "My answers" view shows the pair
+        // colours after checking, so a green pair reads as "correct" even
+        // when the pair is wrong. Green band: hue 80..160 at meaningful
+        // saturation. Teal (~173) and cyan (~189) stay allowed.
+        const css = readLegacyCssSum();
+        const matches = [
+            ...css.matchAll(/--matching-pair-(\d+):\s*(#[0-9a-fA-F]{6})/g),
+        ];
+        expect(matches.length).toBe(MATCHING_PAIR_COLORS);
+        for (const [, index, hex] of matches) {
+            const {hue, sat} = hexToHsl(hex);
+            const isGreen = sat > 0.2 && hue >= 80 && hue <= 160;
+            expect(
+                isGreen,
+                `--matching-pair-${index} (${hex}) is a green "correct" hue (${hue.toFixed(0)} deg)`,
+            ).toBe(false);
+        }
+    });
+
+    it("labels both tiles of a matched pair with the same number", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        // Pair the first left term with its correct right tile.
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        // Both tiles now carry the pair-1 badge (color + number).
+        expect(
+            screen.getAllByTestId("matching-pair-badge-1"),
+        ).toHaveLength(2);
+    });
+
+    it("assigns the next number to a second pair and reuses a freed one", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pair(0, 0);
+        pair(1, 1);
+        expect(screen.getAllByTestId("matching-pair-badge-1")).toHaveLength(2);
+        expect(screen.getAllByTestId("matching-pair-badge-2")).toHaveLength(2);
+        // left-2 takes right-0 from left-0 (#3237): left-0 is freed, its
+        // number 1 is released and the new pair reuses it, not 3.
+        pair(2, 0);
+        expect(badgeOf("matching-left-0")).toBeNull();
+        expect(badgeOf("matching-left-2")).toBe("1");
+        expect(badgeOf("matching-right-0")).toBe("1");
+    });
+});
+
+describe("MatchingExercise: re-pairing overwrites, a collision swaps (#3237)", () => {
+    it("moves a paired left to a free right; the count stays", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pair(0, 0);
+        pair(0, 1);
+        expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+        expect(badgeOf("matching-right-0")).toBeNull();
+        expect(badgeOf("matching-right-1")).toBe(badgeOf("matching-left-0"));
+    });
+
+    it("hands a paired right to a free left; the old partner is freed, the count stays", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pair(0, 0);
+        pair(1, 0);
+        expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+        expect(badgeOf("matching-left-0")).toBeNull();
+        expect(badgeOf("matching-right-0")).toBe(badgeOf("matching-left-1"));
+    });
+
+    it("swaps partners when both tiles are paired, so a full board stays full", () => {
+        const onComplete = vi.fn();
+        render(<MatchingExercise exercise={EXERCISE} onComplete={onComplete} />);
+        pair(0, 0);
+        pair(1, 1);
+        pair(2, 2);
+        expect(counter()).toHaveTextContent(/3\s*\/\s*3/);
+        pair(0, 1);
+        expect(counter()).toHaveTextContent(/3\s*\/\s*3/);
+        expect(badgeOf("matching-right-1")).toBe(badgeOf("matching-left-0"));
+        expect(badgeOf("matching-right-0")).toBe(badgeOf("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(
+            expect.objectContaining({correct: 1, total: 3}),
+        );
+    });
+
+    it("re-pairs from the right column the same way", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+        expect(badgeOf("matching-left-0")).toBeNull();
+        expect(badgeOf("matching-left-1")).toBe(badgeOf("matching-right-0"));
+    });
+
+    it("re-tapping a pair's own partner keeps the pair", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pair(0, 0);
+        pair(0, 0);
+        expect(counter()).toHaveTextContent(/1\s*\/\s*3/);
+        expect(badgeOf("matching-right-0")).toBe(badgeOf("matching-left-0"));
+        expect(screen.getByTestId("matching-left-0")).toHaveAttribute(
+            "aria-pressed",
+            "false",
+        );
+    });
+});
+
+describe("MatchingExercise: bidirectional selection (#507)", () => {
+    it("forms a pair when started from the B (right) column, then A", () => {
+        const onComplete = vi.fn();
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={onComplete} />,
+        );
+        // Tap the right tile FIRST, then its matching left tile.
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent(
+            /1\s*\/\s*3/,
+        );
+        // Finish the remaining pairs B -> A too, then submit.
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(
+            expect.objectContaining({ correct: 3, total: 3 }),
+        );
+    });
+
+    it("marks a B tile as selected (aria-pressed) when tapped first, and toggles off", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        const rightTile = screen.getByTestId("matching-right-0");
+        expect(rightTile).toHaveAttribute("aria-pressed", "false");
+        fireEvent.click(rightTile);
+        expect(rightTile).toHaveAttribute("aria-pressed", "true");
+        // Tapping the same B tile again clears the selection.
+        fireEvent.click(rightTile);
+        expect(rightTile).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("accepts duplicate B values when paired B -> A (#507 + #481)", () => {
+        const onComplete = vi.fn();
+        // libro + coche both take "el"; the two "el" right tiles are
+        // interchangeable, and starting from the B side must still score
+        // by VALUE, not index.
+        const dupExercise: ContentLessonExercise = {
+            id: "ex-dup-bidir",
+            type: "matching",
+            prompt: "Match each noun with its article.",
+            card_ids: [],
+            pairs: [
+                { left: "libro", right: "el" },
+                { left: "coche", right: "el" },
+                { left: "casa", right: "la" },
+            ],
+            distractors: [],
+        };
+        render(
+            <MatchingExercise exercise={dupExercise} onComplete={onComplete} />,
+        );
+        // Start from the "el" tiles (B side), cross-match to the nouns.
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(onComplete).toHaveBeenCalledWith(
+            expect.objectContaining({ correct: 3, total: 3 }),
+        );
+    });
+});
+
+describe("MatchingExercise: animated pair resolution (#824)", () => {
+    afterEach(() => {
+        localStorage.clear();
+    });
+
+    /** Pair every item correctly (3/3). #3140 - a fully correct answer
+     *  has nothing to solve, so the toggle tests below deliberately use
+     *  {@link pairOneWrong} instead. */
+    function pairAllCorrect() {
+        for (let i = 0; i < 3; i++) {
+            fireEvent.click(screen.getByTestId(`matching-left-${i}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${i}`));
+        }
+    }
+
+    /** 0->1 (wrong), 1->0 (wrong), 2->2 (correct): 1/3 correct, so the
+     *  My-answers / Solve toggle is offered after Check. */
+    function pairOneWrong() {
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+    }
+
+    it("shows nothing to solve after a fully correct answer without onAdvance (#3140)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairAllCorrect();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // Neither the toggle row nor the success bar: the graded columns
+        // are the whole result (the review / replay / endless surfaces).
+        expect(screen.queryByTestId("matching-view-toggle")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-resolve")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-my-answers")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-success-advance")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+    });
+
+    it("replaces the toggle by the Continue bar after a fully correct answer with onAdvance (#1218)", () => {
+        const onAdvance = vi.fn();
+        render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} onAdvance={onAdvance} />,
+        );
+        pairAllCorrect();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.getByTestId("matching-success-advance")).toBeInTheDocument();
+        expect(screen.queryByTestId("matching-resolve")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-advance"));
+        expect(onAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the Solve toggle on a partly wrong answer, with or without onAdvance", () => {
+        const first = render(
+            <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} onAdvance={vi.fn()} />,
+        );
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+        expect(screen.queryByTestId("matching-success-advance")).not.toBeInTheDocument();
+        first.unmount();
+
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+    });
+
+    it("hides the Auflösen button until the answer is checked", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        expect(
+            screen.queryByTestId("matching-resolve"),
+        ).not.toBeInTheDocument();
+        pairOneWrong();
+        // Still hidden before pressing Check.
+        expect(
+            screen.queryByTestId("matching-resolve"),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+    });
+
+    it("reveals the resolution view on click and hides the columns", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.queryByTestId("matching-resolution")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        const resolution = screen.getByTestId("matching-resolution");
+        // Default effect is "slide".
+        expect(resolution).toHaveAttribute("data-effect", "slide");
+        // The interactive columns are gone, but the #977 toggle stays so
+        // the learner can switch back to their own answers.
+        expect(screen.queryByTestId("matching-left")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-my-answers")).toBeInTheDocument();
+        // The solution toggle is the active view (#977 visual indicator).
+        expect(screen.getByTestId("matching-resolve")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByTestId("matching-my-answers")).toHaveAttribute(
+            "aria-pressed",
+            "false",
+        );
+    });
+
+    it("toggles back and forth between my answers and the solution (#977)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // #3505: a check with mistakes opens on the graded corrections.
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+        expect(screen.queryByTestId("matching-resolution")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-corrections")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+
+        // -> solution
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(screen.getByTestId("matching-resolution")).toBeInTheDocument();
+        expect(screen.queryByTestId("matching-left")).not.toBeInTheDocument();
+
+        // -> back to my answers (graded columns return)
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+        expect(screen.queryByTestId("matching-resolution")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-my-answers")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+
+        // -> solution again (still reachable)
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(screen.getByTestId("matching-resolution")).toBeInTheDocument();
+    });
+
+    it("animates the solution only on the first reveal (#977)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+
+        // First reveal: the slide animation utility is present.
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(
+            screen.getByTestId("matching-resolved-b-0").className,
+        ).toContain("animate-[matching-resolve");
+
+        // Toggle away and back: the end result shows with no animation.
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(
+            screen.getByTestId("matching-resolved-b-0").className,
+        ).not.toContain("animate-[matching-resolve");
+    });
+
+    it("shows neither toggle button before the answer is checked (#977)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        expect(screen.queryByTestId("matching-my-answers")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-resolve")).not.toBeInTheDocument();
+        pairOneWrong();
+        expect(screen.queryByTestId("matching-my-answers")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.getByTestId("matching-my-answers")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+    });
+
+    it("uses the configured effect from localStorage", () => {
+        localStorage.setItem(
+            "adaptive-learner.matching.resolve_effect",
+            "stack",
+        );
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        // Stack shows one paired row per pair, in the displayed left
+        // order (#2872) - capture it before switching views.
+        const firstDisplayedLeft =
+            within(screen.getByTestId("matching-left"))
+                .getAllByRole("listitem")[0]
+                .textContent?.match(/Bonjour|Merci|Au revoir/)?.[0] ?? "";
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(screen.getByTestId("matching-resolution")).toHaveAttribute(
+            "data-effect",
+            "stack",
+        );
+        expect(screen.getByTestId("matching-resolved-row-0")).toHaveTextContent(
+            firstDisplayedLeft,
+        );
+    });
+
+    it("announces the original correct count after resolving", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        // 0→1 (wrong), 1→0 (wrong), 2→2 (correct): 1/3 correct.
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        const status = screen.getByTestId("matching-resolve-status");
+        expect(status).toHaveTextContent("1");
+        expect(status).toHaveTextContent("3");
+    });
+
+    it("'Try again' clears the resolved view back to the columns", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(screen.getByTestId("matching-resolution")).toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("matching-retry"));
+        expect(
+            screen.queryByTestId("matching-resolution"),
+        ).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+    });
+
+    it("skips the animation under prefers-reduced-motion", () => {
+        const mql = {
+            matches: true,
+            media: "(prefers-reduced-motion: reduce)",
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            onchange: null,
+            dispatchEvent: vi.fn(),
+        } as unknown as MediaQueryList;
+        const spy = vi
+            .spyOn(window, "matchMedia")
+            .mockImplementation(() => mql);
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrong();
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        // The resolution shows immediately with no animation utility.
+        const tile = screen.getByTestId("matching-resolved-b-0");
+        expect(tile.className).not.toContain("animate-[matching-resolve");
+        spy.mockRestore();
+    });
+});
+
+describe("MatchingExercise: equal-height tiles (#822)", () => {
+    // Regression pin (#822): the two column lists must stretch to equal
+    // height so left/right tiles line up even when terms are short and
+    // definitions long. flex-1 fills the (stretched) column div, and
+    // [grid-auto-rows:1fr] then distributes the rows equally across both
+    // grids; without flex-1 each list only matched its own content height.
+    it("stretches both columns with flex-1 + equal auto rows", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        for (const testId of ["matching-left", "matching-right"]) {
+            const list = screen.getByTestId(testId);
+            const classes = list.className.split(/\s+/);
+            expect(classes).toContain("flex-1");
+            expect(classes).toContain("[grid-auto-rows:1fr]");
+        }
+    });
+});
+
+describe("MatchingExercise: separate corrections view (#3186)", () => {
+    afterEach(() => {
+        localStorage.clear();
+    });
+
+    /** 0->1 (wrong), 1->0 (wrong), 2->2 (correct): 1/3 correct. */
+    function pairOneWrongAndCheck() {
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-1"));
+        fireEvent.click(screen.getByTestId("matching-left-1"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        fireEvent.click(screen.getByTestId("matching-left-2"));
+        fireEvent.click(screen.getByTestId("matching-right-2"));
+        fireEvent.click(screen.getByTestId("matching-submit"));
+    }
+
+    it("offers three views and opens on 'Corrections' after a check with mistakes (#3505)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        const toggle = screen.getByTestId("matching-view-toggle");
+        const buttons = within(toggle).getAllByRole("button");
+        expect(buttons.map((b) => b.getAttribute("data-testid"))).toEqual([
+            "matching-my-answers",
+            "matching-corrections",
+            "matching-resolve",
+        ]);
+        expect(screen.getByTestId("matching-corrections")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByTestId("matching-my-answers")).toHaveAttribute(
+            "aria-pressed",
+            "false",
+        );
+        expect(screen.getByTestId("matching-correct-hint-0")).toHaveTextContent("Hello");
+    });
+
+    it("shows the pairs as the learner formed them in 'My answers', ungraded (#3233)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        // No grading at all: no red/green tiles, no feedback rows.
+        for (const idx of [0, 1, 2]) {
+            expect(screen.getByTestId(`matching-left-${idx}`).className).not.toMatch(
+                /is-(wrong|correct)/,
+            );
+            expect(screen.getByTestId(`matching-right-${idx}`).className).not.toMatch(
+                /is-(wrong|correct)/,
+            );
+        }
+        expect(screen.queryByTestId("matching-your-answer-0")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-correct-hint-0")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("matching-pair-correct-2")).not.toBeInTheDocument();
+        // ... but the original pairing stays visible: both tiles of a pair
+        // share the same numbered badge, as before checking.
+        expect(screen.getByTestId("matching-left-0")).toHaveTextContent(/^1/);
+        expect(screen.getByTestId("matching-right-1")).toHaveTextContent(/^1/);
+        expect(screen.getByTestId("matching-left-1")).toHaveTextContent(/^2/);
+        expect(screen.getByTestId("matching-right-0")).toHaveTextContent(/^2/);
+    });
+
+    it("carries the grading in 'Corrections' (#3233)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        fireEvent.click(screen.getByTestId("matching-corrections"));
+        expect(screen.getByTestId("matching-left-0").className).toContain("is-wrong");
+        expect(screen.getByTestId("matching-right-1").className).toContain("is-wrong");
+        expect(screen.getByTestId("matching-left-2").className).toContain("is-correct");
+        expect(screen.getByTestId("matching-your-answer-0")).toHaveTextContent("Thank you");
+    });
+
+    it("keeps a fully correct answer graded, since it has no view toggle (#3233)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        for (const idx of [0, 1, 2]) {
+            fireEvent.click(screen.getByTestId(`matching-left-${idx}`));
+            fireEvent.click(screen.getByTestId(`matching-right-${idx}`));
+        }
+        fireEvent.click(screen.getByTestId("matching-submit"));
+        expect(screen.queryByTestId("matching-view-toggle")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-left-0").className).toContain("is-correct");
+    });
+
+    it("shows a reviewed answer's pairing in 'My answers' (#3233)", () => {
+        render(
+            <MatchingExercise
+                exercise={EXERCISE}
+                onComplete={vi.fn()}
+                reviewed={{
+                    kind: "matching",
+                    matches: [
+                        [0, 1],
+                        [1, 0],
+                        [2, 2],
+                    ],
+                }}
+            />,
+        );
+        // #3505: a reviewed answer with mistakes opens on the corrections too.
+        expect(screen.getByTestId("matching-corrections")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        expect(screen.getByTestId("matching-left-0").className).not.toContain("is-wrong");
+        expect(screen.getByTestId("matching-left-0")).toHaveTextContent(/^1/);
+        expect(screen.getByTestId("matching-right-1")).toHaveTextContent(/^1/);
+    });
+
+    it("shows the correct partner under each mistake in 'Corrections' and switches back", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        fireEvent.click(screen.getByTestId("matching-corrections"));
+        expect(screen.getByTestId("matching-corrections")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByTestId("matching-left")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-correct-hint-0")).toHaveTextContent("Hello");
+        expect(screen.getByTestId("matching-correct-hint-1")).toHaveTextContent("Thank you");
+        // No correction row for the pair that was right.
+        expect(screen.queryByTestId("matching-correct-hint-2")).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByTestId("matching-resolve"));
+        expect(screen.getByTestId("matching-resolution")).toBeInTheDocument();
+
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        expect(screen.queryByTestId("matching-correct-hint-0")).not.toBeInTheDocument();
+    });
+
+    it("'Try again' opens the next check with mistakes on 'Corrections' again (#3505)", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        fireEvent.click(screen.getByTestId("matching-my-answers"));
+        fireEvent.click(screen.getByTestId("matching-retry"));
+        pairOneWrongAndCheck();
+        expect(screen.getByTestId("matching-corrections")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByTestId("matching-correct-hint-0")).toHaveTextContent("Hello");
+    });
+
+    it("keeps the two-view layout with inline corrections when the setting is off", () => {
+        writeMatchingSeparateCorrections(false);
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        expect(screen.queryByTestId("matching-corrections")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-my-answers")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-resolve")).toBeInTheDocument();
+        expect(screen.getByTestId("matching-correct-hint-0")).toHaveTextContent("Hello");
+    });
+
+    it("follows a live settings change while the exercise is open", () => {
+        render(<MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />);
+        pairOneWrongAndCheck();
+        fireEvent.click(screen.getByTestId("matching-corrections"));
+        act(() => writeMatchingSeparateCorrections(false));
+        // The corrections button is gone; the corrections stay inline and
+        // 'My answers' is the active view instead of none at all.
+        expect(screen.queryByTestId("matching-corrections")).not.toBeInTheDocument();
+        expect(screen.getByTestId("matching-my-answers")).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByTestId("matching-correct-hint-0")).toBeInTheDocument();
+    });
+
+    it("keeps inline corrections when the mode hides the view toggle (exam)", () => {
+        render(
+            <LessonModeProvider mode="exam">
+                <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />
+            </LessonModeProvider>,
+        );
+        pairOneWrongAndCheck();
+        expect(screen.queryByTestId("matching-view-toggle")).not.toBeInTheDocument();
+        // Without a toggle the corrections are the only way to see the answer.
+        expect(screen.getByTestId("matching-correct-hint-0")).toHaveTextContent("Hello");
+    });
+});
+
+describe("MatchingExercise: footer counter mirror (#3237)", () => {
+    it("publishes the running counter to the footer and withdraws it after Check", () => {
+        render(
+            <FooterStatusProvider>
+                <MatchingExercise exercise={EXERCISE} onComplete={vi.fn()} />
+                <FooterStatusLine testId="footer-probe" />
+            </FooterStatusProvider>,
+        );
+        expect(screen.getByTestId("footer-probe")).toHaveTextContent("0 / 3 paired");
+        fireEvent.click(screen.getByTestId("matching-left-0"));
+        fireEvent.click(screen.getByTestId("matching-right-0"));
+        expect(screen.getByTestId("footer-probe")).toHaveTextContent("1 / 3 paired");
+        // The top counter keeps its live region; the footer line mirrors it.
+        expect(screen.getByTestId("matching-counter")).toHaveTextContent("1 / 3 paired");
+    });
+});

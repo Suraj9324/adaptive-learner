@@ -1,0 +1,73 @@
+{
+  "category": "features",
+  "language": "pt",
+  "entries": [
+    {
+      "key": "feature_method_switch",
+      "title": "Mudança de Método",
+      "short": "O sistema recomenda um método diferente quando estagna; você decide se muda.",
+      "long": "## O que é a mudança de método?\n\nSe a sua aprendizagem estagna num método enquanto lhe\ncausa stress elevado, o Adaptive Learner sugere uma\nmudança de método. Vê a sugestão como um banner acima do\nchat da sessão e pode aceitá-la ou dispensá-la.\n\n## Quando a sugestão é ativada\n\nA regra analisa as suas três últimas avaliações de sessão.\nAmbas as condições têm de se verificar:\n\n- **Sem progresso na compreensão**: as três pontuações de\n  compreensão não sobem (a mesma pontuação três vezes\n  conta como estagnação).\n- **Stress médio acima de 3** (na escala de 1-5) nessas\n  mesmas três avaliações.\n\nCom menos de três avaliações não há sugestão. Uma fase\ndifícil que ainda mostra progresso, ou uma estagnação sem\nstress, não a ativa.\n\n## Que método é sugerido\n\nO método com o maior peso no seu perfil de aprendizagem\nque não tenha usado recentemente. Sem perfil, o método\nseguinte na ordem fixa de métodos.\n\n## Você decide\n\nO sistema recomenda; você escolhe. Aceitar muda o método\nda sessão e regista uma entrada ``MethodSwitch`` (um\nregisto para o seu perfil). Dispensar oculta a sugestão\ndurante o resto desta sessão; a sessão seguinte verifica\nnovamente.\n\n## Porquê não automático?\n\nAs mudanças de método são uma grande alteração na\nexperiência de aprendizagem. Uma mudança automática\nquebraria a continuidade da aprendizagem e poderia ocorrer\ndurante uma fase difícil mas produtiva. Você conhece o seu\ncontexto melhor do que o sistema.\n"
+    },
+    {
+      "key": "feature_auto_loop",
+      "title": "Auto-Loop",
+      "short": "Na aplicação de desktop, após o passo 7 começa automaticamente um novo ciclo com conteúdo novo; na versão de navegador, a sessão fica no passo 7.",
+      "long": "## O que é o auto-loop?\n\nQuando completa o passo 7 (integração), a sessão pode\niniciar automaticamente um novo ciclo sobre o próximo\ntópico do seu currículo — sem ter de carregar num botão\n\"próximo ciclo\".\n\nSó na aplicação de desktop: na versão de navegador, a sessão\nfica no passo 7, e a página da sessão indica-o. Termine aí a\nsessão e inicie uma nova para continuar a aprender.\n\n## Como é escolhido o próximo tópico\n\n- **Se existir um currículo**: o próximo tópico na\n  ordem hierárquica.\n- **Se não existir currículo**: a IA gera um tópico de\n  seguimento adequado com base na trajetória atual.\n- **Se houver cartões de repetição espaçada em atraso**:\n  são priorizados antes do novo conteúdo.\n\n## Contador de ciclos\n\nCada sessão mostra um contador de ciclos (\"3/5\").\nQuando max_cycles é atingido (padrão: 5), o auto-loop\npausa e pergunta se quer continuar. Isto protege contra\nsessões descontroladas.\n\n## Como interromper o auto-loop\n\n- **Submeter uma avaliação**: após cada ciclo, obtém as\n  três barras deslizantes (compreensão, stress, adequação\n  do método). Se o stress > 3, o sistema sugere uma pausa.\n- **Botão \"Terminar sessão\"**: clicável a qualquer momento.\n- **Aceitar uma mudança de método**: interrompe o loop\n  atual e inicia um novo com o novo método.\n\n## Quando o auto-loop é mais valioso\n\nPara a aprendizagem de línguas com unidades de tópicos\npequenas, onde a sobrecarga de \"iniciar uma nova sessão\"\nabranda a aprendizagem. Para programação, o auto-loop\né muitas vezes menos útil porque as transições de\ntópico são maiores.\n"
+    },
+    {
+      "key": "feature_spaced_repetition",
+      "title": "Repetição Espaçada",
+      "short": "Revisão otimizada no tempo com base no seu historial de aprendizagem.",
+      "docs_slug": "user-guide/lessons",
+      "long": "## O que é a repetição espaçada?\n\nA repetição espaçada é a técnica de colocar revisões em\nintervalos crescentes. Usa o efeito da curva do\nesquecimento: cada item recordado com sucesso dura mais\ntempo na próxima vez.\n\n## Os intervalos no Adaptive Learner\n\nCada elemento de exercício a que responde é registado. A\ndata da próxima revisão depende de quantas vezes seguidas\nrespondeu corretamente:\n\n- **0 respostas certas seguidas** (ou acabou de errar):\n  revisão 1 dia depois.\n- **1 resposta certa seguida**: 3 dias depois.\n- **2 ou mais respostas certas seguidas**: 7 dias depois.\n\nCom **3 respostas certas seguidas** o elemento conta como\ndominado e sai da fila de revisão. Uma resposta errada\nposterior trá-lo de volta.\n\n## O que desloca a data\n\n- **Dica usada**: o intervalo é reduzido para metade,\n  porque a resposta veio com ajuda.\n- **Certo no modo Exame**: o intervalo é duplicado, porque\n  uma resposta sem ajuda é uma prova mais forte.\n\n## Quando o sistema recomenda revisões\n\nQuando há elementos pendentes, aparece no Painel um cartão\nde revisão com o número de elementos pendentes e em atraso\ne um botão **Abrir sessão de revisão**. Os elementos em\natraso vêm primeiro, depois os que têm mais erros.\nDetalhes: consulte o guia das lições.\n"
+    },
+    {
+      "key": "feature_conversation_analysis",
+      "title": "Análise de Conversa / Importação",
+      "short": "Analise históricos de conversas existentes e extraia deles artefactos de aprendizagem concretos.",
+      "long": "## O que é a análise de conversa?\n\nO Adaptive Learner pode analisar conversas existentes\ndo ChatGPT, Claude ou Gemini e extrair delas conteúdo\nde aprendizagem. Importa a transcrição uma vez — o\nsistema lê-a, estrutura-a e transforma-a num artefacto\nde aprendizagem utilizável.\n\n## O que é extraído\n\n- **Conceitos** — termos e ideias discutidos na conversa.\n- **Lacunas de conhecimento** — pontos onde fez perguntas\n  adicionais ou cometeu erros.\n- **Erros** — equívocos concretos visíveis na conversa.\n- **Vocabulário / terminologia** — palavras do domínio\n  (especialmente relevantes para aprendizagem de línguas\n  ou campos especializados).\n\n## Como funciona a importação\n\n1. Exporte a sua conversa do ChatGPT, Claude ou Gemini\n  como Markdown ou JSON.\n2. Carregue o ficheiro no Adaptive Learner (arraste e\n  solte ou seletor de ficheiros).\n3. O sistema deteta o formato automaticamente e armazena\n  as mensagens.\n4. Desencadeie a análise — a IA lê a conversa na sua\n  língua de aprendizagem e produz a análise estruturada.\n\n## O que pode fazer a seguir\n\nTrês ações decorrem da análise:\n\n- **\"Criar currículo\"** — os conceitos extraídos\n  alimentam um currículo hierárquico.\n- **\"Iniciar sessão\"** — uma sessão que começa\n  diretamente a partir das lacunas de conhecimento\n  detetadas.\n- **\"Gerar cartões Anki\"** — flashcards a partir dos\n  conceitos e vocabulário.\n\n## Duplicados\n\nSe importar a mesma conversa duas vezes, o sistema\ndeteta-o via hash de conteúdo e oferece navegar para\na análise existente em vez de criar uma cópia.\n\n## Privacidade\n\nOs conteúdos da conversa vão APENAS para o seu\nfornecedor de IA ativo (o que configurou nas\ndefinições). O sistema não envia nada para um servidor\ncentral. Quando elimina a conversa, os conteúdos\ndesaparecem.\n"
+    },
+    {
+      "key": "feature_gamification",
+      "title": "Gamificação (XP, Emblemas, Sequências)",
+      "short": "Sistema de progresso com pontos de experiência, emblemas e sequências: motivação sem artifícios.",
+      "docs_slug": "user-guide/dashboard",
+      "long": "## O que é a camada de gamificação?\n\nTrês mecânicas tornam o progresso de aprendizagem visível\ne recompensador:\n\n- **XP (pontos de experiência)** - por sessões e lições\n  concluídas, pela avaliação inicial e por conversas\n  importadas. Os níveis sobem com XP.\n- **Emblemas** - para marcos (primeira sessão, constância,\n  experimentar métodos, profundidade, várias línguas).\n- **Sequências** - dias consecutivos com atividade de\n  aprendizagem.\n\n## Como o XP é ganho\n\n- **Sessão concluída**: 50 XP, +10 XP por ciclo concluído,\n  +25 XP por ciclo que chegou ao passo 7.\n- **Primeira sessão num método novo**: +50 XP.\n- **Lição concluída**: 30 XP, +10 XP por estrela, +20 XP\n  por três estrelas com todos os passos certos à primeira\n  tentativa.\n- **Multiplicador de sequência**: +25% por dia de\n  sequência sobre o XP de sessões e lições, até 7 dias (no\n  máximo 2,75x).\n- **Combo do modo jogo**: até 20 XP extra por uma lição\n  jogada com combos.\n- **Avaliação inicial concluída**: 100 XP.\n- **Conversa importada e analisada**: 75 XP.\n\nOs níveis crescem numa curva cada vez mais larga: nível 2\ncom 100 XP, nível 3 com 300, nível 4 com 600, nível 5 com\n1000; cada intervalo é 100 XP maior do que o anterior.\n\n## Os emblemas não são coercivos\n\n*Não* precisa de um único emblema para usar a aplicação de\nforma produtiva. São um espelho, não um alvo. As\nnotificações de emblemas podem ser desativadas nas\nconfigurações.\n\n## Congelamentos de sequência\n\nCada 7 dias de sequência rendem um congelamento de\nsequência, até 3 em reserva. Se falhar um dia, um\ncongelamento é usado automaticamente e pausa a sua\nsequência em vez de a reiniciar. Com o modo fim de semana\nativo, o sábado e o domingo não contam como falhas.\n\n## Porque é que isto funciona sem artifícios\n\nA investigação sobre aprendizagem mostra: a recompensa\nextrínseca pode destruir a motivação intrínseca (\"efeito\nde sobrejustificação\"). O Adaptive Learner aposta em que\nas mecânicas sejam um **espelho** do progresso, não um\nsistema de incentivos. Sem tabelas de classificação, sem\nfuncionalidades sociais, sem partilha de pontos: os dados\nficam consigo.\n\n## Reposição\n\nSe os valores de gamificação já não corresponderem à sua\nsituação (por ex. um novo começo após uma longa pausa),\npode repor o XP, os emblemas e a sequência nas\nconfigurações. O currículo, as sessões e as avaliações são\npreservados.\n"
+    },
+    {
+      "key": "view_dashboard",
+      "title": "Painel",
+      "short": "A sua base: progresso, sequência, XP, emblemas, revisões pendentes e ações rápidas.",
+      "docs_slug": "user-guide/dashboard",
+      "long": "## O que mostra o painel?\n\nO painel é o seu centro de comando. \"Continuar a aprender\"\nfica no topo com a sua lição mais recentemente acedida,\nseguido dos cartões acionáveis (lições pausadas, missões,\náreas de foco, fila de revisão), depois a gamificação (XP,\nsequência, emblemas) e, por fim, os painéis analíticos.\n\n## Filtro\n\nUm filtro de matérias lista apenas as suas próprias\nmatérias, ordenadas pelas mais usadas primeiro.\n"
+    },
+    {
+      "key": "view_content_browser",
+      "title": "Navegador de conteúdos",
+      "short": "A página onde encontra, descarrega e inicia conjuntos de lições.",
+      "docs_slug": "features/content-browser",
+      "long": "## Como encontro lições?\n\nO navegador de conteúdos em /content é construído em torno\ndo fluxo de aprendizagem: pesquisa primeiro (instantânea,\ntolerante a acentos), depois \"Continuar a aprender\" e a\nseguir o catálogo. O catálogo divide-se em \"Línguas\" (origem\n> destino > nível) e \"Conhecimento\" (domínios não\nlinguísticos).\n\n## Fontes e livros\n\nOs selos de origem mostram de onde vem um conjunto; um\nfiltro de origem oculta fontes individuais. Um domínio pode\napresentar recomendações de livros.\n"
+    },
+    {
+      "key": "view_lesson",
+      "title": "Lição",
+      "short": "O visualizador que o guia passo a passo pela teoria e pelos exercícios de uma lição.",
+      "docs_slug": "user-guide/lessons",
+      "long": "## Como funcionam os exercícios?\n\nUma lição é uma sequência de passos de teoria e de\nexercício. Cada conjunto pode usar os tipos de exercício\nbase (correspondência, escolha de imagem, texto livre,\ncloze, peças de palavras, escolha múltipla); alguns\nconjuntos acrescentam outros tipos, como categorização ou\nditado áudio. A lista completa está na visão geral das\nfuncionalidades.\n\n## Controlos\n\nEnter verifica um exercício respondido e avança. A partir\nde um exercício pode saltar para a teoria correspondente\natravés de \"Reler a teoria\". No final vê a sua pontuação\ncom estrelas e pode exportá-la como Markdown.\n"
+    },
+    {
+      "key": "view_settings",
+      "title": "Definições",
+      "short": "Tudo o que pode alterar sem código ou YAML — idioma, IA, aprendizagem, dados, aparência.",
+      "docs_slug": "user-guide/settings",
+      "long": "## O que posso configurar?\n\nAs definições agrupam idioma, fornecedor de IA e chaves,\nmodo de armazenamento, opções de aprendizagem (ex.: atalho\nEnter, direção de exercício preferida), dados (cópia de\nsegurança, repositórios de conteúdos), aparência (12 temas)\ne gamificação.\n\n## Os seus dados nas suas mãos\n\nEm \"Dados\", cria e importa cópias de segurança e liga os\nseus próprios repositórios de conteúdos. Nada disto sai do\nseu dispositivo sem ser pedido.\n"
+    },
+    {
+      "key": "feature_backup",
+      "title": "Cópia de segurança e restauro",
+      "short": "Um instantâneo completo do seu estado de aprendizagem que pode guardar e restaurar noutro lugar.",
+      "docs_slug": "features/backup",
+      "long": "## O que é uma cópia de segurança?\n\nUma cópia de segurança é um instantâneo completo: todas as\ntabelas de dados (projetos, sessões, progresso das lições,\nerros, gamificação, missões ...), os seus conjuntos de\nconteúdo transferidos e as suas preferências locais,\nreunidos num único ficheiro ``.alb`` (um arquivo ZIP). As\ncópias antigas num único JSON continuam a poder ser\nimportadas.\n\n## Entre identidades\n\nPode importar uma cópia de segurança numa instalação nova\nou noutro perfil; o restauro volta a resolver as\nreferências internas de forma limpa. Na importação vê um\nresumo por tabela.\n"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "category": "concepts",
+  "language": "es",
+  "entries": [
+    {
+      "key": "curriculum",
+      "title": "Plan de estudios",
+      "short": "Un plan de estudios es el mapa de conocimientos de un proyecto de aprendizaje: jerarquía de temas, lecciones y notas que crece contigo. Define los objetivos, el contenido y la metodología, y el sistema mide lo que se aprende realmente.\n",
+      "long": "## ¿Qué es un plan de estudios?\n\nEn educación, un plan de estudios (del latín *curriculum*) es un\nconcepto sistemático que define cómo ocurren la enseñanza y el\naprendizaje.\n\n## Cuatro preguntas fundamentales\n\nTodo plan de estudios responde a cuatro preguntas centrales:\n\n- **Objetivos de aprendizaje (¿por qué?)** — ¿Qué competencias\n  deben adquirirse?\n- **Contenido de aprendizaje (¿qué?)** — ¿Qué temas se van a\n  cubrir?\n- **Metodología y didáctica (¿cómo?)** — ¿Qué formas de enseñanza\n  y aprendizaje se utilizarán?\n- **Evaluación (¿con qué resultado?)** — ¿Cómo se medirá el\n  éxito del aprendizaje?\n\n## Diferencia con un programa de estudios\n\nUn plan de estudios sitúa al aprendiz y la adquisición de\ncompetencias en el centro (orientación a resultados), no solo una\nlista fija de materias. Un programa documenta **qué** debe\nenseñarse; un plan de estudios describe también el **por qué** y\nel **cómo**, y mide **qué se aprendió realmente**.\n\n## Cuatro dimensiones\n\nLa investigación curricular distingue cuatro manifestaciones:\n\n- **Plan de estudios intencional** — el objetivo documentado.\n- **Plan de estudios implementado** — lo que realmente se enseña.\n- **Plan de estudios alcanzado** — lo que el aprendiz comprende\n  de verdad.\n- **Plan de estudios oculto** — el aprendizaje implícito que\n  ocurre en paralelo (hábitos de estudio, actitudes, normas\n  sociales).\n\n## En Adaptive Learner\n\nEn Adaptive Learner, el plan de estudios es tu planificación\npersonal para un tema. Organiza los temas de aprendizaje de\nforma jerárquica y los vincula a lecciones. Tú defines los\nobjetivos, el contenido y los métodos; el sistema apoya la\nevaluación mediante el seguimiento, el perfil de aprendizaje y\nla retroalimentación de la IA después de cada paso.\n\nA diferencia de un plan de estudios impreso, este se adapta\ncontinuamente: cuando aparece una recomendación de cambio de\nmétodo, es el plan de estudios implementado reaccionando al\nplan de estudios alcanzado.\n"
+    },
+    {
+      "key": "learning_project",
+      "title": "Proyecto de aprendizaje",
+      "short": "Tu esfuerzo de aprendizaje concreto con tema, objetivo, plazo y tiempo de aprendizaje diario. Es el contenedor de todas las sesiones, el plan de estudios y el perfil de aprendizaje.\n",
+      "long": "## ¿Qué es un proyecto de aprendizaje?\n\nUn proyecto de aprendizaje agrupa todo lo que pertenece a un\nesfuerzo de aprendizaje: el tema, tu objetivo, el plazo y tu\ntiempo de aprendizaje diario. Es el marco que contiene tus\nsesiones, tu plan de estudios y tu perfil de aprendizaje.\n\n## ¿Por qué estos cuatro campos?\n\n- **Tema** — qué quieres aprender (p. ej., «Español para viajar»,\n  «Fundamentos de Python», «Escala de do mayor al piano»).\n  Concreto y acotado, sin ser demasiado amplio.\n- **Objetivo** — qué quieres ser capaz de hacer al final. Los\n  objetivos concretos («pedir comida en un restaurante») producen\n  mejores prompts de IA que los vagos («aprender español»).\n- **Plazo** — hasta cuándo. Influye en la agresividad con la que\n  el sistema programa las repeticiones y en cuándo aparece la\n  recomendación de cambio de método.\n- **Tiempo de aprendizaje diario** — cuántos minutos al día puedes\n  invertir. Guía las recomendaciones de repetición espaciada y la\n  duración de las sesiones.\n\n## Por qué importan los objetivos concretos\n\nLa investigación educativa es clara: los objetivos SMART\n(específicos, medibles, alcanzables, realistas y con límite de\ntiempo) duplican el éxito del aprendizaje en comparación con las\nintenciones vagas. Adaptive Learner traduce tu objetivo al prompt\ndel sistema de la IA; cuanto más concreto seas, más precisos\nserán los ejercicios generados.\n\n## En Adaptive Learner\n\nPuedes tener varios proyectos de aprendizaje en paralelo. Cada\nsesión pertenece exactamente a un proyecto; tu progreso (XP,\ninsignias, racha) se registra por proyecto. Cuando cambias el\nplazo, el sistema ajusta automáticamente la cadencia de\nrepetición: un plazo ajustado densifica las repeticiones.\n"
+    },
+    {
+      "key": "learning_profile",
+      "title": "Perfil de aprendizaje",
+      "short": "Tu perfil personal de fortalezas en los seis métodos de aprendizaje, derivado del test de evaluación. Se visualiza como un gráfico radar y guía qué método sugiere el sistema al iniciar una sesión.\n",
+      "long": "## ¿Qué es el perfil de aprendizaje?\n\nEl perfil de aprendizaje muestra qué tan bien se adapta a ti\ncada uno de los seis métodos de Adaptive Learner. Se obtiene\nde tus respuestas en el test de evaluación (12 preguntas) y\nse visualiza como un gráfico radar.\n\n## Los seis ejes\n\nCada eje es un método con un peso entre 0 y 100:\n\n- **Deductivo** — aprender la regla y luego aplicarla.\n- **Inductivo** — ver ejemplos y deducir la regla tú mismo.\n- **Basado en errores** — cometer errores deliberadamente y\n  luego entender por qué ocurren.\n- **Dialógico** — aprender mediante la conversación.\n- **Contextual** — aprender en situaciones cotidianas simuladas.\n- **Adaptativo con IA** — el sistema elige automáticamente.\n\n## Es un perfil, no una etiqueta\n\nNadie es «un aprendiz deductivo». Cada aprendiz tiene un patrón\nponderado en los seis métodos. Un perfil con pesos altos en\ninductivo y dialógico no significa que el deductivo no te\nfuncione; significa que los otros dos suelen llevarte al éxito\nde aprendizaje más rápido.\n\n## Cambios a lo largo del tiempo\n\nEl perfil de aprendizaje no está grabado en piedra. Con cada\nciclo de aprendizaje completado y cada cambio de método, el\nsistema ajusta sus recomendaciones. Puedes repetir el test de\nevaluación en cualquier momento; generalmente es útil cada\n3-6 meses o tras un cambio de tema importante.\n\n## En Adaptive Learner\n\nEl perfil guía la vista del panel principal y las\nrecomendaciones de sesión. Si inicias una sesión sin especificar\nun método, el sistema elige el método con el peso más alto en\ntu perfil.\n"
+    },
+    {
+      "key": "learning_session",
+      "title": "Sesión de aprendizaje",
+      "short": "Una unidad de aprendizaje impulsada por IA que sigue el ciclo de 7 pasos. La IA desempeña el rol de docente; el evaluador de doble prompt mide tu comprensión y avanza el ciclo automáticamente.\n",
+      "long": "## ¿Qué es una sesión de aprendizaje?\n\nUna sesión de aprendizaje es una unidad continua de aprendizaje\nsobre un tema, impulsada por el ciclo de 7 pasos (entrada,\nintento, error, retroalimentación, adaptación, repetición,\nintegración). La IA desempeña el rol del docente; tú conduces\nel diálogo.\n\n## ¿En qué se diferencia de un chat normal?\n\nEn una sesión, el **evaluador de doble prompt** se ejecuta en\nparalelo: después de cada respuesta tuya, una segunda instancia\nde IA juzga tu comprensión (confianza del 0 al 100 %) y decide\nsi estás listo para el siguiente paso. Un chat normal no tiene\neste corrector.\n\n## Streaming\n\nLas respuestas de la IA aparecen palabra a palabra (Server-Sent\nEvents), de modo que no tienes que esperar la respuesta completa.\nPuedes interrumpir en cualquier momento y hacer preguntas; la\nsesión continúa hasta que la termines o el ciclo se complete.\n\n## ¿Cuándo debería terminar una sesión?\n\n- Después del paso 7 (integración), cuando el ciclo de\n  aprendizaje está completo.\n- Cuando el sistema recomiende un cambio de método y lo\n  aceptes.\n- Cuando tu calificación de **estrés** haya superado el 4\n  en varias calificaciones recientes: un descanso es más\n  productivo que seguir a la fuerza.\n\n## Las calificaciones se acumulan\n\nCada sesión termina con tres controles deslizantes\n(comprensión, estrés, adecuación del método; cada uno del\n1 al 5). Estos valores alimentan tu perfil de aprendizaje y\ndan forma a las recomendaciones futuras: un estrés sostenido\nalto más baja adecuación del método activa la recomendación\nde cambio de método.\n\n## En Adaptive Learner\n\nUna sesión pertenece exactamente a un proyecto de aprendizaje.\nSolo puedes tener una sesión activa a la vez; esto evita mezclar\ntemas y protege la lógica de cambio de método del ruido.\n"
+    },
+    {
+      "key": "content_repository",
+      "title": "Repositorio de contenido",
+      "short": "Un repositorio público de GitHub con conjuntos de lecciones estructurados que Adaptive Learner puede cargar como fuente de contenido.",
+      "docs_slug": "features/content-repos",
+      "long": "## ¿Qué es un repositorio de contenido?\n\nLas lecciones provienen de repositorios de contenido:\nrepositorios públicos de GitHub que agrupan conjuntos de\nlecciones. El repositorio oficial siempre se carga; además\nde ese, puedes conectar el tuyo propio.\n\n## Múltiples fuentes\n\nEn Ajustes > Datos gestionas cualquier número de repositorios\n(añadir, eliminar, orden = prioridad). Cada conjunto lleva una\ninsignia de fuente para que puedas ver de dónde procede una\nlección.\n"
+    },
+    {
+      "key": "trust_level",
+      "title": "Nivel de confianza",
+      "short": "La calificación de confianza automática de un repositorio de contenido conectado, derivada de su validación técnica.",
+      "docs_slug": "features/content-repos",
+      "long": "## ¿Qué es un nivel de confianza?\n\nCada repositorio conectado ejecuta una validación técnica\nautomática en cada sincronización. Eso produce un nivel de\nconfianza: 0 (no validado o fallido), 1 (técnicamente válido:\nal menos una lección, sin contenido ejecutable) y 3\n(recomendado oficialmente).\n\n## Lo que NO es\n\nEl nivel es puramente técnico. Una calificación basada en la\ncomunidad o el contenido (confianza 2) requiere un servicio de\nbackend compartido y está aplazada.\n"
+    },
+    {
+      "key": "streak",
+      "title": "Racha",
+      "short": "El número de días consecutivos que has aprendido: combustible para el multiplicador de XP.",
+      "docs_slug": "user-guide/dashboard",
+      "long": "## ¿Qué es una racha?\n\nUna racha cuenta los días de aprendizaje consecutivos. Cada\nsesión o lección completada llena el mapa de calor y mantiene\nla racha viva.\n\n## Efecto\n\nLa racha alimenta un multiplicador de XP (+25% por cada día\nconsecutivo, con un tope de 7 días). Es un espejo de tu\nconstancia, no un palo: una misión diaria no cumplida no\nconlleva penalización.\n"
+    },
+    {
+      "key": "assessment",
+      "title": "Evaluación",
+      "short": "Un breve test que determina cuáles de los seis métodos de aprendizaje se adaptan a ti.",
+      "docs_slug": "user-guide/assessment",
+      "long": "## ¿Qué es la evaluación?\n\nLa evaluación plantea doce preguntas y a partir de ellas\ncalcula tu perfil de aprendizaje: la ponderación de los seis\nmétodos en los que se apoya la aplicación.\n\n## Opcional y reanudable\n\nDesde la renovación del onboarding, la evaluación es opcional\ny solo se accede a ella a través del asistente de perfil. Si la\nabandonas, la aplicación recuerda tu progreso para que más\ntarde puedas continuar donde lo dejaste.\n"
+    }
+  ]
+}

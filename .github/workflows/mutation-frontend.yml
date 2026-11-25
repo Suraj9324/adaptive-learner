@@ -1,0 +1,138 @@
+name: Mutation (Frontend)
+
+# Stryker mutation testing for the frontend logic layers
+# (src/lib + src/hooks + src/api). Mutation runs are heavy, so this
+# is NOT on the per-push critical path:
+#   - workflow_dispatch: run on demand from the Actions tab.
+#   - schedule (nightly): only fires when the repo variable
+#     ENABLE_NIGHTLY_MUTATION is set to "true" (Settings ->
+#     Secrets and variables -> Actions -> Variables). Off by
+#     default so it never silently burns CI minutes.
+#
+# Scope / runtime (#1956): the full mutate scope from
+# stryker.config.json is ~27k mutants and takes ~7h at concurrency 2 —
+# it CANNOT finish inside the 120-min job timeout, and a timed-out job
+# uploads no report. So each run (scheduled nightly OR a plain dispatch)
+# mutates an interleaved 1/SHARD_COUNT slice of the files; over
+# SHARD_COUNT nights the union covers the whole scope, and every single
+# run completes with an uploadable report. Override with the `mutate`
+# input to scope a specific glob, or "ALL" for the (very long) full run.
+#
+# IMPORTANT (lessons-learned "wired != working"): trigger this once
+# via workflow_dispatch after merging and confirm the artifact +
+# score before relying on the schedule.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mutate:
+        description: >-
+          Mutation scope. Empty = today's nightly shard (a completing
+          ~1/N slice). A glob like "src/api/**/*.ts" scopes to that glob.
+          "ALL" runs the full ~27k-mutant scope (will likely exceed the
+          120-min timeout and upload no report). See #1956.
+        required: false
+        default: ""
+  schedule:
+    # 03:17 UTC daily; the job body is gated below so it is a no-op
+    # unless ENABLE_NIGHTLY_MUTATION == "true".
+    - cron: "17 3 * * *"
+
+# Coerce any straggler Node-20 JS action to Node 24 (see coverage.yml).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  stryker:
+    name: Stryker Mutation
+    runs-on: ubuntu-latest
+    # Manual dispatch always runs; the nightly schedule only runs when
+    # the maintainer has opted in via the repo variable.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          vars.ENABLE_NIGHTLY_MUTATION == 'true' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Run Stryker
+        working-directory: frontend
+        # thresholds.break is null in stryker.config.json, so a low
+        # score never fails the job — the report is the deliverable.
+        env:
+          MUTATE_INPUT: ${{ inputs.mutate }}
+          # How many nights it takes to cover the whole scope. Raise this
+          # if a shard ever approaches the 120-min timeout; lower it (down
+          # to 1) to cover more per night. See the header note + #1956.
+          # Sizing history (#2223): 8 (from the ~7h estimate) timed out
+          # nightly with ~2800 mutants/shard; 24 STILL timed out (run
+          # 30614546055: 1383 mutants - interleaving is uneven - and only
+          # 1311 tested in 1h54m). Sustained throughput is ~12 mutants/min
+          # because timed-out/surviving mutants dominate the tail; early-run
+          # rate is ~2x that and misleads. 48 -> ~470 avg / ~700 worst
+          # observed shape, ~40-60 min. If the 48-night sweep cadence is
+          # too slow, the honest levers are stryker concurrency (runner
+          # has 4 vCPU, config assumes 2) or a tighter per-mutant timeout,
+          # each measured on its own.
+          SHARD_COUNT: "48"
+        run: |
+          set -euo pipefail
+          if [ "$MUTATE_INPUT" = "ALL" ]; then
+            echo "Running the FULL mutate scope from stryker.config.json"
+            echo "(~27k mutants; expected to exceed the job timeout)."
+            bunx stryker run
+          elif [ -n "$MUTATE_INPUT" ]; then
+            echo "Running scoped mutation: $MUTATE_INPUT"
+            # --mutate REPLACES the config's mutate array (incl. its test
+            # exclusions), so re-append them to keep test files out.
+            bunx stryker run --mutate \
+              "$MUTATE_INPUT,!src/**/*.test.*,!src/**/*.spec.*,!src/**/*.d.ts,!src/test/**"
+          else
+            # Default: today's interleaved shard of the full scope. Every
+            # (NR-1) % N == idx file is mutated, so the shard is spread
+            # across directories (balances mutant density) and the union
+            # over N days equals the full scope.
+            idx=$(( 10#$(date -u +%j) % SHARD_COUNT ))
+            # Mirror stryker.config.json's mutate scope exactly: lib gets
+            # .ts + .tsx, hooks + api only .ts. sort keeps the ordering
+            # deterministic so a given day always maps to the same shard.
+            mapfile -t files < <(
+              {
+                git ls-files src/lib | grep -E '\.(ts|tsx)$'
+                git ls-files src/hooks src/api | grep -E '\.ts$'
+              } | grep -vE '\.(test|spec)\.|\.d\.ts$|(^|/)test/' | sort -u
+            )
+            shard=$(printf '%s\n' "${files[@]}" \
+              | awk -v n="$SHARD_COUNT" -v i="$idx" '(NR-1) % n == i' \
+              | paste -sd, -)
+            count=$(printf '%s' "$shard" | tr ',' '\n' | grep -c .)
+            echo "Nightly shard ${idx}/${SHARD_COUNT}: ${count} of ${#files[@]} files."
+            bunx stryker run --mutate "$shard"
+          fi
+
+      - name: Upload mutation HTML report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-mutation-report
+          path: frontend/reports/mutation
+          retention-days: 14

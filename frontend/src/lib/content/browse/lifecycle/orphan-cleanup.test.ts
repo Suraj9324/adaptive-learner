@@ -1,0 +1,289 @@
+/**
+ * Tests for the orphan-cleanup planners (#1445 Parts B + C). Numbers must be
+ * exact + isolated (other repos untouched); cards dedup across SRS directions.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import {
+  distinctCardCount,
+  isEmptyPlan,
+  planLessonDataDeletion,
+  planLessonsDataDeletion,
+  planOrphanCleanup,
+  planRepoDataDeletion,
+  planSetDataDeletion,
+} from "./orphan-cleanup";
+
+const progress = [
+  { id: "p1", source: "jane/repo", set_id: "waehrung" },
+  { id: "p2", source: "jane/repo", set_id: "waehrung" }, // 2nd lesson, same set
+  { id: "p3", source: "astrapi69/adaptive-learner-content", set_id: "psych" },
+  { id: "p4", source: "bob/other", set_id: "shared" },
+];
+
+// Two SRS directions of the same element = one card.
+const cards = [
+  { set_id: "waehrung", lesson_id: "01", exercise_id: "e1", element_key: "geld" },
+  { set_id: "waehrung", lesson_id: "01", exercise_id: "e1", element_key: "geld" },
+  { set_id: "waehrung", lesson_id: "01", exercise_id: "e2", element_key: "wert" },
+  { set_id: "psych", lesson_id: "01", exercise_id: "e1", element_key: "bias" },
+  { set_id: "shared", lesson_id: "01", exercise_id: "e1", element_key: "x" },
+];
+
+const sets = [
+  { source: "jane/repo", id: "waehrung" },
+  { source: "astrapi69/adaptive-learner-content", id: "psych" },
+  { source: "bob/other", id: "shared" },
+  { source: "someone/else", id: "shared" }, // "shared" also from another repo
+];
+
+describe("distinctCardCount", () => {
+  it("dedups across SRS directions and restricts to the given set ids", () => {
+    expect(distinctCardCount(cards, new Set(["waehrung"]))).toBe(2);
+    expect(distinctCardCount(cards, new Set(["psych"]))).toBe(1);
+    expect(distinctCardCount(cards, new Set())).toBe(0);
+  });
+});
+
+describe("planRepoDataDeletion (Part B)", () => {
+  it("removes exactly the repo's lessons + its now-orphaned cards", () => {
+    const plan = planRepoDataDeletion("jane/repo", progress, cards, sets);
+    expect(plan.lessonProgressIds.sort()).toEqual(["p1", "p2"]);
+    expect(plan.orphanedSetIds).toEqual(["waehrung"]);
+    expect(plan.lessonCount).toBe(2);
+    expect(plan.cardCount).toBe(2); // geld + wert, deduped
+  });
+
+  it("is isolated — other repos' progress + cards are never in the plan", () => {
+    const plan = planRepoDataDeletion("jane/repo", progress, cards, sets);
+    expect(plan.lessonProgressIds).not.toContain("p3");
+    expect(plan.lessonProgressIds).not.toContain("p4");
+    expect(plan.orphanedSetIds).not.toContain("psych");
+    expect(plan.orphanedSetIds).not.toContain("shared");
+  });
+
+  it("keeps cards for a set id ANOTHER connected repo still provides", () => {
+    // Removing bob/other, but "shared" is also provided by someone/else →
+    // its cards stay (not orphaned).
+    const plan = planRepoDataDeletion("bob/other", progress, cards, sets);
+    expect(plan.lessonProgressIds).toEqual(["p4"]); // the lesson still goes
+    expect(plan.orphanedSetIds).toEqual([]); // but no cards, id still loadable
+    expect(plan.cardCount).toBe(0);
+  });
+});
+
+describe("planOrphanCleanup (Part C)", () => {
+  it("plans every progress row + card whose source is no longer loadable", () => {
+    // jane/repo removed from the connected sources → its data is orphaned.
+    const remaining = sets.filter((s) => s.source !== "jane/repo");
+    const plan = planOrphanCleanup(progress, cards, remaining);
+    expect(plan.lessonProgressIds.sort()).toEqual(["p1", "p2"]);
+    expect(plan.orphanedSetIds).toEqual(["waehrung"]);
+    expect(plan.lessonCount).toBe(2);
+    expect(plan.cardCount).toBe(2);
+  });
+
+  it("leaves official + still-connected progress alone", () => {
+    const remaining = sets.filter((s) => s.source !== "jane/repo");
+    const plan = planOrphanCleanup(progress, cards, remaining);
+    expect(plan.lessonProgressIds).not.toContain("p3"); // official
+    expect(plan.lessonProgressIds).not.toContain("p4"); // bob/other still there
+  });
+
+  it("returns an empty plan when nothing is orphaned", () => {
+    const plan = planOrphanCleanup(progress, cards, sets);
+    expect(isEmptyPlan(plan)).toBe(true);
+    expect(plan.lessonProgressIds).toEqual([]);
+    expect(plan.orphanedSetIds).toEqual([]);
+  });
+});
+
+describe("planSetDataDeletion - single-set delete cleanup (#1819)", () => {
+  const progress = [
+    { id: "lp-1", source: "jane/repo", set_id: "waehrung" },
+    { id: "lp-2", source: "jane/repo", set_id: "waehrung" },
+    { id: "lp-3", source: "jane/repo", set_id: "other-set" },
+    { id: "lp-4", source: "user-generated", set_id: "waehrung" },
+  ];
+  const cards = [
+    { set_id: "waehrung", lesson_id: "01", exercise_id: "e1", element_key: "geld" },
+    { set_id: "waehrung", lesson_id: "01", exercise_id: "e1", element_key: "geld" },
+    { set_id: "other-set", lesson_id: "01", exercise_id: "e1", element_key: "zeit" },
+  ];
+
+  it("plans exactly the set's progress rows + its cards", () => {
+    const plan = planSetDataDeletion("jane/repo", "waehrung", progress, cards, [
+      { source: "jane/repo", id: "waehrung" },
+    ]);
+    expect(plan.lessonProgressIds).toEqual(["lp-1", "lp-2"]);
+    expect(plan.orphanedSetIds).toEqual(["waehrung"]);
+    expect(plan.lessonCount).toBe(2);
+    expect(plan.cardCount).toBe(1);
+  });
+
+  it("keeps cards when ANOTHER source still provides the same set id", () => {
+    const plan = planSetDataDeletion("jane/repo", "waehrung", progress, cards, [
+      { source: "jane/repo", id: "waehrung" },
+      { source: "other/repo", id: "waehrung" },
+    ]);
+    expect(plan.lessonProgressIds).toEqual(["lp-1", "lp-2"]);
+    expect(plan.orphanedSetIds).toEqual([]);
+    expect(plan.cardCount).toBe(0);
+  });
+
+  it("returns an empty plan when the set has no learner data", () => {
+    const plan = planSetDataDeletion("jane/repo", "untouched", progress, cards, [
+      { source: "jane/repo", id: "untouched" },
+    ]);
+    expect(isEmptyPlan(plan)).toBe(true);
+  });
+
+  it("never plans another source's rows for the same set id", () => {
+    const plan = planSetDataDeletion("jane/repo", "waehrung", progress, cards, [
+      { source: "jane/repo", id: "waehrung" },
+    ]);
+    expect(plan.lessonProgressIds).not.toContain("lp-4");
+  });
+});
+
+describe("planLessonDataDeletion (#2064)", () => {
+  const lessonProgress = [
+    { id: "lp-1", source: "user-generated", set_id: "book42", lesson_filename: "01-intro.json" },
+    { id: "lp-2", source: "user-generated", set_id: "book42", lesson_filename: "02-body.json" },
+    { id: "lp-3", source: "jane/repo", set_id: "book42", lesson_filename: "01-intro.json" },
+  ];
+  const lessonCards = [
+    { set_id: "book42", lesson_id: "01-intro.json", exercise_id: "e1", element_key: "a" },
+    { set_id: "book42", lesson_id: "01-intro.json", exercise_id: "e1", element_key: "a" }, // dir dup
+    { set_id: "book42", lesson_id: "01-intro.json", exercise_id: "e2", element_key: "b" },
+    { set_id: "book42", lesson_id: "02-body.json", exercise_id: "e1", element_key: "c" },
+  ];
+
+  it("plans only the target lesson's progress + deduped cards", () => {
+    const plan = planLessonDataDeletion(
+      "user-generated",
+      "book42",
+      "01-intro.json",
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds).toEqual(["lp-1"]);
+    expect(plan.lessonCards).toEqual([{ set_id: "book42", lesson_id: "01-intro.json" }]);
+    expect(plan.lessonCount).toBe(1);
+    expect(plan.cardCount).toBe(2); // e1 (deduped) + e2
+    expect(plan.orphanedSetIds).toEqual([]);
+  });
+
+  it("never plans another source's row for the same set id + filename", () => {
+    const plan = planLessonDataDeletion(
+      "user-generated",
+      "book42",
+      "01-intro.json",
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds).not.toContain("lp-3");
+  });
+
+  it("never touches a sibling lesson of the same set", () => {
+    const plan = planLessonDataDeletion(
+      "user-generated",
+      "book42",
+      "01-intro.json",
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds).not.toContain("lp-2");
+    expect(plan.cardCount).toBe(2);
+  });
+
+  it("returns an empty plan (no lessonCards) when the lesson has no learner data", () => {
+    const plan = planLessonDataDeletion(
+      "user-generated",
+      "book42",
+      "99-missing.json",
+      lessonProgress,
+      lessonCards,
+    );
+    expect(isEmptyPlan(plan)).toBe(true);
+    expect(plan.lessonCards).toEqual([]);
+  });
+});
+
+describe("planLessonsDataDeletion (bulk, #2065)", () => {
+  const lessonProgress = [
+    { id: "lp-1", source: "user-generated", set_id: "book42", lesson_filename: "01-intro.json" },
+    { id: "lp-2", source: "user-generated", set_id: "book42", lesson_filename: "02-body.json" },
+    { id: "lp-3", source: "user-generated", set_id: "book42", lesson_filename: "03-end.json" },
+    { id: "lp-4", source: "jane/repo", set_id: "book42", lesson_filename: "01-intro.json" },
+  ];
+  const lessonCards = [
+    { set_id: "book42", lesson_id: "01-intro.json", exercise_id: "e1", element_key: "a" },
+    { set_id: "book42", lesson_id: "01-intro.json", exercise_id: "e1", element_key: "a" }, // dir dup
+    { set_id: "book42", lesson_id: "02-body.json", exercise_id: "e1", element_key: "b" },
+    { set_id: "book42", lesson_id: "03-end.json", exercise_id: "e1", element_key: "c" },
+  ];
+
+  it("aggregates progress + one lessonCards ref per selected lesson (deduped counts)", () => {
+    const plan = planLessonsDataDeletion(
+      "user-generated",
+      "book42",
+      ["01-intro.json", "02-body.json"],
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds.sort()).toEqual(["lp-1", "lp-2"]);
+    expect(plan.lessonCards).toEqual([
+      { set_id: "book42", lesson_id: "01-intro.json" },
+      { set_id: "book42", lesson_id: "02-body.json" },
+    ]);
+    expect(plan.lessonCount).toBe(2);
+    expect(plan.cardCount).toBe(2); // 01 (deduped) + 02
+    expect(plan.orphanedSetIds).toEqual([]);
+  });
+
+  it("leaves a NON-selected sibling of the same set untouched", () => {
+    const plan = planLessonsDataDeletion(
+      "user-generated",
+      "book42",
+      ["01-intro.json"],
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds).not.toContain("lp-2");
+    expect(plan.lessonProgressIds).not.toContain("lp-3");
+    expect(plan.lessonCards).toEqual([{ set_id: "book42", lesson_id: "01-intro.json" }]);
+  });
+
+  it("never plans another source's row for the same set id + filename", () => {
+    const plan = planLessonsDataDeletion(
+      "user-generated",
+      "book42",
+      ["01-intro.json", "02-body.json"],
+      lessonProgress,
+      lessonCards,
+    );
+    expect(plan.lessonProgressIds).not.toContain("lp-4");
+  });
+
+  it("returns an empty plan for an empty selection", () => {
+    const plan = planLessonsDataDeletion("user-generated", "book42", [], lessonProgress, lessonCards);
+    expect(isEmptyPlan(plan)).toBe(true);
+    expect(plan.lessonCards).toEqual([]);
+  });
+
+  it("omits a lessonCards ref for a selected lesson that has no cards", () => {
+    const plan = planLessonsDataDeletion(
+      "user-generated",
+      "book42",
+      ["03-end.json", "99-missing.json"],
+      lessonProgress,
+      lessonCards,
+    );
+    // 03-end has one card; 99-missing has none and no progress.
+    expect(plan.lessonCards).toEqual([{ set_id: "book42", lesson_id: "03-end.json" }]);
+    expect(plan.lessonProgressIds).toEqual(["lp-3"]);
+    expect(plan.cardCount).toBe(1);
+  });
+});

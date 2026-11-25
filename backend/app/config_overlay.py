@@ -1,0 +1,239 @@
+"""Project-tree + user-overlay config merge helpers.
+
+AdaptiveLearner ships configuration in two layers:
+
+1. **Project tree** (read at runtime, never written from runtime
+   code):
+   - ``backend/config/app.yaml`` — auto-created from
+     ``app.yaml.example`` on first start; on legacy installs may
+     also carry user edits from before the overlay landed.
+   - ``backend/config/plugins/*.yaml`` — bundled plugin defaults.
+
+2. **User overlay** (writable, under ``get_data_dir() / "config"``):
+   runtime writes from the Settings UI.
+
+Read merges project + user (user wins; dicts deep-merge; lists
+replace). Write targets ONLY the user overlay; the project tree
+stays untouched at runtime.
+
+Reason: dev-docker bind-mounts ``./backend:/app`` so the project
+tree is not writable by the container user. Production Docker
+(``USER adaptive_learner`` + ``chown -R adaptive_learner:adaptive_learner /app``)
+makes the project tree writable, but the divergence between
+environments was a footgun — the v0.31.0 Phase 2 sweep
+fixed ``backup_history.json`` the same
+way; this module is where the Settings writes land.
+
+See ``.claude/rules/lessons-learned.md`` "Filesystem isolation"
+for the broader rule. The unit + integration tests in
+``test_config_overlay.py`` pin the merge semantics and the
+"writes never touch the project tree" invariant.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+from app.exceptions import ValidationError
+from app.paths import get_config_dir, get_data_dir
+from app.yaml_io import read_yaml_roundtrip, write_yaml_roundtrip
+
+logger = logging.getLogger(__name__)
+
+# Resolved at import time; tests that need a different project
+# layer reassign this attribute via ``monkeypatch.setattr``.
+_PROJECT_CONFIG_DIR: Path = Path(__file__).resolve().parent.parent / "config"
+
+
+def get_project_config_dir() -> Path:
+    """Project-tree config directory (read-only at runtime)."""
+    return _PROJECT_CONFIG_DIR
+
+
+def set_project_config_dir(path: Path) -> None:
+    """Override the project config dir for tests.
+
+    Production code does NOT call this; tests use it to point the
+    project layer at a tmp directory so the merge logic stays
+    exercised end-to-end without depending on the real bundled
+    plugin configs.
+    """
+    global _PROJECT_CONFIG_DIR
+    _PROJECT_CONFIG_DIR = path
+
+
+def get_user_config_dir() -> Path:
+    """User-overlay config directory: writable, under ``get_data_dir()``.
+
+    Re-resolved on every call so test env-var overrides
+    (``ADAPTIVE_LEARNER_DATA_DIR``) take effect after this module is
+    imported.
+    """
+    return get_data_dir() / "config"
+
+
+def get_user_plugins_dir() -> Path:
+    """User-overlay plugins config directory."""
+    return get_user_config_dir() / "plugins"
+
+
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge: override wins, lists REPLACE.
+
+    Same semantics as ``app.main._deep_merge`` so secrets-overlay
+    and config-overlay behave identically. Returns a NEW dict;
+    inputs are not mutated.
+    """
+    out: dict[str, Any] = dict(base)
+    for key, override_value in override.items():
+        base_value = out.get(key)
+        if isinstance(base_value, dict) and isinstance(override_value, dict):
+            out[key] = deep_merge(base_value, override_value)
+        else:
+            out[key] = override_value
+    return out
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = read_yaml_roundtrip(path)
+    except Exception as exc:  # noqa: BLE001 - log + degrade, do not crash
+        logger.warning("Could not read %s: %s. Treating as empty.", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _project_app_path() -> Path:
+    return get_project_config_dir() / "app.yaml"
+
+
+def _user_app_path() -> Path:
+    return get_user_config_dir() / "app.yaml"
+
+
+# architecture.md plugin names: lowercase letters, digits, hyphens only.
+_PLUGIN_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _plugin_file(directory: Path, name: str) -> Path:
+    """``{directory}/{name}.yaml``, refusing a name that is not a plugin identifier.
+
+    Every plugin path is built here, so a name from a request can never
+    point outside the config directories, whatever the caller checked.
+
+    Raises:
+        ValidationError: when ``name`` is not a plugin identifier.
+    """
+    if not _PLUGIN_NAME_RE.fullmatch(name):
+        raise ValidationError(f"Plugin name {name!r} is not a valid identifier.")
+    base = os.path.normpath(os.path.abspath(directory))
+    candidate = os.path.normpath(os.path.join(base, f"{name}.yaml"))
+    if not candidate.startswith(base + os.sep):
+        raise ValidationError(f"Plugin name {name!r} leaves the config directory.")
+    return Path(candidate)
+
+
+def _project_plugin_path(name: str) -> Path:
+    return _plugin_file(get_project_config_dir() / "plugins", name)
+
+
+def _user_plugin_path(name: str) -> Path:
+    return _plugin_file(get_user_plugins_dir(), name)
+
+
+def read_app_config_merged() -> dict[str, Any]:
+    """Read app.yaml with project + user-overlay deep-merge.
+
+    Either layer may be missing; both missing yields ``{}``.
+    Comments are NOT preserved by deep-merge; callers that need to
+    write the result back to disk MUST use ``load_app_config_for_edit``
+    instead so ruamel's round-trip can preserve ``# INTERNAL``
+    markers and quote styles.
+    """
+    project = _read_yaml(_project_app_path())
+    user = _read_yaml(_user_app_path())
+    return deep_merge(project, user)
+
+
+def _legacy_plugin_path(name: str) -> Path:
+    """Where the Settings endpoint wrote plugin settings before #3370.
+
+    Read-only: it sits between the bundled defaults and the user
+    overlay so values saved before the fix keep applying. Nothing
+    writes it any more.
+    """
+    return _plugin_file(get_config_dir() / "plugins", name)
+
+
+def _base_plugin_config(name: str) -> dict[str, Any]:
+    """Bundled defaults plus the legacy layer: what the overlay diffs against."""
+    project_path = _project_plugin_path(name)
+    legacy_path = _legacy_plugin_path(name)
+    project = _read_yaml(project_path)
+    if legacy_path.resolve() in (project_path.resolve(), _user_plugin_path(name).resolve()):
+        return project
+    return deep_merge(project, _read_yaml(legacy_path))
+
+
+def read_plugin_config_merged(name: str) -> dict[str, Any]:
+    """Read plugin config with bundled defaults + user-overlay merge.
+
+    Layers, later wins: bundled (``backend/config/plugins``), the
+    pre-#3370 legacy file, the user overlay. This is THE effective
+    plugin config: the Settings endpoint, PluginForge activation and
+    the plugins all read it (#3370).
+
+    Comments are stripped (deep-merge constructs a plain dict), so
+    never write the result back; ``write_user_plugin_settings`` edits
+    the overlay in place and keeps its comments.
+    """
+    return deep_merge(_base_plugin_config(name), _read_yaml(_user_plugin_path(name)))
+
+
+def read_plugin_settings_merged(name: str) -> dict[str, Any]:
+    """The effective ``settings:`` block of a plugin, ``{}`` when absent."""
+    settings = read_plugin_config_merged(name).get("settings")
+    return dict(settings) if isinstance(settings, dict) else {}
+
+
+def write_user_plugin_settings(name: str, settings: dict[str, Any]) -> None:
+    """Store ``settings`` as a delta against the bundled defaults.
+
+    Only top-level keys whose value differs from the base land in the
+    user overlay; a key back at its default leaves it, and a key
+    missing from ``settings`` falls back to its default (a bundled
+    key cannot be deleted through this call). The overlay is edited
+    in place through ruamel, so its comments survive (#3370).
+    """
+    base_settings = _base_plugin_config(name).get("settings")
+    base = base_settings if isinstance(base_settings, dict) else {}
+    delta = {key: value for key, value in settings.items() if base.get(key, _MISSING) != value}
+    user_path = _user_plugin_path(name)
+    data = _read_yaml(user_path) if user_path.exists() else {}
+    current = data.get("settings")
+    if not isinstance(current, dict):
+        data["settings"] = delta
+    else:
+        for key in [k for k in current if k not in delta]:
+            del current[key]
+        current.update(delta)
+    write_user_plugin_config(name, data)
+
+
+_MISSING = object()
+
+
+def write_user_plugin_config(name: str, data: dict[str, Any]) -> None:
+    """Write plugin config to the user overlay ONLY.
+
+    Creates the user plugins dir if missing.
+    """
+    path = _user_plugin_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_yaml_roundtrip(path, data)

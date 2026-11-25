@@ -1,0 +1,119 @@
+/*
+ * D5 — react-toastify theme alignment (Tailwind Phase D).
+ *
+ * We keep react-toastify (decided in Phase C) but align its colours
+ * with our design tokens. The ToastContainer runs theme="colored",
+ * so the toast background IS the status colour; mapping those vars to
+ * --success / --error / --warning / --info means toasts recolour with
+ * the active theme (all 6) instead of react-toastify's fixed palette.
+ *
+ * Imported AFTER "react-toastify/dist/ReactToastify.css" in App.tsx so
+ * this wins the cascade regardless of bundle order.
+ */
+
+:root {
+    --toastify-color-success: var(--success);
+    --toastify-color-error: var(--error);
+    --toastify-color-warning: var(--warning);
+    --toastify-color-info: var(--info);
+
+    /* Icons + progress bar inherit the status colour on the colored
+       theme; pin them explicitly so they track our tokens too. */
+    --toastify-icon-color-success: var(--success);
+    --toastify-icon-color-error: var(--error);
+    --toastify-icon-color-warning: var(--warning);
+    --toastify-icon-color-info: var(--info);
+
+    /* Colored-toast backgrounds (#1474). The colored theme uses WHITE toast
+       text, so the background must clear WCAG AA 4.5:1 against white. The
+       per-theme --success/--error/... accents cannot (Soft Pop --success
+       #4ade80 is ~1.7:1; warning/info fail too), so these are fixed,
+       semantic, AA-with-white status colours, theme-agnostic by design (a
+       success toast is the same green in every theme). Verified vs #ffffff:
+       success 7.1:1, error 6.5:1, warning 5.0:1, info 6.7:1. Kept here (not
+       in global.css) so the #1467 global.css inflow-stop guard is untouched;
+       they live beside the toast rules that consume them. */
+    --toast-bg-success: #166534;
+    --toast-bg-error: #b91c1c;
+    --toast-bg-warning: #b45309;
+    --toast-bg-info: #1d4ed8;
+}
+
+/*
+ * #1474 — WCAG AA toast contrast. The colored theme renders each toast with
+ * WHITE text on ``var(--toastify-color-*)``. Mapping those to the per-theme
+ * --success/--error/... accents (above) does NOT clear 4.5:1 against white
+ * (Soft Pop --success #4ade80 is ~1.7:1; warning/info fail too), and the
+ * :root override for the *background* can also lose to react-toastify's own
+ * :root default in the production bundle. So pin the toast BACKGROUND to the
+ * fixed, AA-with-white --toast-bg-* tokens via a 3-class selector that wins
+ * over react-toastify's 2-class ``.Toastify__toast-theme--colored.Toastify__
+ * toast--success`` regardless of bundle order. White text stays; only the
+ * background changes. Icons + progress keep tracking the theme accent.
+ */
+.Toastify__toast-container .Toastify__toast-theme--colored.Toastify__toast--success {
+    background: var(--toast-bg-success);
+}
+.Toastify__toast-container .Toastify__toast-theme--colored.Toastify__toast--error {
+    background: var(--toast-bg-error);
+}
+.Toastify__toast-container .Toastify__toast-theme--colored.Toastify__toast--warning {
+    background: var(--toast-bg-warning);
+}
+.Toastify__toast-container .Toastify__toast-theme--colored.Toastify__toast--info {
+    background: var(--toast-bg-info);
+}
+
+/*
+ * Persistent error toasts (#126) do not auto-dismiss, so several
+ * failures can stack at once. Cap the container height to the
+ * viewport and let it scroll instead of pushing toasts off-screen
+ * where the user can neither read nor close them. The cap uses the
+ * DYNAMIC viewport (dvh) so the bottom-anchored container never
+ * exceeds what is actually visible on iOS; 100vh stays as the
+ * fallback for engines without dvh (#1410).
+ */
+.Toastify__toast-container {
+    max-height: 100vh;
+    max-height: 100dvh;
+    overflow-y: auto;
+}
+
+/*
+ * #1410 — the container box itself must never swallow taps. Without
+ * this, the fixed bottom-right container (which spans the whole toast
+ * stack area) intercepts pointer events even when the toast inside is
+ * click-through (``passThrough`` sets ``pointer-events: none`` inline
+ * on the TOAST, #589), so the lesson footer's Prüfen/Weiter button
+ * under it stayed untappable — fully covered in iPhone landscape.
+ * Toasts re-enable their own pointer events, so close buttons,
+ * closeOnClick, and the #126 scroll-over-toast behaviour keep working;
+ * a passThrough toast's inline ``pointer-events: none`` still wins
+ * over this stylesheet rule.
+ */
+.Toastify__toast-container {
+    pointer-events: none;
+}
+.Toastify__toast {
+    pointer-events: auto;
+}
+
+/*
+ * #3235 - while a lesson runs, the container sits ABOVE the sticky run
+ * footer instead of over it. On phones react-toastify pins the bottom
+ * containers to env(safe-area-inset-bottom) at full width, exactly the
+ * strip the footer (Check / Next / Previous / Pause) occupies; an error
+ * toast stays until closed, so the person just told about an error is the
+ * one whose Next button is covered. AppToastContainer adds this class on
+ * the six runner routes only, so the rest of the app keeps its feel. The
+ * clearance is the tallest run footer at 375 px (measured 2026-09-29:
+ * two-button RunnerFooter 69 px incl. its top border and padding, toast bottom edge at 668 px against the footer top at 743 px) plus
+ * the safe-area inset the footer's pb-safe adds; the two-class selector
+ * beats the library's one-class phone rule regardless of bundle order.
+ */
+:root {
+    --run-footer-clearance: 5rem;
+}
+.Toastify__toast-container.toast-container-above-run-footer {
+    bottom: calc(var(--run-footer-clearance) + env(safe-area-inset-bottom, 0px));
+}

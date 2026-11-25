@@ -1,0 +1,385 @@
+name: Release
+
+# One-click, workflow_dispatch-only release driver for FUTURE releases.
+# v1.97.0 is released manually (make release-finish); this workflow is
+# infrastructure from the next release onward.
+#
+# Two dispatchable stages (the deliberate "prepare -> review -> finish"
+# pattern). Dispatch once with stage=prepare, review the release branch + its
+# CI, then dispatch again with stage=finish:
+#
+#   stage=prepare -> cut release/<version> from develop (make release-prepare,
+#                    which only cuts the branch), then SELF-bump the version
+#                    (release-prepare does NOT bump): set backend/pyproject.toml
+#                    -> make sync-versions -> sync-versions-check ->
+#                    verify_version_pins.sh; fix the doc headers / version
+#                    badges via scripts/verify_docs.py --fix; commit + push the
+#                    release branch; run the full gate (make release-test, plus
+#                    make test-e2e-smoke unless skip_e2e). Then STOP for review.
+#   stage=finish  -> make release-finish (merge to main no-ff + tag v<version> +
+#                    open the develop back-merge PR, #2182) and
+#                    make release-publish (DRAFT GitHub Release, #3159).
+#
+# Launcher binaries are NOT built or attached here, and the release stays a
+# draft: release-workflow.md Step 8 dispatches publish-image.yml, attaches the
+# binaries from the green main-push launcher builds (no release trigger since
+# v2.8.0), runs the completeness checkpoint, and only then publishes.
+#
+# The per-release changelog changelog/releases/v<version>.md MUST already exist
+# (written by the author). The prepare stage fails fast if it is missing; this
+# workflow never invents changelog content.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, X.Y.Z (no leading v)"
+        required: true
+        type: string
+      stage:
+        description: "prepare (bump + gate on release/<version>, then review) | finish (merge + tag + publish)"
+        required: true
+        type: choice
+        options:
+          - prepare
+          - finish
+        default: prepare
+      skip_e2e:
+        description: "prepare only: skip the advisory extra Playwright smoke (make test-e2e-smoke). Default true — it is API-mode and flakes on container dev-server cold-start (#1254); the mandatory make release-test gate already covers Playwright. Set false to run it."
+        required: false
+        type: boolean
+        default: true
+
+# Only the standard token scope is needed: pushing the release branch, main,
+# develop + tags, and creating the GitHub Release. Anything beyond this would
+# require an explicit grant — none is used here.
+permissions:
+  contents: write
+
+env:
+  # Safety net: coerce any straggler JavaScript action still declaring Node 20
+  # onto Node 24 (mirrors the other workflows).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  prepare:
+    name: Prepare release branch (bump + gate, then review)
+    if: ${{ inputs.stage == 'prepare' }}
+    runs-on: ubuntu-latest
+    # Pre-baked Playwright browsers (mcr.microsoft.com image) instead of the
+    # flaky cdn.playwright.dev download — the established #317 fix, same as the
+    # release-prepare gate + dexie-smoke/manual-automation. This job is
+    # `make release-test`-driven and uploads no artifacts, so it runs as root
+    # and apt-installs make below. Pin the tag to e2e/bun.lock's
+    # @playwright/test version (1.61.1); bump together. Refs #317, #1248.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+    timeout-minutes: 60
+    steps:
+      - name: Validate version input
+        run: |
+          echo "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::version must be X.Y.Z (no leading v), got '${{ inputs.version }}'"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Install make + unzip (the Playwright noble image has neither)
+        # unzip is needed by oven-sh/setup-bun below (unpacks the Bun zip) (#1829).
+        run: apt-get update && apt-get install -y --no-install-recommends make unzip
+
+      - name: Changelog precondition (this action never invents a changelog)
+        run: |
+          f="changelog/releases/v${{ inputs.version }}.md"
+          if [ ! -f "$f" ]; then
+            echo "::error::$f is missing. Write the per-release changelog first, then re-dispatch."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        # `python -m pip`, not bare `pip`: in the Playwright container the
+        # setup-python `pip` shim is not on PATH (works on ubuntu-latest, 127s
+        # here). `python` is always on PATH via setup-python's pythonLocation.
+        run: python -m pip install poetry
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock', 'e2e/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Configure git identity + trust the workspace
+        # This job runs as root inside the Playwright container while the
+        # checked-out tree is owned by the runner user, so git rejects every
+        # working-tree command ("fatal: not in a git directory").
+        # actions/checkout sets safe.directory only in its own ephemeral HOME,
+        # so it does not carry over to later steps. Trust the workspace
+        # persistently and set a --global identity: a local-scope config write
+        # needs a recognised repo (exactly what fails here), and the downstream
+        # release-prepare / commit / push git operations need the same trust.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Backend + plugin deps
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Frontend deps
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: E2E deps
+        working-directory: e2e
+        run: bun install --frozen-lockfile
+
+      - name: Docs deps (verify-docs-discipline runs the mkdocs nav check)
+        working-directory: docs
+        run: poetry install --no-interaction --no-ansi
+
+      - name: PyYAML for the bare python3 (#2604)
+        # verify_docs.py is stdlib-only, but its i18n check shells out via
+        # `python3 scripts/sync_i18n_to_frontend.py`, which imports yaml. That
+        # runs under the setup-python interpreter, NOT a poetry venv, so PyYAML
+        # must be installed for it. The mainline ci.yml "Docs drift verifier"
+        # job installs it for the same reason. Needed by both the doc-header
+        # `--fix` step below AND make release-test's verify-docs-discipline gate.
+        run: python -m pip install pyyaml
+
+      # NO `playwright install` step: the browsers are baked into the container.
+      # release-test's dexie + manual-plan gates and the extra e2e smoke use the
+      # pre-baked browsers via the image's default browser path.
+
+      - name: Cut release branch from develop
+        # release-prepare ONLY cuts release/<version> from develop; it does not
+        # bump the version, finalize the changelog, or touch doc headers.
+        run: make release-prepare VERSION=${{ inputs.version }}
+
+      - name: Bump version (release-prepare does not do this)
+        run: |
+          python3 - "${{ inputs.version }}" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("backend/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          text, n = re.subn(r'(?m)^version = ".*"$', f'version = "{version}"', text, count=1)
+          if n != 1:
+              sys.exit("could not rewrite the canonical version in backend/pyproject.toml")
+          path.write_text(text, encoding="utf-8")
+          print(f"canonical version set to {version}")
+          PY
+          make sync-versions
+          make sync-versions-check
+          ./scripts/verify_version_pins.sh ${{ inputs.version }}
+
+      - name: Fix doc headers + version badges (the 5 gated files)
+        # Best-effort, stdlib-only; aligns README / README-de / CLAUDE.md /
+        # ROADMAP / backlog version badges + headers to the canonical version.
+        run: python3 scripts/verify_docs.py --fix
+
+      - name: Commit + push the release branch
+        # --force: the release branch is ephemeral and always regenerated from
+        # develop by this job. A prepare run that failed AFTER this push (e.g.
+        # in the gate below) leaves a stale release/<version> on origin; a
+        # re-dispatch cuts a fresh branch that diverges from it, so a plain
+        # push would be rejected non-fast-forward and permanently block retry.
+        # Force lets a re-dispatch overwrite the stale branch. Safe because
+        # releases are single-flight (release-freeze) and the branch carries no
+        # work that is not reproduced from develop.
+        run: |
+          git add -A
+          git commit -m "chore(release): prepare v${{ inputs.version }}" || echo "nothing to commit"
+          git push -u --force origin release/${{ inputs.version }}
+
+      - name: Full release gate (make release-test)
+        run: make release-test
+
+      # The extra API-mode Playwright smoke runs in its OWN job
+      # (extra-smoke, below) on a fresh runner instead of being appended
+      # here: appended to this heavy release-test job it was flaky under
+      # container resource contention (#1254). release-test above is the
+      # mandatory gate (it covers Playwright via the dexie + manual-plan
+      # gates); the extra smoke is the skippable (skip_e2e) advisory.
+
+      - name: Next step
+        run: |
+          echo "release/${{ inputs.version }} prepared + gated."
+          echo "Review this job AND the 'extra-smoke' job (unless skip_e2e), then re-dispatch with stage=finish."
+
+  extra-smoke:
+    name: Extra Playwright smoke (API mode)
+    # The skippable, advisory API-mode smoke. Runs in its OWN job on a fresh
+    # runner (not appended to the heavy `prepare`/release-test job) so it no
+    # longer flakes under container resource contention (#1254). Gated by
+    # skip_e2e exactly as before. `make release-test` in `prepare` remains the
+    # mandatory gate; a red extra-smoke is reviewed before stage=finish.
+    if: ${{ inputs.stage == 'prepare' && inputs.skip_e2e == false }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    # Same pre-baked-browser image as prepare (#317/#1248); runs the smoke
+    # against the release/<version> branch prepare just pushed.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+    timeout-minutes: 40
+    steps:
+      - name: Validate version input
+        run: |
+          echo "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::version must be X.Y.Z (no leading v), got '${{ inputs.version }}'"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release/${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Install make + unzip (the Playwright noble image has neither)
+        # unzip is needed by oven-sh/setup-bun below (unpacks the Bun zip) (#1829).
+        run: apt-get update && apt-get install -y --no-install-recommends make unzip
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        # `python -m pip`, not bare `pip`: the setup-python pip shim is not on
+        # PATH in the Playwright container (mirrors the prepare job).
+        run: python -m pip install poetry
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock', 'e2e/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Backend + plugin deps
+        working-directory: backend
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Frontend deps
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: E2E deps
+        working-directory: e2e
+        run: bun install --frozen-lockfile
+
+      # NO `playwright install` step: the browsers are baked into the container.
+
+      - name: Extra Playwright smoke (retries against container flake)
+        # --retries=1 (test-e2e-smoke-retries) absorbs the occasional slow
+        # cold-start of the auto-started uvicorn + vite dev servers in the
+        # container; the raised webServer/per-test CI timeouts (#1254, see
+        # e2e/playwright.config.ts) give that startup headroom.
+        run: make test-e2e-smoke-retries
+
+  finish:
+    name: Finish release (merge + tag + publish)
+    if: ${{ inputs.stage == 'finish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Whether a personal access token is configured. Used only to print a
+      # clear up-front notice; the token expressions below fall back on their
+      # own. Secrets cannot be referenced directly in `if:`, so surface the
+      # boolean through the job env.
+      HAS_RELEASE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+    steps:
+      - name: Validate version input
+        run: |
+          echo "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::version must be X.Y.Z (no leading v), got '${{ inputs.version }}'"; exit 1; }
+
+      - name: PAT availability notice
+        # The release ALWAYS completes; this only documents whether the
+        # downstream GH-Pages deploy fires on its own (PAT) or needs a
+        # manual trigger (GITHUB_TOKEN fallback).
+        run: |
+          if [ "$HAS_RELEASE_PAT" = "true" ]; then
+            echo "RELEASE_PAT is set: the main push fires deploy-gh-pages.yml. The release is created as a DRAFT; Step 8 of release-workflow.md publishes it."
+          else
+            echo "::warning::RELEASE_PAT secret is NOT set. The release will still complete, but GitHub will not fire downstream workflows from GITHUB_TOKEN events (#1265). After this run you must MANUALLY: (1) dispatch deploy-gh-pages.yml on main, and (2) open the develop back-merge PR if release-finish could not."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Check out the prepared release branch (tree already at <version>),
+          # NOT develop: `make release-finish` first runs
+          # `verify_version_pins.sh <version>`, which checks the WORKING TREE.
+          # develop is still at the prior version, so that pre-tag gate fails
+          # before any merge/tag. release-finish then switches to main/develop
+          # itself; fetch-depth 0 provides both plus the local release branch.
+          ref: release/${{ inputs.version }}
+          fetch-depth: 0
+          # Persist a PAT (not GITHUB_TOKEN) as the git credential so the
+          # `make release-finish` push to main fires deploy-gh-pages.yml.
+          # GitHub deliberately does NOT fire downstream workflows from
+          # GITHUB_TOKEN-originated pushes/events (recursion guard, #1265).
+          # Falls back to GITHUB_TOKEN when RELEASE_PAT is unset: the release
+          # still completes, but the GH-Pages deploy then needs a manual
+          # trigger (the v1.97.0/v1.97.1 situation).
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Changelog precondition (release-publish needs it)
+        run: |
+          f="changelog/releases/v${{ inputs.version }}.md"
+          if [ ! -f "$f" ]; then
+            echo "::error::$f is missing on develop. The prepare stage should have added it."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        # `python -m pip` for parity with the prepare job (robust everywhere).
+        run: python -m pip install poetry
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Finish (merge main no-ff + tag + open the develop back-merge PR)
+        run: make release-finish VERSION=${{ inputs.version }}
+
+      - name: Create the DRAFT GitHub Release from the changelog
+        # `gh release create --draft` (#3159). Nothing fires on a draft; the
+        # launcher binaries and the image are attached in release-workflow.md
+        # Step 8 before the draft is published.
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: make release-publish VERSION=${{ inputs.version }}
+
+      - name: Deploy note
+        run: |
+          if [ "$HAS_RELEASE_PAT" = "true" ]; then
+            echo "Done. The PAT push to main fired deploy-gh-pages.yml; the PAT-published Release fired launcher-*.yml (binaries attach automatically)."
+          else
+            echo "::warning::Published with GITHUB_TOKEN (no RELEASE_PAT). Now MANUALLY: dispatch deploy-gh-pages.yml on main, and attach the launcher binaries to the Release."
+          fi

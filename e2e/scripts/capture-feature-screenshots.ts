@@ -1,0 +1,2279 @@
+/**
+ * Per-feature screenshot baselines (#1023).
+ *
+ * One labelled screenshot per *feature* (not per generic surface), captured at
+ * the DEFAULT theme (``dark``) and TWO viewports — desktop ``1280×720`` and
+ * mobile ``375×812`` — into ``e2e/visual/features/<feature>/<shot>.png`` and
+ * ``…/<shot>.mobile.png``. These baselines serve double duty: pixel-diff
+ * regression AND a documentation gallery of every visual feature.
+ *
+ * The {@link FEATURES} map is the single source of truth: each entry pairs a
+ * screenshot ``path`` (``<feature-folder>/<shot>`` — kebab-case, no extension)
+ * with a ``setup`` that drives the dexie preview build (no backend) into the
+ * state to capture. ``setup`` returns ``false`` when the state can't be reached
+ * deterministically (e.g. the bundled set has no matching exercise), and the
+ * test is skipped rather than committing a meaningless baseline.
+ *
+ * Generating / updating the baselines (maintainer, on a consistent machine —
+ * font anti-aliasing differs between machines, so NOT in an ephemeral
+ * CI/web container):
+ *   1. ``make capture-screenshots``  (builds the dexie frontend, then
+ *      ``--update-snapshots``)
+ *   2. REVIEW every PNG under ``e2e/visual/features/`` before committing.
+ *      NEVER ``--update-snapshots`` to silence a diff that reveals a real bug —
+ *      fix the bug.
+ *
+ * Verifying:
+ *   ``make verify-screenshots``  (pixel-compares against the committed PNGs)
+ *
+ * Some product features are NOT web-reachable by Playwright and are captured
+ * manually (documented in ``e2e/visual/features/README.md``): the desktop
+ * **launcher** (a native PyInstaller/Docker GUI, not a web route).
+ */
+
+import {readFileSync} from "node:fs";
+import {join} from "node:path";
+
+import {expect, test, type Page, type Route} from "@playwright/test";
+
+import {declineDraftPrompt} from "../helpers";
+
+import {
+    advanceLessonUntil,
+    assertRandomPinInstalled,
+    createOwnLesson,
+    freezeClock,
+    OWN_LESSON_TITLE,
+    pinRandomness,
+    pinRandomStreams,
+    openFirstBundledLesson,
+    seedLearner,
+    setTheme,
+    settleForScreenshot,
+    gotoAdaptiveExercise,
+    gotoAdaptiveLesson,
+    gotoDashboardWithDueReviews,
+    gotoEndlessSession,
+    gotoErrorReplay,
+    gotoReviewSession,
+    gotoShuffleSession,
+    answerCurrentStep,
+    playBundledLesson,
+} from "../visual/helpers";
+
+/** The default theme every feature baseline is captured at (spec: dark). */
+const DEFAULT_THEME = "dark" as const;
+
+/** Desktop + mobile capture sizes (spec: 1280×720 + 375×812). */
+const VIEWPORTS = [
+    {key: "desktop", size: {width: 1280, height: 720}, suffix: ""},
+    {key: "mobile", size: {width: 375, height: 812}, suffix: ".mobile"},
+] as const;
+
+/** iPhone-landscape capture size (#1410) — opt-in per feature via
+ *  ``landscape: true`` for surfaces whose bottom action bar must stay
+ *  reachable in landscape (the lesson runner). */
+const LANDSCAPE_VIEWPORT = {
+    key: "landscape",
+    size: {width: 812, height: 375},
+    suffix: ".landscape",
+} as const;
+
+/** One capturable feature state. */
+interface FeatureShot {
+    /** ``<feature-folder>/<shot>`` — kebab-case, no extension, no viewport
+     *  suffix. Becomes ``e2e/visual/features/<feature-folder>/<shot>.png``. */
+    path: string;
+    /** Bring the page into the screenshot state. ``false`` => skip (no baseline). */
+    setup: (page: Page) => Promise<boolean>;
+    /** Capture desktop only (e.g. a desktop-anchored dialog). Default: both. */
+    desktopOnly?: boolean;
+    /** ALSO capture an iPhone-landscape (812×375) baseline (#1410). */
+    landscape?: boolean;
+    /** Pin the scroll position to this testid AFTER settleForScreenshot
+     *  (fonts settle last and reflow the page a few px, #1540/#1567). */
+    pinTo?: string;
+    /** Like ``pinTo``, but a CSS selector instead of an exact testid - for
+     *  surfaces whose testid carries a per-instance prefix (#3080). */
+    pinToSelector?: string;
+    /** The shot DELIBERATELY shows a persistent toast (#3081); opts out of
+     *  the #2721 transient-toast wait in settleForScreenshot. */
+    keepsToast?: boolean;
+    /** The surface has no app shell and therefore no ``#root`` scroller
+     *  (the static landing page); see ``SettleOptions.noAppShell``. */
+    noAppShell?: boolean;
+    /** Scroll the pin to sit BELOW the sticky app header (``.app-nav``)
+     *  instead of under it. ``scrollIntoView({block: "start"})`` aligns the
+     *  element with the top of the ``#root`` scroller, which the header
+     *  overlays, so a pin on a small element (a checkbox row, a form field)
+     *  vanishes behind it (#3088). Opt-in on purpose: the existing shots pin
+     *  tall containers, where the hidden strip does not matter, and a global
+     *  offset would move every baseline. */
+    pinBelowHeader?: boolean;
+    /** Like ``pinBelowHeader``, but below the sticky element with this
+     *  testid instead of ``.app-nav``. On the lesson route the app header
+     *  auto-hides on scroll and the sticky progress row
+     *  (``lesson-progress-options-row``) is what overlays the top of the
+     *  scroller, and it is taller than the header, so a pin on a heading
+     *  would still be clipped under it (#3260). */
+    pinBelow?: string;
+    /** Runs after the screenshot, for a check that has to hold while the
+     *  shot is taken, not only while the setup drives the page (#3182). */
+    afterShot?: (page: Page) => void | Promise<void>;
+}
+
+/** Open ``/content`` on a given tab and wait for the hub shell. */
+async function gotoContentTab(page: Page, tab: "discover" | "my" | "import") {
+    await seedLearner(page);
+    const suffix = tab === "discover" ? "" : `?tab=${tab}`;
+    await page.goto(`/content${suffix}`);
+    await expect(page.getByTestId("content-hub")).toBeVisible({timeout: 20_000});
+    return true;
+}
+
+/** Open ``/dashboard`` on a given tab and wait for the page shell. */
+async function gotoDashboardTab(
+    page: Page,
+    tab: "overview" | "activity" | "missions",
+) {
+    await seedLearner(page);
+    const suffix = tab === "overview" ? "" : `?tab=${tab}`;
+    await page.goto(`/dashboard${suffix}`);
+    await expect(page.getByTestId("dashboard")).toBeVisible({timeout: 20_000});
+    await expect(page.getByTestId(`dashboard-tab-${tab}-panel`)).toBeVisible({
+        timeout: 20_000,
+    });
+    return true;
+}
+
+/** Open ``/progress`` on a given tab and wait for the hub shell. */
+async function gotoProgressTab(
+    page: Page,
+    tab: "overview" | "stats" | "paths",
+) {
+    await seedLearner(page);
+    const suffix = tab === "overview" ? "" : `?tab=${tab}`;
+    await page.goto(`/progress${suffix}`);
+    await expect(page.getByTestId("progress-hub")).toBeVisible({timeout: 20_000});
+    return true;
+}
+
+/** Seed a learner and open the bundled lesson runner (theory step visible). */
+async function gotoLessonRunner(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await openFirstBundledLesson(page);
+    return true;
+}
+
+/**
+ * Post-answer explanation (#2991): the reference lesson
+ * ``e2e/fixtures/explanation-post-answer.lesson.json`` (one exercise WITH an
+ * authored ``explanation``) served through a page.route-mocked content repo,
+ * exactly as ``e2e/dexie/exercise-explanation.spec.ts`` does. Connects the
+ * repo, opens the lesson, answers the first exercise WRONG and checks it, so
+ * the explanation panel is on screen EXPANDED with rendered Markdown.
+ */
+const EXPLANATION_REPO = "e2e/explanation-post-answer";
+const EXPLANATION_SET_ID = "adjektivstellung-from-de";
+
+/** One fixture lesson served as a whole content repo (root manifest, set
+ *  manifest, lesson JSON) through ``page.route``; see ``mockLessonRepo``. */
+interface FixtureRepo {
+    /** GitHub ``owner/name`` the app connects to; never fetched for real. */
+    repo: string;
+    /** Set id in the root manifest (``content-set-<id>-open`` testid). */
+    setId: string;
+    /** Root-manifest fields of that one set, ``id`` and ``path`` excluded. */
+    manifest: {
+        title: string;
+        targetLanguage: string;
+        sourceLanguage: string;
+        domain: string;
+    };
+    /** ``sets/<lang>/<folder>`` path inside the repo. */
+    setPath: string;
+    /** File name under ``e2e/fixtures/`` AND inside the set folder. */
+    lessonFile: string;
+}
+
+const EXPLANATION_FIXTURE: FixtureRepo = {
+    repo: EXPLANATION_REPO,
+    setId: EXPLANATION_SET_ID,
+    manifest: {
+        title: "Adjektivstellung",
+        targetLanguage: "es",
+        sourceLanguage: "de",
+        domain: "language",
+    },
+    setPath: "sets/es/adjektivstellung",
+    lessonFile: "01-adjektivstellung.json",
+};
+
+/**
+ * Long word inside a matching tile (#3174): the "Sprachebenen zuordnen"
+ * pairs of alc-psychology lesson 32, the content the bug was reported from,
+ * as ``e2e/fixtures/matching-long-word.lesson.json``. The right tile
+ * "kleinste bedeutungsunterscheidende Lauteinheit" is wider than a 375px
+ * tile, so the mobile shot shows the wrap; the bundled set's matching words
+ * are all short, which is why the ``matching-pairing`` motif cannot.
+ */
+const LONG_WORD_FIXTURE: FixtureRepo = {
+    repo: "e2e/matching-long-word",
+    setId: "sprachebenen-from-de",
+    manifest: {
+        title: "Sprachebenen",
+        targetLanguage: "de",
+        sourceLanguage: "de",
+        domain: "psychology",
+    },
+    setPath: "sets/de/sprachebenen",
+    lessonFile: "32-sprachebenen.json",
+};
+
+/**
+ * Ordering review after a wrong answer (#3260): the "Der Ablauf eines
+ * Absendens" step of alc-programming React 19 lesson 01, an
+ * ``ext:al-ordering`` exercise with five steps, as
+ * ``e2e/fixtures/ordering-review.lesson.json``. The bundled set has no
+ * ordering exercise, so no bundled lesson reaches the review.
+ */
+const ORDERING_FIXTURE: FixtureRepo = {
+    repo: "e2e/ordering-review",
+    setId: "react-19-from-de",
+    manifest: {
+        title: "React 19",
+        targetLanguage: "de",
+        sourceLanguage: "de",
+        domain: "programming",
+    },
+    setPath: "sets/de/react-19",
+    lessonFile: "01-actions-useactionstate.json",
+};
+
+/**
+ * Content from another server (#3803): ``e2e/fixtures/remote-media.lesson.json``
+ * carries a Markdown image from a foreign host in its theory step and a
+ * YouTube video plus an article in its ``resources``. The app loads none of
+ * it: the image is offered as a link, the video card shows a local
+ * placeholder instead of a thumbnail.
+ */
+const REMOTE_MEDIA_FIXTURE: FixtureRepo = {
+    repo: "e2e/remote-media",
+    setId: "zellteilung-from-de",
+    manifest: {
+        title: "Zellteilung",
+        targetLanguage: "de",
+        sourceLanguage: "de",
+        domain: "knowledge",
+    },
+    setPath: "sets/de/zellteilung",
+    lessonFile: "01-mitose.json",
+};
+
+/** The fixture file on disk is named after its purpose, the served copy
+ *  after the lesson (the set manifest lists the served name). */
+const FIXTURE_FILES: Record<string, string> = {
+    [EXPLANATION_FIXTURE.lessonFile]: "explanation-post-answer.lesson.json",
+    [LONG_WORD_FIXTURE.lessonFile]: "matching-long-word.lesson.json",
+    [ORDERING_FIXTURE.lessonFile]: "ordering-review.lesson.json",
+    [REMOTE_MEDIA_FIXTURE.lessonFile]: "remote-media.lesson.json",
+};
+
+/**
+ * Serve ONE fixture lesson as a complete content repo through page.route,
+ * exactly as ``e2e/dexie/exercise-explanation.spec.ts`` does, and silence
+ * the official repo index so the content hub shows only the fixture set.
+ */
+async function mockLessonRepo(page: Page, fixture: FixtureRepo): Promise<void> {
+    const lesson = readFileSync(
+        join(__dirname, "..", "fixtures", FIXTURE_FILES[fixture.lessonFile]),
+        "utf-8",
+    );
+    const rootManifest = [
+        'schema_version: "1.13"',
+        "sets:",
+        `  - id: ${fixture.setId}`,
+        `    title: "${fixture.manifest.title}"`,
+        `    target_language: ${fixture.manifest.targetLanguage}`,
+        `    source_language: ${fixture.manifest.sourceLanguage}`,
+        "    level: A1",
+        '    version: "1.0.0"',
+        "    lesson_count: 1",
+        `    domain: ${fixture.manifest.domain}`,
+        `    path: ${fixture.setPath}`,
+        "",
+    ].join("\n");
+    const setManifest = `metadata:\n  lessons:\n    - "${fixture.lessonFile}"\n`;
+    const emptyIndex = 'schema_version: "1.13"\nsets: []\n';
+    const emptyOfficial = (route: Route) => {
+        const url = route.request().url();
+        if (url.endsWith("/recommended-repos.json")) {
+            return route.fulfill({status: 200, body: '{"repos":[]}'});
+        }
+        if (url.endsWith("/books.yaml")) {
+            return route.fulfill({status: 200, body: "domains: {}\n"});
+        }
+        if (url.endsWith("/manifest.yaml")) {
+            return route.fulfill({status: 200, body: emptyIndex});
+        }
+        return route.fulfill({status: 404, body: ""});
+    };
+    await page.route("**/raw.githubusercontent.com/**", emptyOfficial);
+    await page.route("**/adaptive-learner-content/**", emptyOfficial);
+    await page.route(
+        `**/raw.githubusercontent.com/${fixture.repo}/main/**`,
+        (route) => {
+            const url = route.request().url();
+            if (url.endsWith("/main/manifest.yaml")) {
+                return route.fulfill({status: 200, body: rootManifest});
+            }
+            if (url.endsWith(`/${fixture.setPath}/manifest.yaml`)) {
+                return route.fulfill({status: 200, body: setManifest});
+            }
+            if (url.endsWith(`/${fixture.lessonFile}`)) {
+                return route.fulfill({status: 200, body: lesson});
+            }
+            return route.fulfill({status: 404, body: ""});
+        },
+    );
+}
+
+/**
+ * Seed a learner, connect the mocked fixture repo in Settings > Data and
+ * open its one lesson, leaving the runner on the theory step.
+ */
+async function openFixtureLesson(page: Page, fixture: FixtureRepo): Promise<void> {
+    await mockLessonRepo(page, fixture);
+    await seedLearner(page);
+    await page.goto("/settings?tab=data");
+    await expect(page.getByTestId("content-repo-add")).toBeVisible({timeout: 60_000});
+    await page.getByTestId("content-repo-url").fill(`https://github.com/${fixture.repo}`);
+    await page.getByTestId("content-repo-connect").click();
+    await expect(page.getByTestId("content-repo-result")).toContainText(/passed|erfolgreich/i);
+    // The content hub defaults to the LIST view (#1257); the tree with the
+    // per-set "Öffnen" button only renders in grid mode, so seed the view
+    // pref before the navigation, as ``openFirstBundledLesson`` does. The
+    // connected set sits in its language group with the button in view; the
+    // "other" toggle + action menu of the bundled opener are not needed.
+    await page.addInitScript(() => {
+        localStorage.setItem("adaptive-learner.content_view_mode", "grid");
+    });
+    await page.goto("/content?tab=my");
+    await expect(page.getByTestId("content-tree")).toBeVisible({timeout: 15_000});
+    const open = page.getByTestId(`content-set-${fixture.setId}-open`);
+    await expect(open).toBeVisible({timeout: 15_000});
+    await open.click();
+    await expect(page.getByTestId("lesson-page")).toBeVisible({timeout: 15_000});
+}
+
+/** The theory step with the foreign image, which renders as a link (#3803). */
+async function gotoRemoteImageLink(page: Page): Promise<boolean> {
+    await openFixtureLesson(page, REMOTE_MEDIA_FIXTURE);
+    await expect(page.getByTestId("markdown-remote-image")).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** The lesson summary's "Vertiefe das Thema" with the YouTube card's local
+ *  placeholder (#3803). */
+async function gotoVideoCardPlaceholder(page: Page): Promise<boolean> {
+    await openFixtureLesson(page, REMOTE_MEDIA_FIXTURE);
+    await page.getByTestId("lesson-next").click();
+    await expect(page.getByTestId("multiple-choice-exercise")).toBeVisible({timeout: 10_000});
+    await page.getByRole("radio", {name: "Zwei Kerne mit gleicher Erbinformation"}).check();
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await page.getByTestId("lesson-next").click();
+    await expect(page.getByTestId("lesson-resources")).toBeVisible({timeout: 15_000});
+    await expect(page.getByTestId("youtube-thumbnail-placeholder")).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+async function gotoExerciseExplanation(page: Page): Promise<boolean> {
+    await openFixtureLesson(page, EXPLANATION_FIXTURE);
+    await page.getByTestId("lesson-next").click();
+    await expect(page.getByTestId("multiple-choice-exercise")).toBeVisible({timeout: 10_000});
+    await page.getByRole("radio", {name: "el rojo coche"}).check();
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await expect(page.getByTestId("exercise-explanation")).toHaveAttribute("data-state", "open");
+    return true;
+}
+
+/**
+ * Opt-in explanations in the book-text assistant (#2992): the Create-Lesson
+ * book-text step with the "Generate explanations" checkbox ticked, pinned
+ * to the checkbox row right below the exercise-type selector.
+ */
+async function gotoBookExplanationsOptIn(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 20_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill("Adjektivstellung");
+    await page.getByTestId("create-lesson-templates-toggle").click();
+    await page.getByTestId("template-knowledge-from-text").click();
+    await expect(page.getByTestId("create-lesson-book-step")).toBeVisible({
+        timeout: 20_000,
+    });
+    await page.getByTestId("book-explanations").check();
+    await expect(page.getByTestId("book-explanations")).toBeChecked();
+    return true;
+}
+
+/**
+ * The explanation field in the inline exercise editor (#2992): builds a
+ * four-card lesson, generates the exercises, opens the first row's editor
+ * and pastes the convention template, so the Markdown textarea, the counter
+ * and the (now consumed) template action are on screen.
+ */
+async function gotoExerciseEditorExplanation(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 20_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill("Adjektivstellung");
+    await page.getByTestId("create-lesson-next").click();
+    const cards = [
+        {front: "el coche rojo", back: "das rote Auto"},
+        {front: "la casa blanca", back: "das weisse Haus"},
+        {front: "un libro interesante", back: "ein interessantes Buch"},
+        {front: "una ciudad grande", back: "eine grosse Stadt"},
+    ];
+    for (const card of cards) {
+        await page.getByTestId("card-front-input").fill(card.front);
+        await page.getByTestId("card-back-input").fill(card.back);
+        await page.getByTestId("card-add-button").click();
+    }
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-step-3")).toBeVisible();
+    await page.getByTestId("exercise-generate").click();
+    await expect(page.getByTestId("exercise-list")).toBeVisible();
+    const row = page.locator('[data-testid^="exercise-row-"]').first();
+    await expect(row).toBeVisible();
+    await row.locator('[data-testid^="exercise-edit-"]').first().click();
+    const template = page.locator('[data-testid$="-explanation-template"]').first();
+    await expect(template).toBeVisible({timeout: 10_000});
+    await template.click();
+    await expect(page.locator('[data-testid$="-explanation"]').first()).toHaveValue(
+        /Regel|Rule/,
+    );
+    return true;
+}
+
+/**
+ * Advance the open lesson to the first matching exercise (unsolved).
+ * Returns false when the bundled lesson has no matching step.
+ */
+async function gotoLessonMatching(page: Page): Promise<boolean> {
+    if (!(await gotoLessonRunner(page))) return false;
+    const reached = await advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("matching-exercise").count()) > 0,
+    );
+    if (reached) {
+        await expect(page.getByTestId("matching-exercise").first()).toBeVisible({
+            timeout: 10_000,
+        });
+    }
+    return reached;
+}
+
+/**
+ * Advance the open matching exercise to its resolved (post-check) state with
+ * one wrong + the rest correct, so the green/red feedback shows. Returns false
+ * when there is no matching exercise.
+ */
+async function gotoLessonMatchingResolved(page: Page): Promise<boolean> {
+    if (!(await gotoLessonMatching(page))) return false;
+    if (!(await resolveOpenMatching(page))) return false;
+    await openMatchingCorrections(page);
+    return true;
+}
+
+/** Open the graded "Korrektur" view of a checked matching exercise.
+ *  Since #3505 a check with mistakes already opens there; the click stays
+ *  so the shot does not depend on the default view (#3318). A motivation toast from the step change is let run out
+ *  first, pointer parked off the bottom-right toast (#2898). */
+async function openMatchingCorrections(page: Page): Promise<void> {
+    await page.mouse.move(0, 0);
+    await expect(page.locator(".Toastify__toast")).toHaveCount(0, {timeout: 10_000});
+    await page.getByTestId("matching-corrections").click();
+    await expect(
+        page.getByTestId(/^matching-correct-hint-\d+$/).first(),
+    ).toBeVisible({timeout: 5_000});
+}
+
+/** Pair the OPEN matching exercise with the first two pairs swapped (one
+ *  wrong + the rest correct) and check it, so the green/red feedback shows.
+ *  Returns false when there are fewer than two pairs to swap. */
+async function resolveOpenMatching(page: Page): Promise<boolean> {
+    const lefts = page.getByTestId(/^matching-left-\d+$/);
+    const n = await lefts.count();
+    if (n < 2) return false;
+    await page.getByTestId("matching-left-0").click();
+    await page.getByTestId("matching-right-1").click();
+    await page.getByTestId("matching-left-1").click();
+    await page.getByTestId("matching-right-0").click();
+    for (let j = 2; j < n; j++) {
+        await page.getByTestId(`matching-left-${j}`).click();
+        await page.getByTestId(`matching-right-${j}`).click();
+    }
+    const submit = page.getByTestId("lesson-check");
+    await expect(submit).toBeEnabled({timeout: 5_000});
+    await submit.click();
+    await expect(page.getByTestId("matching-result")).toBeVisible({
+        timeout: 5_000,
+    });
+    return true;
+}
+
+/**
+ * Matching tile with a word wider than the tile (#3174): open the
+ * ``LONG_WORD_FIXTURE`` lesson and advance to its matching step. The mobile
+ * shot is the one that shows the wrap (375px), the desktop shot the normal
+ * width of the same tiles.
+ */
+async function gotoMatchingLongWord(page: Page): Promise<boolean> {
+    await openFixtureLesson(page, LONG_WORD_FIXTURE);
+    const reached = await advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("matching-exercise").count()) > 0,
+    );
+    if (reached) {
+        await expect(page.getByTestId("matching-exercise").first()).toBeVisible({
+            timeout: 10_000,
+        });
+    }
+    return reached;
+}
+
+/** The long-word matching exercise checked with one wrong pair, so the
+ *  "Deine Antwort" / "Richtige Antwort" lines carry the long word too.
+ *  Since #3186 those lines live in the "Korrektur" view (the default
+ *  "separate corrections" setting leaves "Meine Antworten" ungraded), so
+ *  the setup opens it and waits for a "Richtige Antwort" line (#3318).
+ *  The matching step is the fixture's LAST step, so entering it fires the
+ *  motivation toast; with the extra view click that toast outlived the
+ *  settle cap in 3 of 5 runs, so the setup lets it run out first, pointer
+ *  parked off the bottom-right toast (#2898). */
+async function gotoMatchingLongWordResolved(page: Page): Promise<boolean> {
+    if (!(await gotoMatchingLongWord(page))) return false;
+    if (!(await resolveOpenMatching(page))) return false;
+    await openMatchingCorrections(page);
+    return true;
+}
+
+/**
+ * Ordering review after a wrong answer (#3260): open the
+ * ``ORDERING_FIXTURE`` lesson in practice mode (the review renders only
+ * with immediate feedback, which exam mode switches off), place the first
+ * two steps swapped and the rest in order, and check. "Deine Antwort" then
+ * marks positions 1 and 2 wrong and the rest right, and the solution lists
+ * the authored order below it.
+ */
+async function gotoOrderingReview(page: Page): Promise<boolean> {
+    await page.addInitScript(() => {
+        localStorage.setItem("adaptive-learner.lesson.default_mode", "practice");
+    });
+    await openFixtureLesson(page, ORDERING_FIXTURE);
+    await page.getByTestId("lesson-next").click();
+    await expect(page.getByTestId("ordering-exercise")).toBeVisible({timeout: 10_000});
+    // Tile testids carry the ITEM index (canonical position), not the
+    // scrambled display slot, so this order is the same on every run.
+    const n = await page.getByTestId(/^ordering-scrambled-\d+$/).count();
+    if (n < 2) return false;
+    const order = [1, 0, ...Array.from({length: n - 2}, (_, i) => i + 2)];
+    for (const tile of order) {
+        await page.getByTestId(`ordering-scrambled-${tile}`).click();
+    }
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await expect(page.getByTestId("ordering-result")).toHaveAttribute("data-result", "wrong");
+    await expect(page.getByTestId("ordering-review")).toBeVisible({timeout: 5_000});
+    await expect(page.getByTestId("ordering-solution")).toBeVisible();
+    return true;
+}
+
+/**
+ * Drive a free-text exercise to a WRONG, submitted state so the
+ * "Meine Antwort / Auflösung" answer toggle (#1004) is on screen, switched to
+ * the requested side. Returns false when the lesson has no free-text step.
+ */
+async function gotoAnswerToggle(
+    page: Page,
+    side: "my-answer" | "solution",
+): Promise<boolean> {
+    if (!(await gotoLessonRunner(page))) return false;
+    const reached = await advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("free-text-input").count()) > 0,
+    );
+    if (!reached) return false;
+    await page.getByTestId("free-text-input").fill("definitely-wrong-answer");
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    const toggle = page.getByTestId("free-text-answer-toggle");
+    if (!(await toggle.count())) return false;
+    await expect(toggle).toBeVisible({timeout: 5_000});
+    if (side === "solution") {
+        await page.getByTestId("free-text-solution").click();
+    } else {
+        await page.getByTestId("free-text-my-answer").click();
+    }
+    // The check click smooth-scrolls the feedback into view and where
+    // that scroll settles varies by 1-2px between runs, shifting the
+    // WHOLE content column against the baseline (#1493). Pin the scroll
+    // deterministically instead: an INSTANT scroll that centers the
+    // toggle (the feature under documentation) — same layout, same
+    // geometry, same pixels on every run.
+    await page.evaluate(() =>
+        document
+            .querySelector('[data-testid="free-text-answer-toggle"]')
+            ?.scrollIntoView({block: "center", behavior: "instant"}),
+    );
+    return true;
+}
+
+/** Open the bundled lesson and reveal the practice/exam/timed mode toggle. */
+async function gotoLessonModeToggle(
+    page: Page,
+    mode: "practice" | "exam" | "timed",
+): Promise<boolean> {
+    if (!(await gotoLessonRunner(page))) return false;
+    // The mode toggle lives inside the collapsible options panel (#1628);
+    // expand it before revealing the toggle.
+    const optionsToggle = page.getByTestId("lesson-options-toggle");
+    if (!(await optionsToggle.count())) return false;
+    await expect(optionsToggle).toBeVisible({timeout: 10_000});
+    if ((await optionsToggle.getAttribute("aria-expanded")) !== "true") {
+        await optionsToggle.click();
+    }
+    const toggle = page.getByTestId("lesson-mode-toggle");
+    if (!(await toggle.count())) return false;
+    await expect(toggle).toBeVisible({timeout: 10_000});
+    await page.getByTestId(`lesson-mode-${mode}`).click();
+    return true;
+}
+
+/**
+ * A GitHub token that is fake on sight (#3182): it passes the Settings
+ * format check (``ghp_`` prefix, 20+ characters) and says what it is, so
+ * a screenshot, trace or log carrying it can never pass for a credential.
+ */
+const STUB_GITHUB_TOKEN = "ghp_STUB0screenshot0token0not0a0real0credential";
+
+/** Requests to GitHub that {@link guardGitHub} stopped, per page. */
+const githubGuardHits = new WeakMap<Page, string[]>();
+
+/**
+ * Abort and record every request to ``github.com`` or one of its
+ * subdomains (``api.github.com``) for the rest of the test (#3182). The
+ * content hosts on ``*.githubusercontent.com`` are a different domain and
+ * pass. The Workbox worker has no rule for GitHub hosts, so such a request
+ * leaves from the page and ``page.route`` sees it.
+ *
+ * @example
+ * await guardGitHub(page);
+ * // ... drive the page ...
+ * assertNoGitHubRequests(page);
+ */
+async function guardGitHub(page: Page): Promise<void> {
+    const hits: string[] = [];
+    githubGuardHits.set(page, hits);
+    await page.route(
+        (url) => url.hostname === "github.com" || url.hostname.endsWith(".github.com"),
+        async (route: Route) => {
+            hits.push(`${route.request().method()} ${route.request().url()}`);
+            await route.abort("blockedbyclient");
+        },
+    );
+}
+
+/** Fail the test when {@link guardGitHub} stopped any request on this page. */
+function assertNoGitHubRequests(page: Page): void {
+    expect(githubGuardHits.get(page), "the GitHub guard was never installed").toBeDefined();
+    expect(githubGuardHits.get(page), "requests to GitHub during the shot").toEqual([]);
+}
+
+/**
+ * Save {@link STUB_GITHUB_TOKEN} through Settings > Integrations, the
+ * producer a user goes through (``github.setToken``, which in Dexie mode
+ * writes the browser-held token). Saving stores the value only; the
+ * network check sits behind the separate Test button, which stays
+ * untouched.
+ */
+async function saveStubGitHubToken(page: Page): Promise<void> {
+    await page.goto("/settings?tab=integrations");
+    const input = page.getByTestId("settings-github-token-input");
+    await expect(input).toBeVisible({timeout: 20_000});
+    await input.fill(STUB_GITHUB_TOKEN);
+    await page.getByTestId("settings-github-save").click();
+    await expect(page.getByTestId("settings-github-source")).toBeVisible({timeout: 10_000});
+}
+
+/**
+ * Open the GitHub repo-export dialog (#1009) on an own set (#3182). The
+ * "Share as repository" button renders only on a user-generated set and
+ * stays disabled until a GitHub token is configured, so the setup saves a
+ * stub token and builds one own lesson, both through the app's own
+ * producers (Settings > Integrations, the Create-Lesson wizard). A guard
+ * stops every request to GitHub: the dialog must open without one, checked
+ * here and again after the shot ({@link FeatureShot.afterShot}).
+ */
+async function gotoGithubExport(page: Page): Promise<boolean> {
+    await guardGitHub(page);
+    await seedLearner(page);
+    await saveStubGitHubToken(page);
+    await createOwnLesson(page, OWN_LESSON_TITLE);
+    await page.getByTestId("content-tab-import").click();
+    await expect(page.getByTestId("content-my-lessons")).toBeVisible({timeout: 20_000});
+    const share = page.locator('[data-testid^="my-lesson-"][data-testid$="-share-repo"]').first();
+    await expect(share).toBeEnabled({timeout: 15_000});
+    await share.click();
+    await expect(page.getByTestId("repo-export-name")).toBeVisible({timeout: 10_000});
+    assertNoGitHubRequests(page);
+    return true;
+}
+
+/** Settings > About scrolled to the legal-notice row (#3113). */
+async function gotoAboutLegal(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=about");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const link = page.getByTestId("about-imprint-link");
+    if (!(await link.count())) return false;
+    await expect(link).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** The app entry page with the legal row under the docs link (#3113).
+ *  The page shows its returning-user check first and the landing UI only
+ *  after it, so the setup waits for the link instead of counting it right
+ *  after the navigation (the count read 0 and skipped the shot, #3182). */
+async function gotoLandingLegal(page: Page): Promise<boolean> {
+    await page.goto("/");
+    await expect(page.getByTestId("landing-imprint-link")).toBeVisible({timeout: 20_000});
+    return true;
+}
+
+/** Open the QR-code "share the app" modal from the About tab (#775). */
+async function gotoQrModal(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=about");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const trigger = page.getByTestId("about-share-show-qr");
+    if (!(await trigger.count())) return false;
+    await trigger.click();
+    const modal = page.getByTestId("qr-code-modal");
+    if (!(await modal.count())) return false;
+    await expect(modal).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings → Learning scrolled to the "Lesson summary" sub-area
+ *  (#1426 — a reorder list: each summary section has an in-row visibility
+ *  checkbox plus Up/Down buttons; generalises the #1411 toggles). */
+async function gotoSummarySections(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const section = page.getByTestId("settings-section-summary-sections");
+    if (!(await section.count())) return false;
+    await section.scrollIntoViewIfNeeded();
+    await expect(section).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Step past the one-time "Play with sound?" offer the master switch raises
+ *  (#2875) with "Later", so the card shows its steady state. The offer
+ *  itself is the ``playful-details/ton-angebot`` shot (#3227), not a state
+ *  these helpers photograph by accident. */
+async function dismissSoundOffer(page: Page): Promise<void> {
+    const later = page.getByTestId("settings-playful-sounds-offer-later");
+    if (await later.count()) await later.click();
+}
+
+/** Open Settings → Learning with the Game Mode master switch just turned
+ *  on, so the one-time sound offer (#2875) is on screen (#3227). A fresh
+ *  seeded learner has never been prompted, which is what makes the offer
+ *  appear. */
+async function gotoSoundOffer(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const card = page.getByTestId("settings-section-playful");
+    if (!(await card.count())) return false;
+    await card.scrollIntoViewIfNeeded();
+    const master = page.getByTestId("settings-playful-mode-toggle");
+    if (!(await master.isChecked())) await master.click();
+    await expect(page.getByTestId("settings-playful-sounds-offer")).toBeVisible({
+        timeout: 10_000,
+    });
+    return true;
+}
+
+/** Open the Lesson Creator over a restorable draft, so the continue-or-fresh
+ *  prompt is on screen (#3227). The draft is written straight into the
+ *  autosave slot (``adaptive-learner.lesson-draft``) before the navigation;
+ *  every other creator shot steps past this prompt via
+ *  ``declineDraftPrompt``. */
+async function gotoDraftPrompt(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.evaluate(() => {
+        localStorage.setItem(
+            "adaptive-learner.lesson-draft",
+            JSON.stringify({
+                schema: 1,
+                step: 2,
+                meta: {
+                    title: "Adjektivstellung",
+                    titleNative: "Adjective placement",
+                    sourceLanguage: "de",
+                    targetLanguage: "es",
+                    level: "A2",
+                    description: "",
+                },
+                cards: [],
+                updatedAt: new Date().toISOString(),
+            }),
+        );
+    });
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-draft-prompt")).toBeVisible({
+        timeout: 20_000,
+    });
+    return true;
+}
+
+/** Open Settings → Learning on the Game Mode summary card (#2959), put
+ *  the master "Playful lessons" switch into ``gameModeOn``, dismiss the
+ *  one-time sound offer the switch raises (#2875, so the card shows its
+ *  steady state), and unfold "Game mode details". The fold is collapsed
+ *  by default and remembers its state, so the open is idempotent. */
+async function gotoPlayfulDetails(
+    page: Page,
+    gameModeOn: boolean,
+): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const card = page.getByTestId("settings-section-playful");
+    if (!(await card.count())) return false;
+    await card.scrollIntoViewIfNeeded();
+    const master = page.getByTestId("settings-playful-mode-toggle");
+    if ((await master.isChecked()) !== gameModeOn) await master.click();
+    await dismissSoundOffer(page);
+    const toggle = page.getByTestId("settings-playful-details-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+        await toggle.click();
+    }
+    await expect(page.getByTestId("settings-playful-details-body")).toBeVisible({
+        timeout: 10_000,
+    });
+    return true;
+}
+
+/** Open Settings → Learning scrolled to the Game Mode section's mascot
+ *  variant picker (#2861 — unlockable Lernfunke color schemes, level/
+ *  badge/XP-gated like the #2850 avatar frames). A fresh seeded learner
+ *  has only the free default unlocked, so this pins the realistic
+ *  mostly-locked first-look state, locks and all. Since #2959 the picker
+ *  lives inside the "Game mode details" fold and is enabled only with
+ *  the master switch on, so both are switched first. */
+async function gotoMascotVariants(page: Page): Promise<boolean> {
+    if (!(await gotoPlayfulDetails(page, true))) return false;
+    const section = page.getByTestId("settings-mascot-variants");
+    try {
+        await section.waitFor({timeout: 15_000});
+    } catch {
+        return false;
+    }
+    await section.scrollIntoViewIfNeeded();
+    await expect(section).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings → Learning scrolled to the Feedback card with game mode
+ *  seeded ON (#2957): the volume slider + shared-volume hint are always
+ *  visible, and the intensity radios carry the live "game mode overrides
+ *  this" hint. Seeded through the pref key (not the toggle) so the
+ *  one-time "Play with sound?" offer (#2875) does not render into the
+ *  shot. */
+async function gotoFeedbackCard(page: Page): Promise<boolean> {
+    await page.addInitScript(() => {
+        localStorage.setItem("adaptive-learner.lesson.playful_mode", "true");
+    });
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const section = page.getByTestId("settings-section-feedback");
+    if (!(await section.count())) return false;
+    await section.scrollIntoViewIfNeeded();
+    await expect(section).toBeVisible({timeout: 10_000});
+    await expect(
+        page.getByTestId("settings-feedback-intensity-playful-hint"),
+    ).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/**
+ * Open the proactive error-report dialog from Settings → Diagnostics &
+ * Support (#1480 — baseline net for the inline-style-heavy dialog before
+ * its Tailwind migration; moved here from Settings → About by #2789). The
+ * Support card's button dispatches the
+ * ``adaptive-learner:open-error-report`` CustomEvent that App.tsx listens
+ * on, so this exercises the real production path.
+ */
+async function gotoErrorReportDialog(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=diagnostics");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const trigger = page.getByTestId("settings-create-error-report");
+    if (!(await trigger.count())) return false;
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
+    // The dialog is lazy-loaded (App.tsx Suspense), so it appears a beat
+    // after the click — wait for it instead of an immediate count check.
+    const dialog = page.getByTestId("error-report-dialog");
+    try {
+        await dialog.waitFor({timeout: 15_000});
+    } catch {
+        return false;
+    }
+    await expect(dialog).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/**
+ * Error-report dialog with the action-history preview expanded. The
+ * "View" toggle only renders when the event recorder captured at least
+ * one event — the seed + navigation above produce some; when none were
+ * recorded the shot is skipped rather than baselining an empty state.
+ */
+async function gotoErrorReportHistory(page: Page): Promise<boolean> {
+    if (!(await gotoErrorReportDialog(page))) return false;
+    const view = page.getByTestId("error-report-history-view");
+    if (!(await view.count())) return false;
+    await view.click();
+    const preview = page.getByTestId("error-report-history-preview");
+    if (!(await preview.count())) return false;
+    await expect(preview).toBeVisible({timeout: 5_000});
+    return true;
+}
+
+/** Error-report dialog with the full report preview shown
+ *  (``error-report-toggle-preview`` → ``error-report-full-preview``). */
+async function gotoErrorReportFullPreview(page: Page): Promise<boolean> {
+    if (!(await gotoErrorReportDialog(page))) return false;
+    const toggle = page.getByTestId("error-report-toggle-preview");
+    if (!(await toggle.count())) return false;
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.click();
+    const preview = page.getByTestId("error-report-full-preview");
+    if (!(await preview.count())) return false;
+    await expect(preview).toBeVisible({timeout: 5_000});
+    return true;
+}
+
+/**
+ * Settings → Data scrolled to the Sync desktop-only notice — the state
+ * every Dexie/PWA visitor actually sees (#335: disabled-with-reason, not
+ * hidden). The TRUE sync states (desktop-unpaired, QR panel, phone
+ * pairing, QR scanner) need a backend and are NOT reachable in this
+ * dexie-preview pipeline — baselining them needs an API-mode capture
+ * project first (documented in #1480).
+ */
+/** Open the dashboard with the opt-in tap-offset probe active (#1569/#2779). */
+async function gotoViewportDiagnostic(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/dashboard?vvdiag=1");
+    await expect(page.getByTestId("viewport-diagnostic")).toBeVisible({
+        timeout: 20_000,
+    });
+    return true;
+}
+
+async function gotoSyncDesktopOnlyNotice(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=data");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const notice = page.getByTestId("settings-sync-desktop-only");
+    if (!(await notice.count())) return false;
+    await notice.scrollIntoViewIfNeeded();
+    await expect(notice).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/**
+ * Every per-feature baseline. Kebab-case ``<feature-folder>/<shot>`` paths;
+ * the test loop appends the viewport suffix + ``.png``.
+ */
+/**
+ * Open the Create-Lesson book-text step and upload a small Markdown book
+ * so the #1927 section picker (chapter select + preview + apply) renders.
+ */
+async function gotoTokenRoleField(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 20_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill("Tiere");
+    // The suggester knows only closed word classes PER LANGUAGE and reads
+    // the card-front language from the target language (#3080). Pin it to
+    // German, otherwise the default target treats "der"/"dem" as unknown
+    // and only "in" (also an English preposition) gets a row.
+    await page.getByTestId("create-lesson-target-lang").click();
+    await page.getByRole("option", {name: "German", exact: true}).click();
+    await expect(page.getByTestId("create-lesson-target-lang")).toContainText(
+        "German",
+    );
+    await page.getByTestId("create-lesson-next").click();
+    // Step 2: one card whose front carries two articles and a preposition,
+    // so the suggestion has something honest to find.
+    await page.getByTestId("card-front-input").fill("der Hund in dem Garten");
+    await page.getByTestId("card-back-input").fill("the dog in the garden");
+    await page.getByTestId("card-add-button").click();
+    const editButton = page.locator('[data-testid^="card-edit-"]').first();
+    await editButton.click();
+    const suggest = page
+        .locator('[data-testid$="-token-roles-suggest"]')
+        .first();
+    await expect(suggest).toBeVisible({timeout: 20_000});
+    await suggest.click();
+    // "der" (article), "in" (preposition), "dem" (article): all three rows,
+    // the same expectation token-role-suggest.test.ts pins for this front.
+    await expect(page.locator('[data-testid$="-token-role-row"]')).toHaveCount(
+        3,
+        {timeout: 20_000},
+    );
+    return true;
+}
+
+async function gotoBookUploadPicker(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 20_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill("Lernpsychologie");
+    await page.getByTestId("create-lesson-templates-toggle").click();
+    await page.getByTestId("template-knowledge-from-text").click();
+    await expect(page.getByTestId("create-lesson-book-step")).toBeVisible({
+        timeout: 20_000,
+    });
+    const markdown = [
+        "# Die klassische Konditionierung",
+        "Iwan Pawlow zeigte, wie ein neutraler Reiz durch Kopplung mit einem",
+        "unbedingten Reiz eine gelernte Reaktion ausloest.",
+        "# Die operante Konditionierung",
+        "B. F. Skinner beschrieb, wie Verstaerkung und Bestrafung die",
+        "Auftretenswahrscheinlichkeit von Verhalten veraendern.",
+    ].join("\n");
+    await page.getByTestId("book-upload-input").setInputFiles({
+        name: "lernpsychologie.md",
+        mimeType: "text/markdown",
+        buffer: Buffer.from(markdown, "utf-8"),
+    });
+    await expect(page.getByTestId("book-upload-picker")).toBeVisible({
+        timeout: 20_000,
+    });
+    return true;
+}
+
+/** Open Settings -> AI scrolled to the configured-providers table, which
+ *  lists Perplexity as the fourth provider (#2512). In this Dexie-mode
+ *  build it is desktop-only (corsBlocked) and shown disabled with a
+ *  reason instead of hidden - exactly the state worth pinning. */
+async function gotoConfiguredProviders(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=ai");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    // The panel loads its settings snapshot async - waitFor instead of an
+    // immediate count check (the desktop run rendered a beat later).
+    const table = page.getByTestId("configured-providers");
+    try {
+        await table.waitFor({timeout: 15_000});
+    } catch {
+        return false;
+    }
+    await table.scrollIntoViewIfNeeded();
+    await expect(table).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings -> Data scrolled to the key-vault block whose import
+ *  half accepts sibling-app exports since #2512 (format-agnostic import,
+ *  provider aliases). */
+async function gotoKeyVaultSection(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=data");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const section = page.getByTestId("key-vault-section");
+    try {
+        await section.waitFor({timeout: 15_000});
+    } catch {
+        return false;
+    }
+    await section.scrollIntoViewIfNeeded();
+    await expect(section).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** A lesson opened without a learner profile (#3364): open the bundled
+ *  lesson as a learner, then drop the learner id and reload, so the page
+ *  shows the "nothing is saved" notice with its profile link. */
+async function gotoLessonNoProfile(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await openFirstBundledLesson(page);
+    await page.evaluate(() => localStorage.removeItem("adaptive-learner.user_id"));
+    await page.reload();
+    await expect(page.getByTestId("lesson-no-profile-notice")).toBeVisible({timeout: 20_000});
+    return true;
+}
+
+/** The resume dialog's start-over confirmation (#3361): page through two
+ *  steps of the bundled lesson, pause through the exit dialog, reopen the
+ *  lesson from the Dashboard's paused-lessons card and press "Neu starten"
+ *  so the confirmation step is on screen. Same path as the dexie spec
+ *  ``lesson-pause-position.spec.ts``. */
+async function gotoResumeRestartConfirm(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await openFirstBundledLesson(page);
+    for (let i = 0; i < 2; i += 1) {
+        await page.getByTestId("lesson-next").click();
+    }
+    await page.getByTestId("lesson-pause-btn").click();
+    await page.getByTestId("lesson-exit-pause").click();
+    await page.waitForURL("**/content**");
+    await page.goto("/dashboard");
+    await expect(page.getByTestId("paused-lessons-card")).toBeVisible({timeout: 30_000});
+    await page.locator('[data-testid^="paused-lesson-resume-"]').first().click();
+    await expect(page.getByTestId("lesson-resume-dialog")).toBeVisible({timeout: 20_000});
+    await page.getByTestId("lesson-resume-restart").click();
+    await expect(page.getByTestId("lesson-resume-confirm-restart")).toBeVisible();
+    return true;
+}
+
+/** Settings > Learning > Interaction scrolled to the "keep the screen on
+ *  in lessons" toggle (#3358). */
+async function gotoKeepScreenOnToggle(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const toggle = page.getByTestId("settings-keep-screen-on-toggle");
+    await toggle.scrollIntoViewIfNeeded();
+    await expect(toggle).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings -> Data scrolled to the paused-lesson retention card,
+ *  which sits right before the cleanup slot since #2955 (its sibling,
+ *  max lesson size, sits right after the offline cache further up). */
+async function gotoDataHousekeeping(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=data");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const section = page.getByTestId("settings-section-paused-retention");
+    await section.scrollIntoViewIfNeeded();
+    await expect(section).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings → Learning scrolled to the "In der Lektion" cluster
+ *  (#2956 — the five labelled clusters). Pins the cluster whose heading +
+ *  description sit above the lesson-mode card, with the frequency-first
+ *  hints + interaction cards following it. */
+async function gotoLearningClusters(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const cluster = page.getByTestId("settings-cluster-lessons");
+    await cluster.scrollIntoViewIfNeeded();
+    await expect(cluster).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings → Learning through the ``?section=review`` deep link
+ *  (#2961 - the section bar). Pins the bar with the "Nach der Lektion"
+ *  chip active, sticky below the app header on desktop, scrolled to the
+ *  matching cluster. */
+async function gotoLearningSubNav(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning&section=review");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const chip = page.getByTestId("settings-subnav-review");
+    await expect(chip).toHaveAttribute("aria-current", "location", {timeout: 10_000});
+    // Let the deep link's deferred smooth scroll ARRIVE before the shot
+    // helper resets the scroll position: an instant pin racing a smooth
+    // scroll that is still in flight lands off by the animation's remainder.
+    await expect(page.getByTestId("settings-cluster-review")).toBeInViewport({timeout: 10_000});
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/** Open Settings → Data via the section deep link, backup area in view (#3122). */
+async function gotoDataSubNav(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=data&section=backup");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const chip = page.getByTestId("settings-subnav-backup");
+    await expect(chip).toHaveAttribute("aria-current", "location", {timeout: 10_000});
+    await expect(page.getByTestId("settings-cluster-data-backup")).toBeInViewport({timeout: 10_000});
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/** Finish the bundled lesson and open the detailed evaluation (#3124): the
+ *  set-style review of the lesson sits first under the toggle. */
+async function gotoDetailedLessonSummary(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    if (!(await playBundledLesson(page, "summary"))) return false;
+    await page.getByTestId("lesson-summary-detailed-toggle").click();
+    await expect(page.getByTestId("lesson-summary-review")).toBeVisible({timeout: 10_000});
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/** The bundled set the visual helpers download and play (mirrors the
+ *  ``SET_ID`` constant in ``e2e/visual/helpers.ts``). */
+const BUNDLED_SET_ID = "fr-a1-from-en";
+
+/**
+ * EXP-052 slice 1 (#3169) - the review session on the LessonRunner shell:
+ * the session header (back button, title, element-count subtitle), the
+ * shared progress bar and the lesson footer (chevron Previous, check icon
+ * on the two-phase button). ``gotoReviewSession`` seeds the SRS rows with a
+ * wrong matching pair and re-enters the route until the active session
+ * renders (#1540).
+ */
+async function gotoReviewStep(page: Page): Promise<boolean> {
+    if (!(await gotoReviewSession(page))) return false;
+    await expect(page.getByTestId("review-check")).toBeVisible({timeout: 10_000});
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/**
+ * EXP-052 slice 1 (#3169) - the review summary rendered through the shell's
+ * summary render prop: the recap with the SRS note and the come-back line;
+ * the footer keeps the Previous button on the summary (a locked read-only
+ * look back, #1790). The seeded round has exactly one due element, so the
+ * summary is one answered step away.
+ */
+async function gotoReviewSummary(page: Page): Promise<boolean> {
+    if (!(await gotoReviewStep(page))) return false;
+    const answered = await answerReviewStep(page);
+    if (!answered) return false;
+    await page.getByTestId("review-next").click();
+    await expect(page.getByTestId("review-summary")).toBeVisible({timeout: 10_000});
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/**
+ * EXP-052 slice 2 (#3169) - wrap a set-runner opener (Shuffle, Endless)
+ * so the shot waits the same settle beat as the review step.
+ */
+function settledSetRunner(open: (page: Page) => Promise<boolean>) {
+    return async (page: Page): Promise<boolean> => {
+        if (!(await open(page))) return false;
+        await page.waitForTimeout(400);
+        return true;
+    };
+}
+
+/**
+ * Answer the open replay exercise WRONG on purpose, the way the seed got
+ * it wrong in the lesson: free text and typed cloze with a nonsense word,
+ * matching with its first two pairs swapped (the rest by index, the mixed
+ * result ``pairMatchingWithWrongCycle`` seeds by default; the pinned mount salt keeps
+ * the column order of the lesson). Any other type falls back to
+ * ``answerCurrentStep``.
+ */
+async function answerReplayStepWrong(page: Page): Promise<void> {
+    if (await page.getByTestId("free-text-input").count()) {
+        await page.getByTestId("free-text-input").fill("zzzzz");
+        return;
+    }
+    const blanks = page.locator('[data-testid^="cloze-input-"]');
+    if (await blanks.count()) {
+        for (let j = 0; j < (await blanks.count()); j++) await blanks.nth(j).fill("zzzzz");
+        return;
+    }
+    const lefts = page.getByTestId(/^matching-left-\d+$/);
+    const n = await lefts.count();
+    if (n >= 2) {
+        for (let j = 0; j < n; j++) {
+            await page.getByTestId(`matching-left-${j}`).click();
+            await page.getByTestId(`matching-right-${j < 2 ? 1 - j : j}`).click();
+        }
+        return;
+    }
+    await answerCurrentStep(page);
+}
+
+/**
+ * EXP-052 slice 3 (#3169) - the Error Replay recap through the shell's
+ * summary render prop, in its "still errors" state: every replayed exercise
+ * is answered wrong on purpose, so the shot shows the score, "Try again?"
+ * and "Back to lesson" and no confetti (its particles would make the frame
+ * timing-dependent). The footer keeps Previous as a locked read-only look
+ * back. A round that came out all corrected is skipped, not captured.
+ */
+async function gotoErrorReplaySummary(page: Page): Promise<boolean> {
+    if (!(await gotoErrorReplay(page))) return false;
+    const summary = page.getByTestId("error-replay-summary");
+    for (let i = 0; i < 20 && !(await summary.count()); i++) {
+        await answerReplayStepWrong(page);
+        const check = page.getByTestId("error-replay-check");
+        if (await check.count()) {
+            await expect(check).toBeEnabled({timeout: 5_000});
+            await check.click();
+        }
+        await page.getByTestId("error-replay-next").click();
+    }
+    await expect(summary).toBeVisible({timeout: 10_000});
+    if ((await summary.getAttribute("data-all-corrected")) !== "false") return false;
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/**
+ * Answer the open review step and check it. The seeded error row comes
+ * from a matching exercise, so the review presents a matching question:
+ * pair every left tile with the right tile of the same index (right or
+ * wrong does not matter for the shot), then check. Returns false when the
+ * step is not a matching exercise (a future seed may change the type).
+ */
+async function answerReviewStep(page: Page): Promise<boolean> {
+    const lefts = page.locator("[data-testid^='matching-left-']");
+    const rights = page.locator("[data-testid^='matching-right-']");
+    const count = await lefts.count();
+    if (count === 0 || count !== (await rights.count())) return false;
+    for (let i = 0; i < count; i++) {
+        await lefts.nth(i).click();
+        await rights.nth(i).click();
+    }
+    const check = page.getByTestId("review-check");
+    await expect(check).toBeEnabled({timeout: 10_000});
+    await check.click();
+    await expect(page.getByTestId("review-next")).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/**
+ * #3171 — the "Repeat everything" confirmation on the learning-path set
+ * panel. A played lesson gives the set results, so the button is offered
+ * and the dialog has an average to name; the shot is taken once the
+ * summary has loaded (confirm enabled).
+ */
+async function gotoResetSetResultsDialog(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    if (!(await playBundledLesson(page, "summary"))) return false;
+    await page.goto("/learning-path");
+    await expect(page.getByTestId("learning-path-sets")).toBeVisible({timeout: 20_000});
+    await page.getByTestId(`set-toggle-${BUNDLED_SET_ID}`).click();
+    await page.getByTestId(`set-reset-results-${BUNDLED_SET_ID}`).click();
+    await expect(page.getByTestId("reset-set-results-confirm")).toBeVisible({timeout: 10_000});
+    await expect(page.getByTestId("reset-set-results-confirm-confirm")).toBeEnabled({
+        timeout: 10_000,
+    });
+    await page.waitForTimeout(400);
+    return true;
+}
+
+/** Open Settings → Learning scrolled to the gamification card (#2962 -
+ *  moved in from the Plugins tab as the last card of the motivation
+ *  cluster, behind a separator because it holds Reset progress). */
+async function gotoGamificationCard(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=learning&section=motivation");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    const card = page.getByTestId("settings-section-gamification");
+    await card.scrollIntoViewIfNeeded();
+    await expect(card).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/** Open Settings > Plugins: the installed-plugins card (#3055). The dexie
+ *  preview build renders its desktop-only notice; the API-mode list needs
+ *  the desktop app and is walked by hand (testplan). */
+async function gotoPluginLifecycle(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto("/settings?tab=plugins");
+    await expect(page.getByTestId("settings")).toBeVisible({timeout: 20_000});
+    await expect(page.getByTestId("settings-plugins-lifecycle-desktop-only")).toBeVisible({
+        timeout: 10_000,
+    });
+    return true;
+}
+
+/**
+ * AIV-07 (#3060): the review table of "Apply suggestions". The provider is
+ * page.route-mocked (a fake Anthropic key saved through Settings > KI, the
+ * check's request answered with one finding on the first card of the seeded
+ * own lesson), so the report is real, the review step is real, and nothing
+ * leaves the machine.
+ */
+async function mockAnthropicReview(page: Page): Promise<void> {
+    await page.route("**/api.anthropic.com/**", async (route: Route) => {
+        // The prompt travels as a JSON string inside the request body, so
+        // its quotes arrive escaped: match the ids with or without the
+        // backslashes, and skip the "..." placeholder of the prompt's
+        // response-shape example, which precedes the real card list.
+        const body = route.request().postData() ?? "";
+        const ids = [...body.matchAll(/card_id\\?":\s*\\?"([^"\\]+)/g)].map((m) => m[1]);
+        const cardId = ids.find((id) => id !== "...") ?? "c1";
+        const review = [
+            {
+                card_id: cardId,
+                ok: false,
+                issues: [
+                    {field: "back", problem: "Zu förmlich für A1", suggestion: "Hallo"},
+                    {field: "notes", problem: "Aussprache fehlt", suggestion: ""},
+                ],
+            },
+        ];
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+                id: "msg_capture_ai_fix",
+                content: [{type: "text", text: JSON.stringify(review)}],
+            }),
+        });
+    });
+}
+
+/** Content > My content with an own set: every own-set row carries the
+ *  "Check with AI" button (AIV-07, #3060). Key-less, so the button renders
+ *  disabled with its reason, exactly the #335 shape worth pinning. */
+async function gotoOwnSetAiCheckButton(page: Page): Promise<boolean> {
+    await pinRandomness(page);
+    await seedLearner(page);
+    await createOwnLesson(page, OWN_LESSON_TITLE);
+    await page.getByTestId("content-tab-import").click();
+    await expect(page.getByTestId("content-my-lessons")).toBeVisible({timeout: 20_000});
+    await expect(page.locator('[data-testid$="-ai-check"]').first()).toBeVisible({
+        timeout: 15_000,
+    });
+    return true;
+}
+
+/** Store an Anthropic key, create an own set and open its AI check up to the
+ *  confirm step (cost estimate + privacy note). Sends nothing to the provider. */
+async function openOwnSetAiCheckConfirm(page: Page): Promise<void> {
+    await page.goto("/settings?tab=ai");
+    const keyInput = page.getByTestId("api-key-input-anthropic");
+    await expect(keyInput).toBeVisible({timeout: 15_000});
+    await keyInput.fill("sk-ant-" + "a".repeat(95));
+    await page.getByTestId("api-key-save-anthropic").click();
+    await page.waitForTimeout(500);
+    await createOwnLesson(page, OWN_LESSON_TITLE);
+    await page.getByTestId("content-tab-import").click();
+    await expect(page.getByTestId("content-my-lessons")).toBeVisible({timeout: 20_000});
+    const check = page.locator('[data-testid$="-ai-check"]').first();
+    await expect(check).toBeEnabled({timeout: 15_000});
+    await check.click();
+    await expect(page.getByTestId("ai-validation-estimate")).toBeVisible({timeout: 15_000});
+}
+
+/** The AI check's confirm step (#3812, #3840): the note says what the check
+ *  sends (the set's cards with identifier, front, back and notes, plus the
+ *  set's source language, target language and level, neither profile nor
+ *  progress, and among other things IP address and key) and links the
+ *  privacy policy. The run is not started. */
+async function gotoAiCheckPrivacyNote(page: Page): Promise<boolean> {
+    await pinRandomness(page);
+    await seedLearner(page);
+    await openOwnSetAiCheckConfirm(page);
+    await expect(page.getByTestId("ai-validation-privacy-link")).toBeVisible();
+    return true;
+}
+
+async function gotoAiFixReview(page: Page): Promise<boolean> {
+    await pinRandomness(page);
+    await seedLearner(page);
+    await mockAnthropicReview(page);
+    await openOwnSetAiCheckConfirm(page);
+    await page.getByTestId("ai-validation-confirm-run").click();
+    await expect(page.getByTestId("ai-validation-report")).toBeVisible({timeout: 20_000});
+    await page.getByTestId("ai-validation-fix-open").click();
+    await expect(page.getByTestId("ai-fix-review")).toBeVisible({timeout: 15_000});
+    await expect(page.locator('[data-testid^="ai-fix-review-row-"]').first()).toBeVisible();
+    return true;
+}
+
+/**
+ * Set update available + held back (#3001, #3081): a page.route-mocked
+ * content repo whose root manifest reports version 1.0.0 while the learner
+ * downloads and plays the set, then 1.1.0 with a RENAMED lesson file, so the
+ * learner's lesson progress would be orphaned and the #2128 guard holds the
+ * update back. No fixture on disk produces that state; the mock flips it.
+ */
+const UPDATE_REPO = "e2e/update-held-back";
+const UPDATE_SET_ID = "adjektivstellung-from-de";
+
+function mockUpdatableRepo(page: Page): {bump: () => void} {
+    const lesson = readFileSync(
+        join(__dirname, "..", "fixtures", "explanation-post-answer.lesson.json"),
+        "utf-8",
+    );
+    const state = {version: "1.0.0", file: "01-adjektivstellung.json"};
+    const rootManifest = () =>
+        [
+            'schema_version: "1.13"',
+            "sets:",
+            `  - id: ${UPDATE_SET_ID}`,
+            '    title: "Adjektivstellung"',
+            "    target_language: es",
+            "    source_language: de",
+            "    level: A1",
+            `    version: "${state.version}"`,
+            "    lesson_count: 1",
+            "    domain: language",
+            "    path: sets/es/adjektivstellung",
+            "",
+        ].join("\n");
+    const setManifest = () => `metadata:\n  lessons:\n    - "${state.file}"\n`;
+    const emptyIndex = 'schema_version: "1.13"\nsets: []\n';
+    const emptyOfficial = (route: Route) => {
+        const url = route.request().url();
+        if (url.endsWith("/recommended-repos.json")) {
+            return route.fulfill({status: 200, body: '{"repos":[]}'});
+        }
+        if (url.endsWith("/books.yaml")) {
+            return route.fulfill({status: 200, body: "domains: {}\n"});
+        }
+        if (url.endsWith("/manifest.yaml")) {
+            return route.fulfill({status: 200, body: emptyIndex});
+        }
+        return route.fulfill({status: 404, body: ""});
+    };
+    void page.route("**/raw.githubusercontent.com/**", emptyOfficial);
+    void page.route("**/adaptive-learner-content/**", emptyOfficial);
+    void page.route(`**/raw.githubusercontent.com/${UPDATE_REPO}/main/**`, (route) => {
+        const url = route.request().url();
+        if (url.endsWith("/main/manifest.yaml")) {
+            return route.fulfill({status: 200, body: rootManifest()});
+        }
+        if (url.endsWith("/sets/es/adjektivstellung/manifest.yaml")) {
+            return route.fulfill({status: 200, body: setManifest()});
+        }
+        if (url.endsWith(`/${state.file}`)) {
+            return route.fulfill({status: 200, body: lesson});
+        }
+        return route.fulfill({status: 404, body: ""});
+    });
+    return {
+        bump: () => {
+            state.version = "1.1.0";
+            state.file = "01-adjektivstellung-v2.json";
+        },
+    };
+}
+
+/** Connect the mocked repo, download + play the set so progress exists,
+ *  then bump upstream and land on Meine Inhalte (list view) with the
+ *  "Update available" row. */
+async function gotoUpdateAvailableRow(page: Page): Promise<{bump: () => void} | null> {
+    const repo = mockUpdatableRepo(page);
+    await seedLearner(page);
+    await page.goto("/settings?tab=data");
+    await expect(page.getByTestId("content-repo-add")).toBeVisible({timeout: 60_000});
+    await page.getByTestId("content-repo-url").fill(`https://github.com/${UPDATE_REPO}`);
+    await page.getByTestId("content-repo-connect").click();
+    await expect(page.getByTestId("content-repo-result")).toContainText(/passed|erfolgreich/i);
+    // The Open button lives in the tile view only; the list view (default
+    // since #1257) links to the set page. Play through the tiles, then
+    // drop the preference so the shot shows the default list view.
+    await page.evaluate(() => localStorage.setItem("adaptive-learner.content_view_mode", "grid"));
+    await page.goto("/content?tab=my");
+    await expect(page.getByTestId("content-tree")).toBeVisible({timeout: 15_000});
+    const open = page.getByTestId(`content-set-${UPDATE_SET_ID}-open`);
+    await expect(open).toBeVisible({timeout: 15_000});
+    await open.click();
+    await expect(page.getByTestId("lesson-page")).toBeVisible({timeout: 15_000});
+    await page.getByTestId("lesson-next").click();
+    await expect(page.getByTestId("multiple-choice-exercise")).toBeVisible({timeout: 10_000});
+    await page.getByRole("radio", {name: "el rojo coche"}).check();
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    repo.bump();
+    await page.evaluate(() => localStorage.removeItem("adaptive-learner.content_view_mode"));
+    await page.goto("/content?tab=my");
+    await expect(page.getByTestId("content-list-view")).toBeVisible({timeout: 15_000});
+    await expect(page.getByTestId(`content-list-set-${UPDATE_SET_ID}-update-button`)).toBeVisible({
+        timeout: 15_000,
+    });
+    return repo;
+}
+
+async function gotoListUpdateRow(page: Page): Promise<boolean> {
+    return (await gotoUpdateAvailableRow(page)) !== null;
+}
+
+/** Press the header "Aktualisieren": the update is held back (#2128) and
+ *  the toast names the set (#3081). */
+async function gotoHeldBackToast(page: Page): Promise<boolean> {
+    if (!(await gotoUpdateAvailableRow(page))) return false;
+    await page.getByTestId("content-refresh").click();
+    await expect(page.getByText(/Zurückgehalten, weil dein Fortschritt/)).toBeVisible({
+        timeout: 20_000,
+    });
+    await expect(page.getByTestId(`content-list-set-${UPDATE_SET_ID}-update-button`)).toBeVisible();
+    return true;
+}
+
+/** Registry pin of the repo the short-link shot resolves (#3819). */
+const SHORT_LINK_COMMIT = "c".repeat(40);
+
+/**
+ * The card a short set link shows for a set of a registry repo the learner
+ * has not added yet (#3819): the registry and that repo's pinned search
+ * index are mocked in the shapes the content repos publish, so the shot
+ * does not depend on the live registry.
+ */
+async function gotoRegistrySetCard(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.route(
+        "**/raw.githubusercontent.com/astrapi69/adaptive-learner-content/main/recommended-repos.json",
+        (route: Route) =>
+            route.fulfill({
+                status: 200,
+                body: JSON.stringify({
+                    repos: [
+                        {
+                            url: "https://github.com/astrapi69/alc-ai",
+                            branch: "main",
+                            title: "KI",
+                            commit: SHORT_LINK_COMMIT,
+                            trust_level: 3,
+                            validation: {status: "validated", validated_at: "2026-10-01T00:00:00Z"},
+                        },
+                    ],
+                }),
+            }),
+    );
+    await page.route(
+        `**/raw.githubusercontent.com/astrapi69/alc-ai/${SHORT_LINK_COMMIT}/search-index.json`,
+        (route: Route) =>
+            route.fulfill({
+                status: 200,
+                body: JSON.stringify({
+                    schema_version: "1.9",
+                    sets: [
+                        {
+                            id: "ki-einsteiger-from-de",
+                            name: "KI für Einsteiger",
+                            description:
+                                "Was künstliche Intelligenz kann, wo ihre Grenzen liegen und wie du sie im Alltag sinnvoll nutzt.",
+                            source_language: "de",
+                            target_language: "de",
+                            level: "A1",
+                            domain: "ai",
+                            lesson_count: 12,
+                            card_count: 48,
+                        },
+                    ],
+                }),
+            }),
+    );
+    await page.goto("/content/set/ki-einsteiger-from-de");
+    await expect(page.getByTestId("registry-set")).toBeVisible({timeout: 20_000});
+    return true;
+}
+
+/**
+ * The share dialog of an official set (#3819): the short link
+ * ``…/content/set/<id>`` and the note that it stays valid while the set
+ * keeps its id. An official set needs no registry lookup.
+ */
+async function gotoShareShortLink(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await page.goto(`/content/set/${BUNDLED_SET_ID}`);
+    await expect(page.getByTestId("set-deep-link-found")).toBeVisible({timeout: 20_000});
+    await page.getByTestId(`set-share-${BUNDLED_SET_ID}`).click();
+    await expect(page.getByTestId("set-share-modal-url")).toHaveText(
+        new RegExp(`/content/set/${BUNDLED_SET_ID}$`),
+    );
+    return true;
+}
+
+const FEATURES: FeatureShot[] = [
+    // --- Short set link: set of a registry repo not added yet (#3819) ------
+    {
+        path: "set-short-link/register-set",
+        setup: gotoRegistrySetCard,
+        pinTo: "set-deep-link-page",
+    },
+    {
+        path: "set-short-link/teilen-kurzlink",
+        setup: gotoShareShortLink,
+    },
+    // --- Keep the screen on in lessons, Settings > Learning (#3358) -------
+    {
+        path: "keep-screen-on/settings",
+        setup: gotoKeepScreenOnToggle,
+        pinTo: "settings-section-interaction",
+    },
+    // --- Lesson without a learner profile: notice + profile link (#3364) --
+    {
+        path: "lesson-no-profile/hinweis",
+        setup: gotoLessonNoProfile,
+        pinTo: "lesson-no-profile-notice",
+    },
+    // --- Resume dialog: "Neu starten" asks first (#3361) ------------------
+    {
+        path: "lesson-resume/neu-starten-rueckfrage",
+        setup: gotoResumeRestartConfirm,
+        pinTo: "lesson-resume-confirm-restart",
+    },
+    // --- Set update available in the list view + held-back toast (#3081) --
+    {
+        path: "content-updates/listenansicht-aktualisierung",
+        setup: gotoListUpdateRow,
+        pinTo: `content-list-set-${UPDATE_SET_ID}-update-button`,
+    },
+    {
+        path: "content-updates/zurueckgehalten-toast",
+        setup: gotoHeldBackToast,
+        pinTo: `content-list-set-${UPDATE_SET_ID}-update-button`,
+        keepsToast: true,
+    },
+    // --- AI check: apply suggestions, review step (AIV-07, #3060) ---------
+    {
+        path: "ai-check/vorschlaege-uebernehmen",
+        setup: gotoAiFixReview,
+        pinTo: "ai-fix-review",
+    },
+    {
+        path: "ai-check/eigenes-set-pruefen",
+        setup: gotoOwnSetAiCheckButton,
+        pinTo: "content-my-lessons",
+    },
+    {
+        path: "ai-check/datenschutz-hinweis",
+        setup: gotoAiCheckPrivacyNote,
+        pinTo: "ai-validation-confirm",
+    },
+    // --- Installed-plugins card, Plugins tab (#3055) ----------------------
+    {
+        path: "plugin-lifecycle/settings",
+        setup: gotoPluginLifecycle,
+        pinTo: "settings-plugins-lifecycle-desktop-only",
+    },
+    // --- Legal notice + privacy policy links (#3113) -----------------------
+    {
+        path: "legal/settings-about",
+        setup: gotoAboutLegal,
+        pinTo: "about-imprint-link",
+    },
+    {
+        path: "legal/landing",
+        setup: gotoLandingLegal,
+        pinTo: "landing-legal",
+    },
+    // --- Gamification card inside the motivation cluster (#2962) ----------
+    {
+        path: "gamification-card/settings",
+        setup: gotoGamificationCard,
+        pinTo: "settings-gamification-separator",
+    },
+    // --- Data-tab section bar (#3122) -------------------------------------
+    {
+        path: "data-subnav/settings",
+        setup: gotoDataSubNav,
+        pinTo: "settings-cluster-data-backup",
+    },
+    // --- "Repeat everything" confirmation on the set panel (#3171) --------
+    {
+        path: "reset-set-results/dialog",
+        setup: gotoResetSetResultsDialog,
+        pinTo: "reset-set-results-confirm",
+    },
+    // --- Detailed lesson evaluation with the lesson review (#3124) --------
+    // #3088 pattern: the pin sits on the toggle row ABOVE the report, so
+    // the report's own heading clears the runner's sticky progress bar
+    // (pinBelowHeader measures ``.app-nav``, which the runner does not show).
+    {
+        path: "lesson-review/summary",
+        setup: gotoDetailedLessonSummary,
+        pinTo: "lesson-summary-detailed-toggle",
+    },
+    // --- Phone header with due-reviews + XP badges (#3123) ----------------
+    {
+        path: "nav-badges/dashboard",
+        setup: gotoDashboardWithDueReviews,
+        pinTo: "app-nav",
+    },
+    // --- Learning-tab section bar (#2961) ---------------------------------
+    {
+        path: "learning-subnav/settings",
+        setup: gotoLearningSubNav,
+        pinTo: "settings-cluster-review",
+    },
+    // --- Learning-tab clusters (#2956) ------------------------------------
+    {
+        path: "learning-clusters/settings",
+        setup: gotoLearningClusters,
+        pinTo: "settings-cluster-lessons",
+    },
+    // --- Data-tab housekeeping cards (#2955) ------------------------------
+    {
+        path: "data-housekeeping/settings",
+        setup: gotoDataHousekeeping,
+        pinTo: "settings-section-paused-retention",
+    },
+    // --- AI providers + cross-app key import (#2512) ---------------------
+    {
+        path: "ai-providers/configured-with-perplexity",
+        setup: gotoConfiguredProviders,
+        pinTo: "configured-providers",
+    },
+    {
+        path: "ai-providers/key-vault-import",
+        setup: gotoKeyVaultSection,
+        pinTo: "key-vault-section",
+    },
+    // --- Static landing page (#2409) -------------------------------------
+    // Not an app view: real static HTML delivered next to the SPA under
+    // /start/. It follows prefers-color-scheme instead of the app theme,
+    // so the pinned app theme does not affect it.
+    {
+        path: "landing-page/de",
+        noAppShell: true,
+        setup: async (p) => {
+            await p.goto("/start/");
+            return true;
+        },
+    },
+    {
+        path: "landing-page/en",
+        noAppShell: true,
+        setup: async (p) => {
+            await p.goto("/start/en/");
+            return true;
+        },
+    },
+    // --- Tabbed hubs -----------------------------------------------------
+    {path: "dashboard-tabs/uebersicht", setup: (p) => gotoDashboardTab(p, "overview")},
+    {path: "dashboard-tabs/aktivitaet", setup: (p) => gotoDashboardTab(p, "activity")},
+    {path: "dashboard-tabs/missionen", setup: (p) => gotoDashboardTab(p, "missions")},
+    // #1417 — fresh learner without an AI key: the ONE inviting BYOK card
+    // below Weitermachen (replaces the pre-#1417 stacked API-key banner +
+    // warning). The dexie preview build has no key, so the card renders.
+    {
+        path: "dashboard-tabs/ki-einladung",
+        setup: async (p) => {
+            await gotoDashboardTab(p, "overview");
+            const card = p.getByTestId("ai-invite-card");
+            try {
+                await card.waitFor({timeout: 20_000});
+            } catch {
+                return false;
+            }
+            await card.scrollIntoViewIfNeeded();
+            return true;
+        },
+    },
+    // Wait for the LOADED catalogue ("N Sets" count or an explicit empty
+    // state), not just the hub shell — otherwise the shot races the async
+    // index load and sometimes freezes the "Verfügbare Inhalte werden
+    // geladen…" spinner as the baseline (#1493).
+    {
+        path: "content-hub/entdecken",
+        setup: async (p) => {
+            await gotoContentTab(p, "discover");
+            const loaded = p
+                .getByTestId("discover-count")
+                .or(p.getByTestId("discover-empty-none"));
+            try {
+                await loaded.first().waitFor({timeout: 20_000});
+            } catch {
+                return false;
+            }
+            return true;
+        },
+    },
+    {
+        path: "content-hub/meine-inhalte",
+        // Wait for the (async) set catalogue, not just the hub shell —
+        // otherwise the shot captures the "Inhalte werden geladen…" state.
+        // The default view is the LIST (#1257); an explicit "grid" pref
+        // renders the tree instead, so accept either surface.
+        setup: async (p) => {
+            await gotoContentTab(p, "my");
+            const catalogue = p
+                .getByTestId("content-list-view")
+                .or(p.getByTestId("content-tree"));
+            try {
+                await catalogue.first().waitFor({timeout: 20_000});
+            } catch {
+                return false;
+            }
+            return true;
+        },
+    },
+    // #1386 — the status/source filter menu buttons (closed state is part of
+    // the meine-inhalte shot above; this captures the OPEN status menu).
+    {
+        path: "content-hub/meine-inhalte-filter-open",
+        setup: async (p) => {
+            await gotoContentTab(p, "my");
+            const trigger = p.getByTestId("content-status-filter");
+            try {
+                await trigger.waitFor({timeout: 20_000});
+            } catch {
+                return false;
+            }
+            await trigger.click();
+            await expect(p.getByTestId("content-status-filter-menu")).toBeVisible({
+                timeout: 10_000,
+            });
+            return true;
+        },
+    },
+    // #1392 — the LIST view with the longest catalogue title
+    // ("Portugiesisch (Brasilianisch) A1 (für Deutschsprachige)"): the
+    // mobile shot pins that the title truncates and the language badge +
+    // three-dot actions menu stay inside the viewport, flush-aligned.
+    {
+        path: "content-hub/meine-inhalte-liste-langtitel",
+        setup: async (p) => {
+            await gotoContentTab(p, "my");
+            // The view toggle appears once the (async) set catalogue is in.
+            const toggle = p.getByTestId("content-view-list");
+            try {
+                await toggle.waitFor({timeout: 20_000});
+            } catch {
+                return false;
+            }
+            await toggle.click();
+            await expect(p.getByTestId("content-list-view")).toBeVisible({
+                timeout: 10_000,
+            });
+            const longRow = p.getByTestId("content-list-set-pt-br-a1-from-de");
+            try {
+                await longRow.waitFor({timeout: 10_000});
+            } catch {
+                return false;
+            }
+            // #root is the app's scroll container (html/body are locked), so
+            // a fullPage shot cannot reach below the fold — bring the
+            // long-title row into the visible fold instead.
+            await longRow.scrollIntoViewIfNeeded();
+            return true;
+        },
+    },
+    {path: "content-hub/import", setup: (p) => gotoContentTab(p, "import")},
+    {path: "progress-hub/uebersicht", setup: (p) => gotoProgressTab(p, "overview")},
+    {path: "progress-hub/statistik", setup: (p) => gotoProgressTab(p, "stats")},
+    {path: "progress-hub/meine-pfade", setup: (p) => gotoProgressTab(p, "paths")},
+
+    // --- Matching animation / resolution --------------------------------
+    // ``landscape: true`` (#1410): the exercise mask incl. the sticky
+    // Prüfen/Weiter footer gets an iPhone-landscape baseline on top of the
+    // portrait one.
+    {path: "matching-animation/matching-pairing", setup: gotoLessonMatching, landscape: true, pinTo: "matching-exercise"},
+    {path: "matching-animation/matching-resolved", setup: gotoLessonMatchingResolved, pinTo: "matching-exercise"},
+    // #3174: a word wider than the tile hyphenates / wraps INSIDE the tile
+    // (fixture lesson; the bundled set has no long matching word).
+    {path: "matching-animation/matching-long-word", setup: gotoMatchingLongWord, pinTo: "matching-exercise"},
+    {path: "matching-animation/matching-long-word-resolved", setup: gotoMatchingLongWordResolved, pinTo: "matching-exercise"},
+
+    // --- Ordering review after a wrong answer (#3260) --------------------
+    // Fixture lesson; the bundled set has no ordering exercise. The pin
+    // clears the sticky progress row, so the "Deine Antwort" heading is
+    // not cut off on the phone.
+    {
+        path: "ordering-review/falsche-reihenfolge",
+        setup: gotoOrderingReview,
+        pinTo: "ordering-review",
+        pinBelow: "lesson-progress-options-row",
+    },
+
+    // --- Lesson modes (practice / exam / timed) -------------------------
+    {path: "lesson-modes/practice", setup: (p) => gotoLessonModeToggle(p, "practice")},
+    {path: "lesson-modes/exam", setup: (p) => gotoLessonModeToggle(p, "exam")},
+    {path: "lesson-modes/timed", setup: (p) => gotoLessonModeToggle(p, "timed")},
+
+    // --- Answer toggle (Meine Antwort / Auflösung) ----------------------
+    {path: "answer-toggle/meine-antwort", setup: (p) => gotoAnswerToggle(p, "my-answer")},
+    {path: "answer-toggle/aufloesung", setup: (p) => gotoAnswerToggle(p, "solution")},
+
+    // --- Post-answer explanation (#2991) --------------------------------
+    {path: "exercise-explanation/falsche-antwort", setup: gotoExerciseExplanation, pinTo: "exercise-explanation"},
+    // --- Content from another server loads nothing (#3803) ---------------
+    {path: "content-privacy/bild-als-link", setup: gotoRemoteImageLink, pinTo: "lesson-theory-body"},
+    {path: "content-privacy/video-karte", setup: gotoVideoCardPlaceholder, pinTo: "lesson-resources"},
+    // --- Explanation authoring: assistant opt-in + editor field (#2992) --
+    // #3088: both motifs are small elements, so the pin sits on the block
+    // ABOVE them (type selection / the field's own label) and clears the
+    // sticky header; the previous pins put the motif behind the header.
+    {
+        path: "create-lesson/erklaerungen-opt-in",
+        setup: gotoBookExplanationsOptIn,
+        pinTo: "assistant-type-selector",
+        pinBelowHeader: true,
+    },
+    {
+        path: "exercise-explanation/editor-feld",
+        setup: gotoExerciseEditorExplanation,
+        pinToSelector: 'label:has(> textarea[data-testid$="-explanation"])',
+        pinBelowHeader: true,
+    },
+
+    // --- GitHub export (desktop dialog) ---------------------------------
+    {
+        path: "github-export/share-dialog",
+        setup: gotoGithubExport,
+        desktopOnly: true,
+        afterShot: assertNoGitHubRequests,
+    },
+
+    // --- QR-code app sharing --------------------------------------------
+    {path: "qr-code/share-app", setup: gotoQrModal, desktopOnly: true},
+
+    // --- Lesson-summary section toggles (#1411) --------------------------
+    {
+        path: "summary-sections/settings",
+        setup: gotoSummarySections,
+        pinTo: "settings-section-summary-sections",
+    },
+
+    // --- Mascot color variants (#2861) -----------------------------------
+    {
+        path: "mascot-variants/settings",
+        setup: gotoMascotVariants,
+        pinTo: "settings-mascot-variants",
+    },
+
+    // --- Feedback card: shared volume + game-mode hint (#2957) -----------
+    {
+        path: "feedback-card/settings",
+        setup: gotoFeedbackCard,
+        pinTo: "settings-section-feedback",
+    },
+
+    // --- Game Mode summary card + details fold (#2959) -------------------
+    {
+        path: "playful-details/settings",
+        setup: (page) => gotoPlayfulDetails(page, true),
+        pinTo: "settings-section-playful",
+    },
+    {
+        path: "playful-details/settings-off",
+        setup: (page) => gotoPlayfulDetails(page, false),
+        pinTo: "settings-section-playful",
+    },
+    // #3227: the two states every helper used to click away unseen.
+    {
+        path: "playful-details/ton-angebot",
+        setup: gotoSoundOffer,
+        pinTo: "settings-section-playful",
+    },
+    {path: "create-lesson/entwurf-hinweis", setup: gotoDraftPrompt},
+
+    // --- Error-report dialog (#1480 — pre-migration pixel net) ----------
+    {path: "error-report/dialog", setup: gotoErrorReportDialog},
+    {path: "error-report/verlauf", setup: gotoErrorReportHistory},
+    {path: "error-report/vollvorschau", setup: gotoErrorReportFullPreview},
+
+    // --- Sync (Dexie-mode desktop-only notice, #335 / #1480) ------------
+    {path: "sync/desktop-only-hinweis", setup: gotoSyncDesktopOnlyNotice},
+
+    // --- Create-Lesson book-text file upload (#1927) --------------------
+    {
+        path: "create-lesson/buch-upload-picker",
+        setup: gotoBookUploadPicker,
+        pinTo: "book-file-upload",
+    },
+
+    // --- Token-role annotation on a card (#3072) ------------------------
+    {
+        path: "create-lesson/token-rollen",
+        setup: gotoTokenRoleField,
+        // The field's testid is ``card-edit-<id>-token-roles``, prefixed per
+        // card, so an exact ``pinTo`` can never match (#3080).
+        pinToSelector: '[data-testid$="-token-roles"]',
+    },
+
+    // --- Mobile bottom tab bar, opt-in (#2786 restore of #1512) ---------
+    {
+        path: "bottom-tab-bar/leiste",
+        setup: async (page) => {
+            // The bar is md:hidden — only the mobile viewport can show it.
+            const vp = page.viewportSize();
+            if (!vp || vp.width >= 768) return false;
+            await seedLearner(page);
+            await page.addInitScript(() => {
+                try {
+                    localStorage.setItem(
+                        "adaptive-learner.nav_position",
+                        "bottom",
+                    );
+                } catch {
+                    /* ignore */
+                }
+            });
+            await page.goto("/dashboard");
+            await expect(page.getByTestId("bottom-tab-bar")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        },
+    },
+
+    // --- In-set position + lesson navigation (#2793) --------------------
+    {
+        path: "lesson-navigation/position-zeile",
+        setup: async (page) => {
+            if (!(await gotoLessonRunner(page))) return false;
+            const row = page.getByTestId("lesson-position-row");
+            if (!(await row.count())) return false;
+            await expect(row).toBeVisible({timeout: 10_000});
+            return true;
+        },
+        pinTo: "lesson-position-row",
+    },
+
+    // --- Settings diagnostics section (#2782) ---------------------------
+    {
+        path: "viewport-diagnostic/settings-sektion",
+        setup: async (page) => {
+            await seedLearner(page);
+            // #2789 - moved from General to the new Diagnostics & Support tab.
+            await page.goto("/settings?tab=diagnostics");
+            const section = page.getByTestId("settings-diagnostics");
+            await expect(section).toBeVisible({timeout: 20_000});
+            return true;
+        },
+        pinTo: "settings-diagnostics",
+    },
+
+    // --- Review session on the LessonRunner shell (EXP-052 slice 1, #3169) ---
+    {path: "review-session/schritt", setup: gotoReviewStep, pinTo: "review-page"},
+    {path: "review-session/zusammenfassung", setup: gotoReviewSummary, pinTo: "review-summary"},
+
+    // --- Shuffle and Endless on the LessonRunner shell (EXP-052 slice 2, #3169) ---
+    // Shuffle: session header with the "Mixing n questions" subtitle, the
+    // shared progress bar, the lesson footer with Previous. Endless: the
+    // stat line as pure display in the progress slot and the footer with
+    // pause and End (Befund 2), no Previous.
+    {path: "shuffle-session/schritt", setup: settledSetRunner(gotoShuffleSession), pinTo: "shuffle-page"},
+    {
+        path: "endless-session/statuszeile",
+        setup: settledSetRunner(gotoEndlessSession),
+        pinTo: "endless-page",
+    },
+
+    // --- Adaptive and Error Replay on the LessonRunner shell (EXP-052 slice 3, #3169) ---
+    // Adaptive: the F-115 transparency block under the title (the shell's
+    // headerExtra), the shared progress bar, the lesson footer with Previous.
+    // "theorie" is the first screen every adaptive lesson opens on (#3224):
+    // the theory page borrowed from the source lesson, Next without Check.
+    // "transparenz" is one named Next later, the runner around the first
+    // exercise with the two-phase Check.
+    // Error Replay: the round's recap through the summary render prop, the
+    // footer keeping Previous as a read-only look back.
+    {
+        path: "adaptive-lesson/theorie",
+        setup: settledSetRunner(gotoAdaptiveLesson),
+        pinTo: "adaptive-lesson-page",
+    },
+    {
+        path: "adaptive-lesson/transparenz",
+        setup: settledSetRunner(gotoAdaptiveExercise),
+        pinTo: "adaptive-lesson-page",
+    },
+    {path: "error-replay/zusammenfassung", setup: gotoErrorReplaySummary, pinTo: "error-replay-summary"},
+
+    // --- ViewportDiagnostic tap-offset probe (#1569, collapsed #2779) ---
+    {path: "viewport-diagnostic/eingeklappt", setup: gotoViewportDiagnostic},
+    {
+        path: "viewport-diagnostic/details",
+        setup: async (page) => {
+            if (!(await gotoViewportDiagnostic(page))) return false;
+            await page.getByTestId("viewport-diagnostic-toggle").click();
+            await expect(
+                page.getByTestId("viewport-diagnostic-report"),
+            ).toBeVisible();
+            return true;
+        },
+    },
+];
+
+for (const feature of FEATURES) {
+    const viewports = feature.landscape
+        ? [...VIEWPORTS, LANDSCAPE_VIEWPORT]
+        : [...VIEWPORTS];
+    for (const vp of viewports) {
+        if (feature.desktopOnly && vp.key !== "desktop") continue;
+        test(`${feature.path} @ ${vp.key}`, async ({page}) => {
+            await page.setViewportSize(vp.size);
+            // Determinism: freeze the clock + pin the default (dark) theme
+            // before the first navigation, then seed the feature state, then
+            // settle fonts + kill animations.
+            await freezeClock(page);
+            await pinRandomStreams(page);
+            await pinRandomness(page);
+            await setTheme(page, DEFAULT_THEME);
+            const ready = await feature.setup(page);
+            test.skip(!ready, `Could not reach ${feature.path} deterministically`);
+            await assertRandomPinInstalled(page);
+            await settleForScreenshot(page, {
+                allowPersistentToast: feature.keepsToast,
+                noAppShell: feature.noAppShell,
+            });
+            const pin = feature.pinToSelector
+                ? page.locator(feature.pinToSelector)
+                : feature.pinTo
+                  ? page.getByTestId(feature.pinTo)
+                  : null;
+            if (pin) {
+                const overlay = feature.pinBelow
+                    ? `[data-testid="${feature.pinBelow}"]`
+                    : feature.pinBelowHeader
+                      ? ".app-nav"
+                      : null;
+                await pin.first().evaluate((el, overlaySelector) => {
+                    if (overlaySelector) {
+                        const bar = document.querySelector(overlaySelector);
+                        const barHeight = bar ? Math.round(bar.getBoundingClientRect().height) : 0;
+                        el.style.scrollMarginTop = `${barHeight}px`;
+                    }
+                    el.scrollIntoView({block: "start"});
+                }, overlay);
+                await page.waitForTimeout(100);
+            }
+            // Pass the snapshot name as an ARRAY of path segments, not a
+            // string. Playwright sanitises a string name (``/`` and ``.``
+            // both become ``-``), which would flatten
+            // ``answer-toggle/aufloesung.mobile`` to a single
+            // ``answer-toggle-aufloesung-mobile.png`` file at the features
+            // root. For an array it does ``path.join(...name)`` with NO
+            // sanitisation, so the baseline lands at the intended
+            // ``features/<feature>/<shot>.png`` subdirectory the issue +
+            // CONTRIBUTING require (#1023).
+            const segments = feature.path.split("/");
+            const file = `${segments.pop()}${vp.suffix}.png`;
+            await expect(page).toHaveScreenshot([...segments, file], {
+                fullPage: true,
+            });
+            await feature.afterShot?.(page);
+        });
+    }
+}

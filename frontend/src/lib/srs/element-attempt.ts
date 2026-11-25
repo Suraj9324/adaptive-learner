@@ -1,0 +1,551 @@
+/**
+ * Per-exercise-type element-attempt derivers
+ * (Phase 46B / C9 / P-129).
+ *
+ * Each exercise component (Matching / PictureChoice /
+ * FreeText / WordTiles) calls the matching helper when
+ * building its onComplete payload (C10). The helper produces
+ * the ``ElementAttempt[]`` the viewer then passes to
+ * ``elementErrors.recordBulk``.
+ *
+ * D2 (Phase 46 plan) — element_key derivation rules:
+ *
+ *   matching       → one attempt per pair; key = pair.left
+ *   picture_choice → one attempt; key = correct image's label
+ *   free_text      → one attempt; key = accept[0] canonical
+ *   word_tiles     → one attempt; key = tiles.join(" ")
+ *                    canonical
+ *
+ * Lesson-scoped uniqueness lives in the composite
+ * ``(user_id, set_id, lesson_id, exercise_id, element_key)``
+ * — the element_key alone doesn't need to be globally unique.
+ *
+ * Heuristic ``element_type``:
+ *   - matching / picture_choice / free_text → "vocabulary"
+ *   - word_tiles with 2+ tiles → "grammar_rule" (phrases
+ *     test ordering = grammar)
+ *   - word_tiles with 1 tile (edge case) → "vocabulary"
+ */
+
+import {asCategorizationPayload} from "../exercises/payload/categorization";
+import {asErrorCorrectionPayload} from "../exercises/payload/error-correction";
+import {asReadingComprehensionPayload, canonicalAnswer} from "../exercises/payload/reading-comprehension";
+import {asGradedQuizPayload, canonicalAnswer as gradedQuizCanonicalAnswer} from "../exercises/payload/graded-quiz";
+import {canonicalDictationAnswer} from "../exercises/payload/dictation";
+import {canonicalImageDescriptionAnswer} from "../exercises/payload/image-description";
+import {correctAudioChoiceOption} from "../exercises/payload/audio-choice";
+import {canonicalParsonsSequence} from "../exercises/payload/parsons";
+import {canonicalHotspotKey} from "../exercises/payload/hotspot";
+import {resolveConcreteDirection} from "../exercises/direction";
+import {elementKeysOf} from "./element-keys";
+import {elementIdentityKeysOf} from "./element-identity";
+import {exerciseIdentityOf} from "./exercise-identity";
+import type {ContentLessonExercise, ElementAttempt} from "../../storage/types";
+
+export interface AttemptContext {
+    setId: string;
+    /** The lesson filename or id; whatever the viewer uses
+     *  to address the cached lesson. */
+    lessonId: string;
+}
+
+function _baseAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+): Pick<ElementAttempt, "set_id" | "lesson_id" | "exercise_id" | "direction"> {
+    return {
+        set_id: ctx.setId,
+        lesson_id: ctx.lessonId,
+        // #2130: rows are keyed by the version-stable identity (stable_id
+        // when the content ships one, authored id otherwise).
+        exercise_id: exerciseIdentityOf(exercise) ?? "",
+        // EXP-018 / Phase 62: stamp the exercise's concrete drill
+        // direction on every attempt so the SRS layer tracks
+        // receptive vs productive mastery independently. Resolved
+        // centrally here so all five exercise types agree. The seed stays
+        // the AUTHORED id: switching it to stable_id would re-resolve every
+        // "random"-direction exercise and strand its rows on the other
+        // direction key (#2130).
+        direction: resolveConcreteDirection(exercise.direction, exercise.id),
+    };
+}
+
+/** MATCHING: fan-out one attempt per pair. ``matches`` maps
+ *  the user's left-tile index → the right-tile's
+ *  originalIndex from the authored ``pairs`` list. A pair is
+ *  correct when the matched right tile's VALUE equals the value the
+ *  left pair expects (``.left`` in a productive drill, ``.right``
+ *  otherwise), so duplicate right-column values (e.g. "el" for both
+ *  ``libro`` and ``coche``) are interchangeable rather than
+ *  index-bound. */
+export function deriveMatchingAttempts(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    matches: ReadonlyMap<number, number>,
+    productive = false,
+): ElementAttempt[] {
+    const pairs = exercise.pairs ?? [];
+    // engine#91: prefer each pair's own stable_id for the STORAGE key;
+    // correct_answer below is unaffected (it reads pair.right directly).
+    const keys = elementIdentityKeysOf(exercise) ?? [];
+    const rightValue = (i: number): string =>
+        (productive ? pairs[i]?.left : pairs[i]?.right) ?? "";
+    return pairs.map((pair, leftIdx) => {
+        const userRightOriginalIdx = matches.get(leftIdx);
+        const userPairingText =
+            userRightOriginalIdx !== undefined
+                ? (pairs[userRightOriginalIdx]?.right ?? "")
+                : "";
+        const correct =
+            userRightOriginalIdx !== undefined &&
+            rightValue(userRightOriginalIdx) === rightValue(leftIdx);
+        return {
+            ..._baseAttempt(exercise, ctx),
+            element_key: keys[leftIdx] ?? "",
+            element_type: "vocabulary",
+            user_answer: userPairingText,
+            correct_answer: pair.right,
+            correct,
+        };
+    });
+}
+
+/** CATEGORIZATION (#1579, adopted extension ext:al-categorization):
+ *  fan-out one attempt per authored item, mirroring the matching
+ *  fan-out. assignments maps item -> chosen bucket name; an
+ *  unassigned item is a wrong attempt with an empty user answer. A
+ *  malformed payload yields no attempts (the load-time validation
+ *  refuses it before it can reach a session). */
+export function deriveCategorizationAttempts(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    assignments: ReadonlyMap<string, string>,
+): ElementAttempt[] {
+    const payload = asCategorizationPayload(exercise);
+    if (!payload) return [];
+    const keys = elementKeysOf(exercise) ?? [];
+    let index = 0;
+    return payload.categories.flatMap((bucket) =>
+        bucket.items.map((item) => {
+            const chosenBucket = assignments.get(item) ?? "";
+            const elementKey = keys[index++] ?? item;
+            return {
+                ..._baseAttempt(exercise, ctx),
+                element_key: elementKey,
+                element_type: "vocabulary" as const,
+                user_answer: chosenBucket,
+                correct_answer: bucket.name,
+                correct: chosenBucket === bucket.name,
+            };
+        }),
+    );
+}
+
+/** ERROR-CORRECTION (#1579 second adoption, ext:al-error-correction):
+ *  a single attempt - the exercise tests ONE grammar decision (find the
+ *  wrong token, fix it). element_key = the canonical correction
+ *  ``accept[0]`` so reviews re-target the same grammar point regardless
+ *  of which variant the user typed; user/correct answers carry the
+ *  "picked token -> typed correction" form for the error log. */
+export function deriveErrorCorrectionAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    answer: {pickedIndex: number; typedCorrection: string},
+    correct: boolean,
+): ElementAttempt {
+    const payload = asErrorCorrectionPayload(exercise);
+    const markedToken = payload?.tokens[payload.error_index] ?? "";
+    const pickedToken = payload?.tokens[answer.pickedIndex] ?? "";
+    const canonical = payload?.accept[0] ?? "";
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: elementKeysOf(exercise)?.[0] ?? canonical,
+        element_type: "grammar_rule",
+        user_answer: `${pickedToken} -> ${answer.typedCorrection}`,
+        correct_answer: `${markedToken} -> ${canonical}`,
+        correct,
+    };
+}
+
+/** READING-COMPREHENSION (#1579 third adoption,
+ *  ext:al-reading-comprehension): one attempt per sub-question, mirroring
+ *  the matching fan-out. element_key = the sub-question's canonical answer
+ *  so reviews re-target the same comprehension point. The renderer supplies
+ *  the per-question answer + graded correctness (free_text grading needs the
+ *  shared React-layer matcher, so it is not re-derived here). */
+export function deriveReadingComprehensionAttempts(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    results: readonly {answer: string; correct: boolean}[],
+): ElementAttempt[] {
+    const payload = asReadingComprehensionPayload(exercise);
+    if (!payload) return [];
+    const keys = elementKeysOf(exercise) ?? [];
+    return payload.questions.map((question, index) => {
+        const canonical = canonicalAnswer(question);
+        const result = results[index];
+        return {
+            ..._baseAttempt(exercise, ctx),
+            element_key: keys[index] ?? question.prompt,
+            element_type: "vocabulary" as const,
+            user_answer: result?.answer ?? "",
+            correct_answer: canonical,
+            correct: result?.correct ?? false,
+        };
+    });
+}
+
+/** GRADED-QUIZ (#1579 fourth adoption, ext:al-graded-quiz): one attempt per
+ *  question, element_key = the question's canonical answer. The renderer
+ *  supplies per-question {answer, correct} (free_text grading needs the shared
+ *  React-layer matcher, so it is not re-derived here). */
+export function deriveGradedQuizAttempts(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    results: readonly {answer: string; correct: boolean}[],
+): ElementAttempt[] {
+    const payload = asGradedQuizPayload(exercise);
+    if (!payload) return [];
+    const keys = elementKeysOf(exercise) ?? [];
+    return payload.questions.map((question, index) => {
+        const canonical = gradedQuizCanonicalAnswer(question);
+        const result = results[index];
+        return {
+            ..._baseAttempt(exercise, ctx),
+            element_key: keys[index] ?? question.prompt,
+            element_type: "vocabulary" as const,
+            user_answer: result?.answer ?? "",
+            correct_answer: canonical,
+            correct: result?.correct ?? false,
+        };
+    });
+}
+
+/** PICTURE_CHOICE: single attempt. element_key = the correct
+ *  image's label so reviews on this element re-target the
+ *  same concept regardless of which wrong tile the user
+ *  picked. */
+export function derivePictureChoiceAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    selectedIndex: number,
+): ElementAttempt {
+    const images = exercise.images ?? [];
+    const correctImage = images.find((img) => img.is_correct === "true");
+    const selected = images[selectedIndex];
+    const correctLabel = elementKeysOf(exercise)?.[0] ?? correctImage?.label ?? "";
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: correctLabel,
+        element_type: "vocabulary",
+        user_answer: selected?.label ?? "",
+        correct_answer: correctLabel,
+        correct: selected !== undefined && selected.is_correct === "true",
+    };
+}
+
+/** FREE_TEXT: single attempt. element_key = ``accept[0]``
+ *  (the canonical first entry). ``correct`` is computed by
+ *  the FreeTextExercise component via the C1
+ *  ``isFreeTextCorrect`` matcher; the deriver doesn't
+ *  re-validate. */
+export function deriveFreeTextAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    userInput: string,
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? "";
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: userInput,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** DICTATION (#1881): single attempt. element_key = the canonical
+ *  transcription (``ext_payload.accept[0]``). ``correct`` is computed by
+ *  DictationExercise via the shared ``isFreeTextCorrect`` matcher; the
+ *  deriver doesn't re-validate. */
+export function deriveDictationAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    userInput: string,
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? canonicalDictationAnswer(exercise);
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: userInput,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** IMAGE_DESCRIPTION (#2095): single attempt. element_key = the canonical
+ *  answer (``ext_payload.accept[0]``). ``correct`` is computed by
+ *  ImageDescriptionExercise via the shared ``isFreeTextCorrect`` matcher; the
+ *  deriver doesn't re-validate. */
+export function deriveImageDescriptionAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    userInput: string,
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? canonicalImageDescriptionAnswer(exercise);
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: userInput,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** AUDIO_CHOICE: single attempt. element_key = the correct option's audio
+ *  reference (``correctAudioChoiceOption``) — there is no text label to key
+ *  on by design (a visible word would spoil the listening exercise), so the
+ *  audio path itself is the closest stable identifier. ``correct`` is
+ *  computed by AudioChoiceExercise by comparing the selected option's audio
+ *  against the same reference; the deriver doesn't re-validate. */
+export function deriveAudioChoiceAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    selectedAudio: string,
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? correctAudioChoiceOption(exercise);
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: selectedAudio,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** AUDIO_TILES: single attempt. element_key = the canonical
+ *  ``payload.tiles.join(" ")`` phrase — mirrors ``deriveWordTilesAttempt``,
+ *  but reads the tile list from the ext_payload (this type has no core
+ *  ``exercise.tiles`` field) rather than from the exercise itself. Always
+ *  ``grammar_rule``: unlike core word_tiles this type never carries a
+ *  single-tile payload (the engine rule requires >= 2 tiles), so the
+ *  ordering-tests-grammar reasoning always applies. */
+export function deriveAudioTilesAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    tiles: readonly string[],
+    placedOrder: readonly number[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? tiles.join(" ");
+    const userAnswer = placedOrder.map((i) => tiles[i] ?? "").join(" ");
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "grammar_rule",
+        user_answer: userAnswer,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** WORD_TILES: single attempt. element_key = the canonical
+ *  ``tiles.join(" ")`` phrase. element_type defaults to
+ *  ``grammar_rule`` for multi-tile (the exercise tests
+ *  ordering, which IS grammar) and falls back to
+ *  ``vocabulary`` for the single-tile edge case. */
+export function deriveWordTilesAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    placedOrder: readonly number[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const tiles = exercise.tiles ?? [];
+    const canonical = elementKeysOf(exercise)?.[0] ?? tiles.join(" ");
+    const userAnswer = placedOrder
+        .map((i) => tiles[i] ?? "")
+        .join(" ");
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: tiles.length > 1 ? "grammar_rule" : "vocabulary",
+        user_answer: userAnswer,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** ORDERING (#3110): single attempt. element_key = the canonical
+ *  ``payload.items.join(" ")`` phrase — mirrors ``deriveAudioTilesAttempt``,
+ *  but reads the item list from the ext_payload (this type has no core
+ *  ``exercise.tiles`` field). Always ``grammar_rule``: the engine rule
+ *  requires >= 2 items, so the ordering-tests-sequencing reasoning always
+ *  applies (mirrors ``deriveAudioTilesAttempt``'s own reasoning). */
+export function deriveOrderingAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    items: readonly string[],
+    placedOrder: readonly number[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? items.join(" ");
+    const userAnswer = placedOrder.map((i) => items[i] ?? "").join(" ");
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "grammar_rule",
+        user_answer: userAnswer,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** PARSONS (#3110): single attempt. element_key = the canonical code
+ *  sequence (``canonicalParsonsSequence``). ``user_answer`` reconstructs
+ *  the learner's placed order at their CHOSEN indent (4 spaces per level,
+ *  matching the authoring convention), so a wrong-attempt review shows
+ *  exactly the code shape they built. */
+export function deriveParsonsAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    lines: readonly {code: string; indent: number}[],
+    placedOrder: readonly number[],
+    placedIndents: readonly number[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical =
+        elementKeysOf(exercise)?.[0] ?? canonicalParsonsSequence(exercise);
+    const userAnswer = placedOrder
+        .map((tileIndex, slot) => {
+            const indent = placedIndents[slot] ?? 0;
+            return "    ".repeat(Math.max(0, indent)) + (lines[tileIndex]?.code ?? "");
+        })
+        .join("\n");
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "grammar_rule",
+        user_answer: userAnswer,
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** HOTSPOT (#3110): single attempt. There is no textual label to key on
+ *  (a zone is an image region, not a word) — element_key falls back to
+ *  ``canonicalHotspotKey`` (``<src>#zone-<correctIndex>``), stable across
+ *  attempts as long as the content's zone order doesn't change, mirroring
+ *  how ``derivePictureChoiceAttempt`` keys on the correct image's own
+ *  identity. */
+export function deriveHotspotAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    correctZoneIndex: number,
+    selectedZoneIndex: number,
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? canonicalHotspotKey(exercise);
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: `zone-${selectedZoneIndex}`,
+        correct_answer: `zone-${correctZoneIndex}`,
+        correct: isCorrect,
+    };
+}
+
+/** CLOZE: fan-out one attempt per blank (Phase 52D / v1.35.0 /
+ *  P-127). Note the plural name - cloze emits MULTIPLE attempts
+ *  per exercise, one per blank, so element-level mastery
+ *  granularity matches the granularity of the wrong-answer
+ *  signal. correct_answer per blank is the canonical of THAT
+ *  blank (``blank.accept[0]``), shown to the learner; element_key
+ *  is the same blank's own stable_id when minted (engine#91),
+ *  else the same canonical text, so a user who fluently fills
+ *  blank A but consistently misses blank B gets per-blank
+ *  mastery tracking - the cloze generator (52E) can then
+ *  target blank B specifically. */
+export function deriveClozeAttempts(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    perBlankInputs: readonly string[],
+    perBlankCorrect: readonly boolean[],
+): ElementAttempt[] {
+    const blanks = exercise.blanks ?? [];
+    const canonicalKeys = elementKeysOf(exercise) ?? [];
+    // engine#91: element_key prefers each blank's own stable_id (storage);
+    // correct_answer stays on the canonical text - it is shown to the
+    // learner and must never surface an opaque id.
+    const identityKeys = elementIdentityKeysOf(exercise) ?? [];
+    return blanks.map((blank, i) => {
+        const canonical = canonicalKeys[i] ?? blank.accept[0] ?? "";
+        return {
+            ..._baseAttempt(exercise, ctx),
+            element_key: identityKeys[i] ?? canonical,
+            element_type: "vocabulary",
+            user_answer: perBlankInputs[i] ?? "",
+            correct_answer: canonical,
+            correct: perBlankCorrect[i] ?? false,
+        };
+    });
+}
+
+/** CLOZE multiselect (#1195): a single attempt for the whole
+ *  'select all that apply' question. element_key + correct_answer are
+ *  the canonical correct set (sorted, joined) so reviews re-target the
+ *  same question; ``correct`` is the exact-set verdict from the
+ *  component (no re-validation here). */
+export function deriveClozeMultiSelectAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    selected: readonly string[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? "";
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: canonical,
+        element_type: "vocabulary",
+        user_answer: [...selected].sort().join(", "),
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}
+
+/** Native multiple_choice (#1525, schema v1.6): a single attempt for the
+ *  question. correct_answer is the canonical correct option text(s) (sorted,
+ *  joined), shown to the learner. element_key is the same shape but prefers
+ *  each correct option's stable_id when minted (engine#91), so a wording fix
+ *  on an already-identified option does not move the key even though
+ *  correct_answer's TEXT still updates to match. ``correct`` is the verdict
+ *  from the grading module (single pick or exact-set, no re-validation
+ *  here). */
+export function deriveMultipleChoiceAttempt(
+    exercise: ContentLessonExercise,
+    ctx: AttemptContext,
+    selected: readonly string[],
+    isCorrect: boolean,
+): ElementAttempt {
+    const canonical = elementKeysOf(exercise)?.[0] ?? "";
+    // engine#91: element_key prefers minted options' stable_id (storage);
+    // correct_answer stays canonical text for display, same reasoning as
+    // deriveClozeAttempts above.
+    const identityKey = elementIdentityKeysOf(exercise)?.[0] ?? canonical;
+    return {
+        ..._baseAttempt(exercise, ctx),
+        element_key: identityKey,
+        element_type: "vocabulary",
+        user_answer: [...selected].sort().join(", "),
+        correct_answer: canonical,
+        correct: isCorrect,
+    };
+}

@@ -1,0 +1,734 @@
+/**
+ * Tests for the Lesson Creator exercise generator (Phase 65C, #1760).
+ *
+ * The "Number of exercises" value is directly typeable via a number
+ * input that stays in sync with the range slider (both drive the shared
+ * ``config.count``). These tests pin the two-way sync, the clamp on
+ * out-of-range / non-numeric input, and that the committed value is the
+ * one generation consumes.
+ */
+
+import "@testing-library/jest-dom/vitest";
+import {fireEvent, render, screen} from "@testing-library/react";
+import {useState} from "react";
+import {describe, expect, it, vi} from "vitest";
+
+import ExerciseGenerator, {
+    EXERCISE_COUNT_MAX,
+    EXERCISE_COUNT_MIN,
+    hasIncompleteExercise,
+    minExercisesToAdvance,
+} from "./ExerciseGenerator";
+import {
+    DEFAULT_EXERCISE_GEN_CONFIG,
+    DICTATION_EXT_TYPE,
+    type ExerciseGenConfig,
+} from "../../lib/exercises";
+import type {ContentLessonExercise} from "../../storage/types";
+
+// #3093 - the preview-row summaries go through the catalog. The mock keeps
+// the provider-less ``fallback ?? key`` contract every other test here
+// relies on and only tags the summary keys, so a row that still builds
+// its text by hand cannot pass.
+vi.mock("../../hooks/ui/useI18n", () => ({
+    useI18n: () => ({
+        t: (key: string, fallback?: string) =>
+            key.startsWith("create_lesson.exercises.summary.")
+                ? `${key}|${fallback ?? ""}`
+                : (fallback ?? key),
+        lang: "en",
+        setLang: () => {},
+    }),
+}));
+
+/**
+ * Stateful harness: holds the config so the slider and the number
+ * input actually round-trip through ``config.count`` (a faithful
+ * both-directions sync test, not a callback snapshot). ``onGenerate``
+ * records the count generation would consume at click time.
+ */
+function Harness({
+    initialCount = DEFAULT_EXERCISE_GEN_CONFIG.count,
+    onGenerateCount,
+}: {
+    initialCount?: number;
+    onGenerateCount?: (count: number) => void;
+}) {
+    const [config, setConfig] = useState<ExerciseGenConfig>({
+        ...DEFAULT_EXERCISE_GEN_CONFIG,
+        count: initialCount,
+    });
+    const exercises: ContentLessonExercise[] = [];
+    return (
+        <ExerciseGenerator
+            exercises={exercises}
+            cardIds={[]}
+            config={config}
+            onConfigChange={setConfig}
+            onGenerate={() => onGenerateCount?.(config.count)}
+            onReorder={vi.fn()}
+            onDelete={vi.fn()}
+            onUpdate={vi.fn()}
+            onAdd={vi.fn()}
+        />
+    );
+}
+
+/** Harness holding a real exercise list so the row edit flow (#1844) can
+ *  round-trip an update / delete through the generator's callbacks. */
+function ListHarness({
+    initial,
+    onDelete = vi.fn(),
+    onUpdate = vi.fn(),
+}: {
+    initial: ContentLessonExercise[];
+    onDelete?: (id: string) => void;
+    onUpdate?: (id: string, updated: ContentLessonExercise) => void;
+}) {
+    const [exercises, setExercises] = useState(initial);
+    return (
+        <ExerciseGenerator
+            exercises={exercises}
+            cardIds={[]}
+            config={DEFAULT_EXERCISE_GEN_CONFIG}
+            onConfigChange={vi.fn()}
+            onGenerate={vi.fn()}
+            onReorder={setExercises}
+            onDelete={(id) => {
+                onDelete(id);
+                setExercises((prev) => prev.filter((e) => e.id !== id));
+            }}
+            onUpdate={(id, updated) => {
+                onUpdate(id, updated);
+                setExercises((prev) =>
+                    prev.map((e) => (e.id === id ? updated : e)),
+                );
+            }}
+            onAdd={(exercise) => setExercises((prev) => [...prev, exercise])}
+        />
+    );
+}
+
+function freeTextEx(id: string): ContentLessonExercise {
+    return {
+        id,
+        type: "free_text",
+        prompt: "Translate: Bonjour",
+        card_ids: [],
+        distractors: [],
+        accept: ["Guten Tag"],
+    } as ContentLessonExercise;
+}
+
+describe("ExerciseGenerator — per-row edit (#1844)", () => {
+    it("shows an edit + delete control on each row, drag handle present", () => {
+        render(<ListHarness initial={[freeTextEx("f1")]} />);
+        expect(screen.getByTestId("exercise-edit-f1")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-delete-f1")).toBeInTheDocument();
+    });
+
+    it("opens the inline editor with the type-specific fields on edit", () => {
+        render(<ListHarness initial={[freeTextEx("f1")]} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-f1"));
+        expect(screen.getByTestId("exercise-editor-f1")).toBeInTheDocument();
+        expect(screen.getByTestId("exercise-edit-accept-f1")).toBeInTheDocument();
+    });
+
+    it("commits an edit through onUpdate and closes the editor", () => {
+        const onUpdate = vi.fn();
+        render(<ListHarness initial={[freeTextEx("f1")]} onUpdate={onUpdate} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-f1"));
+        fireEvent.change(screen.getByTestId("exercise-edit-prompt-f1"), {
+            target: {value: "Say hello"},
+        });
+        fireEvent.click(screen.getByTestId("exercise-edit-save-f1"));
+        expect(onUpdate).toHaveBeenCalledTimes(1);
+        expect(onUpdate.mock.calls[0][0]).toBe("f1");
+        expect(onUpdate.mock.calls[0][1].prompt).toBe("Say hello");
+        expect(screen.queryByTestId("exercise-editor-f1")).not.toBeInTheDocument();
+    });
+
+    it("cancel closes the editor without calling onUpdate", () => {
+        const onUpdate = vi.fn();
+        render(<ListHarness initial={[freeTextEx("f1")]} onUpdate={onUpdate} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-f1"));
+        fireEvent.click(screen.getByTestId("exercise-edit-cancel-f1"));
+        expect(onUpdate).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("exercise-editor-f1")).not.toBeInTheDocument();
+    });
+
+    it("regression: delete still removes the row", () => {
+        const onDelete = vi.fn();
+        render(<ListHarness initial={[freeTextEx("f1")]} onDelete={onDelete} />);
+        fireEvent.click(screen.getByTestId("exercise-delete-f1"));
+        expect(onDelete).toHaveBeenCalledWith("f1");
+        expect(screen.queryByTestId("exercise-row-f1")).not.toBeInTheDocument();
+    });
+});
+
+/** Render the generator with a fixed exercise list + selected types, to
+ *  exercise the "why a selected type produced nothing" hints (#1847). */
+function renderWith(
+    exercises: ContentLessonExercise[],
+    types: ExerciseGenConfig["types"],
+) {
+    render(
+        <ExerciseGenerator
+            exercises={exercises}
+            cardIds={[]}
+            config={{...DEFAULT_EXERCISE_GEN_CONFIG, types}}
+            onConfigChange={vi.fn()}
+            onGenerate={vi.fn()}
+            onReorder={vi.fn()}
+            onDelete={vi.fn()}
+            onUpdate={vi.fn()}
+            onAdd={vi.fn()}
+        />,
+    );
+}
+
+describe("ExerciseGenerator — unmet-type hints (#1847)", () => {
+    it("explains a selected type that produced nothing after generation", () => {
+        renderWith([freeTextEx("f1")], ["free_text", "cloze", "picture_choice"]);
+        expect(screen.getByTestId("exercise-gen-missing")).toBeInTheDocument();
+        expect(
+            screen.getByTestId("exercise-gen-missing-cloze"),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByTestId("exercise-gen-missing-picture_choice"),
+        ).toBeInTheDocument();
+        // free_text DID produce, so it is not listed.
+        expect(
+            screen.queryByTestId("exercise-gen-missing-free_text"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("shows no hint when every selected type produced at least one", () => {
+        renderWith([freeTextEx("f1")], ["free_text"]);
+        expect(
+            screen.queryByTestId("exercise-gen-missing"),
+        ).not.toBeInTheDocument();
+    });
+
+    it("shows no hint before any generation (empty list)", () => {
+        renderWith([], ["free_text", "cloze"]);
+        expect(
+            screen.queryByTestId("exercise-gen-missing"),
+        ).not.toBeInTheDocument();
+    });
+});
+
+function numberInput(): HTMLInputElement {
+    return screen.getByTestId("exercise-count-input") as HTMLInputElement;
+}
+function slider(): HTMLInputElement {
+    return screen.getByTestId("exercise-count-slider") as HTMLInputElement;
+}
+
+describe("ExerciseGenerator — count number input (#1760)", () => {
+    it("renders a labelled, numeric-keyboard number input beside the slider", () => {
+        render(<Harness />);
+        const input = numberInput();
+        expect(input).toBeInTheDocument();
+        expect(input.type).toBe("number");
+        expect(input.getAttribute("inputmode")).toBe("numeric");
+        expect(input.getAttribute("min")).toBe(String(EXERCISE_COUNT_MIN));
+        expect(input.getAttribute("max")).toBe(String(EXERCISE_COUNT_MAX));
+        // Accessible name present (aria-label or associated label).
+        expect(input.getAttribute("aria-label")).toBeTruthy();
+        // The slider is still there.
+        expect(slider()).toBeInTheDocument();
+    });
+
+    it("typing a value commits it and moves the slider (input -> slider)", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(numberInput(), {target: {value: "14"}});
+        fireEvent.blur(numberInput());
+        expect(numberInput().value).toBe("14");
+        expect(slider().value).toBe("14");
+    });
+
+    it("moving the slider updates the number input (slider -> input)", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(slider(), {target: {value: "8"}});
+        expect(numberInput().value).toBe("8");
+        expect(slider().value).toBe("8");
+    });
+
+    it("clamps a too-high value down to the max on commit", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(numberInput(), {target: {value: "999"}});
+        fireEvent.blur(numberInput());
+        expect(numberInput().value).toBe(String(EXERCISE_COUNT_MAX));
+        expect(slider().value).toBe(String(EXERCISE_COUNT_MAX));
+    });
+
+    it("clamps a too-low value up to the min on commit", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(numberInput(), {target: {value: "0"}});
+        fireEvent.blur(numberInput());
+        expect(numberInput().value).toBe(String(EXERCISE_COUNT_MIN));
+        expect(slider().value).toBe(String(EXERCISE_COUNT_MIN));
+    });
+
+    it("clamps a negative value up to the min on commit", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(numberInput(), {target: {value: "-3"}});
+        fireEvent.blur(numberInput());
+        expect(numberInput().value).toBe(String(EXERCISE_COUNT_MIN));
+    });
+
+    it("falls back to the min for a non-numeric / empty value on commit", () => {
+        render(<Harness initialCount={12} />);
+        fireEvent.change(numberInput(), {target: {value: ""}});
+        fireEvent.blur(numberInput());
+        expect(numberInput().value).toBe(String(EXERCISE_COUNT_MIN));
+        expect(slider().value).toBe(String(EXERCISE_COUNT_MIN));
+    });
+
+    it("commits on Enter as well as on blur", () => {
+        render(<Harness initialCount={10} />);
+        fireEvent.change(numberInput(), {target: {value: "16"}});
+        fireEvent.keyDown(numberInput(), {key: "Enter"});
+        expect(slider().value).toBe("16");
+    });
+
+    it("feeds the committed value into generation, not the display text", () => {
+        const onGenerateCount = vi.fn();
+        render(<Harness initialCount={10} onGenerateCount={onGenerateCount} />);
+        fireEvent.change(numberInput(), {target: {value: "17"}});
+        fireEvent.blur(numberInput());
+        fireEvent.click(screen.getByTestId("exercise-generate"));
+        expect(onGenerateCount).toHaveBeenCalledWith(17);
+    });
+});
+
+describe("ExerciseGenerator — manual add (#1849)", () => {
+    it("offers an Add exercise button that opens the 6-type picker", () => {
+        render(<ListHarness initial={[]} />);
+        expect(screen.queryByTestId("exercise-add-picker")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        const picker = screen.getByTestId("exercise-add-picker");
+        expect(picker).toBeInTheDocument();
+        for (const type of [
+            "matching",
+            "free_text",
+            "cloze",
+            "word_tiles",
+            "picture_choice",
+            "multiple_choice",
+        ]) {
+            expect(
+                screen.getByTestId(`exercise-add-type-${type}`),
+            ).toBeInTheDocument();
+        }
+    });
+
+    it("picking a type appends a blank exercise opened in the editor", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        fireEvent.click(screen.getByTestId("exercise-add-type-matching"));
+        // A row appeared and is in edit mode (the inline editor is open).
+        const editor = screen.getByTestId(/^exercise-editor-/);
+        expect(editor).toBeInTheDocument();
+        // matching editor fields are shown.
+        expect(
+            screen.getByTestId(
+                `${editor.getAttribute("data-testid")!.replace("exercise-editor-", "exercise-edit-pair-left-")}-0`,
+            ),
+        ).toBeInTheDocument();
+    });
+
+    it("a freshly added matching exercise cannot be saved empty", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        fireEvent.click(screen.getByTestId("exercise-add-type-matching"));
+        const saveBtn = screen.getByTestId(/^exercise-edit-save-/) as HTMLButtonElement;
+        expect(saveBtn).toBeDisabled();
+    });
+});
+
+// #1895 — Diktat (ext:al-dictation) is the 7th picker option, alongside the
+// six core types. It reuses the extension blank factory + the extension editor
+// (DictationFields) + the shipped payload validator — no second logic.
+describe("ExerciseGenerator — dictation core option (#1895)", () => {
+    it("offers Diktat as a 7th type in the picker", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        expect(
+            screen.getByTestId("exercise-add-type-dictation"),
+        ).toBeInTheDocument();
+    });
+
+    it("picking Diktat appends an ext:al-dictation exercise in the extension editor", () => {
+        const onAdd = vi.fn();
+        function Harness2() {
+            const [exercises, setExercises] = useState<ContentLessonExercise[]>([]);
+            return (
+                <ExerciseGenerator
+                    exercises={exercises}
+                    cardIds={[]}
+                    config={DEFAULT_EXERCISE_GEN_CONFIG}
+                    onConfigChange={vi.fn()}
+                    onGenerate={vi.fn()}
+                    onReorder={vi.fn()}
+                    onDelete={vi.fn()}
+                    onUpdate={vi.fn()}
+                    onAdd={(exercise) => {
+                        onAdd(exercise);
+                        setExercises((prev) => [...prev, exercise]);
+                    }}
+                />
+            );
+        }
+        render(<Harness2 />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        fireEvent.click(screen.getByTestId("exercise-add-type-dictation"));
+        // The exercise handed to onAdd is the dictation EXTENSION type.
+        expect(onAdd).toHaveBeenCalledTimes(1);
+        expect(onAdd.mock.calls[0][0].type).toBe("ext:al-dictation");
+        // The row opened in the EXTENSION editor (reused DictationFields), not
+        // the core ExerciseEditor.
+        const editor = screen.getByTestId(/^exercise-ext-editor-/);
+        expect(editor).toBeInTheDocument();
+        const id = editor.getAttribute("data-testid")!.replace(
+            "exercise-ext-editor-",
+            "",
+        );
+        expect(
+            screen.getByTestId(`exercise-ext-dict-audio-${id}`),
+        ).toBeInTheDocument();
+    });
+
+    it("a freshly added dictation exercise cannot be saved empty", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        fireEvent.click(screen.getByTestId("exercise-add-type-dictation"));
+        const saveBtn = screen.getByTestId(
+            /^exercise-ext-save-/,
+        ) as HTMLButtonElement;
+        expect(saveBtn).toBeDisabled();
+    });
+});
+
+describe("ExerciseGenerator — multiple_choice type (#1850)", () => {
+    it("offers a multiple_choice generation checkbox", () => {
+        render(<ListHarness initial={[]} />);
+        expect(
+            screen.getByTestId("exercise-type-multiple_choice"),
+        ).toBeInTheDocument();
+    });
+});
+
+// #2508 — the manual "Add exercise" picker also offers the extension types
+// (Kategorisierung, Fehlerkorrektur, Leseverstaendnis, Benotetes Quiz,
+// Bildbeschreibung), so both blocks are reachable from one place. Diktat is
+// NOT repeated here — it is already the standard group's 7th button (#1895).
+describe("ExerciseGenerator — extension types in the picker (#2508)", () => {
+    const EXT_SLUGS = [
+        "categorization",
+        "error-correction",
+        "reading-comprehension",
+        "graded-quiz",
+        "image-description",
+    ];
+
+    it("offers the extension types as a second picker group", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        // A labelled extension group is present.
+        expect(
+            screen.getByTestId("exercise-add-ext-group"),
+        ).toBeInTheDocument();
+        for (const slug of EXT_SLUGS) {
+            expect(
+                screen.getByTestId(`exercise-add-type-${slug}`),
+            ).toBeInTheDocument();
+        }
+    });
+
+    it("does not duplicate Diktat into the extension group", () => {
+        render(<ListHarness initial={[]} />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        // Diktat appears exactly once (the standard group's 7th button).
+        expect(
+            screen.getAllByTestId("exercise-add-type-dictation"),
+        ).toHaveLength(1);
+    });
+
+    it("picking an extension type appends an ext exercise in the extension editor", () => {
+        const onAdd = vi.fn();
+        function Harness3() {
+            const [exercises, setExercises] = useState<ContentLessonExercise[]>(
+                [],
+            );
+            return (
+                <ExerciseGenerator
+                    exercises={exercises}
+                    cardIds={[]}
+                    config={DEFAULT_EXERCISE_GEN_CONFIG}
+                    onConfigChange={vi.fn()}
+                    onGenerate={vi.fn()}
+                    onReorder={vi.fn()}
+                    onDelete={vi.fn()}
+                    onUpdate={vi.fn()}
+                    onAdd={(exercise) => {
+                        onAdd(exercise);
+                        setExercises((prev) => [...prev, exercise]);
+                    }}
+                />
+            );
+        }
+        render(<Harness3 />);
+        fireEvent.click(screen.getByTestId("exercise-add"));
+        fireEvent.click(screen.getByTestId("exercise-add-type-categorization"));
+        expect(onAdd).toHaveBeenCalledTimes(1);
+        expect(onAdd.mock.calls[0][0].type).toBe("ext:al-categorization");
+        // Opened in the EXTENSION editor, not the core ExerciseEditor.
+        expect(
+            screen.getByTestId(/^exercise-ext-editor-/),
+        ).toBeInTheDocument();
+    });
+});
+
+describe("ExerciseGenerator — convert dictation to free_text (EXP-050 #2511)", () => {
+    const dictationEx = (id: string): ContentLessonExercise =>
+        ({
+            id,
+            type: DICTATION_EXT_TYPE,
+            prompt: "Write what you hear",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {audio: "assets/audio/clip.mp3", accept: ["bonjour"]},
+        }) as ContentLessonExercise;
+
+    it("swaps the ext editor for the core free_text editor with the answer carried", () => {
+        render(<ListHarness initial={[dictationEx("d1")]} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-d1"));
+        // Opens in the extension editor with the conversion control.
+        expect(screen.getByTestId("exercise-ext-editor-d1")).toBeInTheDocument();
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-d1"), {
+            target: {value: "free_text"},
+        });
+        // Row now renders the core editor with the transcription pre-filled.
+        expect(screen.getByTestId("exercise-editor-d1")).toBeInTheDocument();
+        expect(screen.queryByTestId("exercise-ext-editor-d1")).toBeNull();
+        expect(screen.getByTestId("exercise-edit-accept-d1-item-0")).toHaveTextContent(
+            "bonjour",
+        );
+    });
+
+    it("commits the converted free_text exercise on Save", () => {
+        const onUpdate = vi.fn();
+        render(<ListHarness initial={[dictationEx("d1")]} onUpdate={onUpdate} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-d1"));
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-d1"), {
+            target: {value: "free_text"},
+        });
+        fireEvent.click(screen.getByTestId("exercise-edit-save-d1"));
+        const saved = onUpdate.mock.calls.at(-1)?.[1];
+        expect(saved.type).toBe("free_text");
+        expect(saved.accept).toEqual(["bonjour"]);
+        expect("ext_payload" in saved).toBe(false);
+        expect(screen.queryByTestId("exercise-editor-d1")).toBeNull();
+    });
+
+    it("Cancel after converting restores the original dictation exercise", () => {
+        render(<ListHarness initial={[dictationEx("d1")]} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-d1"));
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-d1"), {
+            target: {value: "free_text"},
+        });
+        expect(screen.getByTestId("exercise-editor-d1")).toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("exercise-edit-cancel-d1"));
+        // Re-open: it is the extension (dictation) editor again, not free_text.
+        fireEvent.click(screen.getByTestId("exercise-edit-d1"));
+        expect(screen.getByTestId("exercise-ext-editor-d1")).toBeInTheDocument();
+        expect(screen.queryByTestId("exercise-editor-d1")).toBeNull();
+    });
+});
+
+describe("ExerciseGenerator — convert graded-quiz to reading-comprehension (EXP-050 3b)", () => {
+    const gradedQuiz = (id: string): ContentLessonExercise =>
+        ({
+            id,
+            type: "ext:al-graded-quiz",
+            prompt: "Quiz",
+            card_ids: [],
+            distractors: [],
+            ext_payload: {
+                pass_threshold: 60,
+                questions: [
+                    {prompt: "Q1", type: "free_text", accept: ["x"], points: 1},
+                ],
+            },
+        }) as ContentLessonExercise;
+
+    it("swaps to the RC editor (same ext family) with an empty passage blocking Save", () => {
+        render(<ListHarness initial={[gradedQuiz("gq9")]} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-gq9"));
+        expect(screen.getByTestId("exercise-ext-editor-gq9")).toBeInTheDocument();
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-gq9"), {
+            target: {value: "ext:al-reading-comprehension"},
+        });
+        // Still the extension editor, now showing the RC passage field (remounted).
+        expect(screen.getByTestId("exercise-ext-rc-passage-gq9")).toBeInTheDocument();
+        // Empty passage -> Save disabled.
+        expect(
+            screen.getByTestId("exercise-ext-save-gq9") as HTMLButtonElement,
+        ).toBeDisabled();
+        // Fill the passage -> Save enabled.
+        fireEvent.change(screen.getByTestId("exercise-ext-rc-passage-gq9"), {
+            target: {value: "A passage the learner reads."},
+        });
+        expect(
+            screen.getByTestId("exercise-ext-save-gq9") as HTMLButtonElement,
+        ).not.toBeDisabled();
+    });
+
+    it("Cancel after converting restores the original graded-quiz", () => {
+        render(<ListHarness initial={[gradedQuiz("gq9")]} />);
+        fireEvent.click(screen.getByTestId("exercise-edit-gq9"));
+        fireEvent.change(screen.getByTestId("exercise-ext-type-select-gq9"), {
+            target: {value: "ext:al-reading-comprehension"},
+        });
+        fireEvent.click(screen.getByTestId("exercise-ext-cancel-gq9"));
+        // Re-open: back to a graded-quiz (its type select offers RC again).
+        fireEvent.click(screen.getByTestId("exercise-edit-gq9"));
+        const select = screen.getByTestId(
+            "exercise-ext-type-select-gq9",
+        ) as HTMLSelectElement;
+        expect(select.value).toBe("ext:al-graded-quiz");
+    });
+});
+
+describe("ExerciseGenerator — translated preview-row summaries (#3093)", () => {
+    const rowText = (id: string) =>
+        (screen.getByTestId(`exercise-row-${id}`).querySelector(".exercise-row-desc") as HTMLElement)
+            .textContent;
+
+    it.each([
+        [
+            "matching counts its pairs",
+            {
+                id: "m1",
+                type: "matching",
+                prompt: "Match",
+                card_ids: [],
+                distractors: [],
+                pairs: [
+                    {left: "a", right: "b"},
+                    {left: "c", right: "d"},
+                ],
+            } as ContentLessonExercise,
+            "create_lesson.exercises.summary.pairs|2 pairs",
+        ],
+        [
+            "picture_choice counts its images",
+            {
+                id: "p1",
+                type: "picture_choice",
+                prompt: "Pick",
+                card_ids: [],
+                distractors: [],
+                images: [
+                    {src: "a.png", label: "a"},
+                    {src: "b.png", label: "b"},
+                    {src: "c.png", label: "c"},
+                ],
+            } as ContentLessonExercise,
+            "create_lesson.exercises.summary.images|3 images",
+        ],
+        [
+            "multiple_choice counts its answer options",
+            {
+                id: "c1",
+                type: "multiple_choice",
+                prompt: "Choose",
+                card_ids: [],
+                distractors: [],
+                options: [
+                    {text: "a", correct: true},
+                    {text: "b", correct: false},
+                    {text: "c", correct: false},
+                    {text: "d", correct: false},
+                ],
+            } as ContentLessonExercise,
+            "create_lesson.exercises.summary.options|4 answer options",
+        ],
+    ])("%s", (_name, exercise, expected) => {
+        renderWith([exercise], DEFAULT_EXERCISE_GEN_CONFIG.types);
+        expect(rowText(exercise.id)).toBe(expected);
+    });
+
+    it("leaves the content-bearing summaries untranslated (cloze sentence, word tiles, prompt)", () => {
+        renderWith(
+            [
+                {id: "z1", type: "cloze", prompt: "Fill", sentence: "Der ___ bellt.", card_ids: [], distractors: []},
+                {id: "w1", type: "word_tiles", prompt: "Order", tiles: ["der", "Hund"], card_ids: [], distractors: []},
+                {id: "f1", type: "free_text", prompt: "Übersetze: el coche rojo", card_ids: [], distractors: []},
+            ] as ContentLessonExercise[],
+            DEFAULT_EXERCISE_GEN_CONFIG.types,
+        );
+        expect(rowText("z1")).toBe("Der ___ bellt.");
+        expect(rowText("w1")).toBe("der Hund");
+        expect(rowText("f1")).toBe("Übersetze: el coche rojo");
+    });
+});
+
+describe("hasIncompleteExercise", () => {
+    // #3246 - a forked set holding a multiselect cloze was stuck on step 3
+    // because the advance gate called the editor check, which ignored
+    // cloze_mode and demanded ___ markers.
+    it("does not count an untouched multiselect cloze as incomplete", () => {
+        const multiselect = {
+            id: "ex-ms-vok",
+            type: "cloze",
+            cloze_mode: "multiselect",
+            prompt: "Wähle alle fünf Vokal-Zeichen.",
+            sentence: "Welche dieser Zeichen sind Vokale?",
+            card_ids: [],
+            accept: ["あ", "い", "う", "え", "お"],
+            distractors: ["か", "さ", "な"],
+        } as ContentLessonExercise;
+        expect(hasIncompleteExercise([multiselect], [])).toBe(false);
+    });
+    it("counts a multiselect cloze without correct options as incomplete", () => {
+        const broken = {
+            id: "ex-ms",
+            type: "cloze",
+            cloze_mode: "multiselect",
+            prompt: "p",
+            sentence: "q?",
+            card_ids: [],
+            accept: [],
+            distractors: ["x"],
+        } as ContentLessonExercise;
+        expect(hasIncompleteExercise([broken], [])).toBe(true);
+    });
+});
+
+describe("exercise minimum is a share hint, not a gate (#3389)", () => {
+    const matching = {
+        id: "m1",
+        type: "matching",
+        prompt: "Match.",
+        card_ids: [],
+        distractors: [],
+        pairs: [{left: "chat", right: "Katze"}],
+    } as unknown as ContentLessonExercise;
+
+    it.each([
+        ["create", false],
+        ["edit", true],
+    ])("lets one exercise advance in %s mode", (_mode, editMode) => {
+        expect(minExercisesToAdvance(editMode)).toBe(1);
+    });
+
+    it("names the sharing minimum below five exercises", () => {
+        render(<ListHarness initial={[matching]} />);
+        expect(screen.getByTestId("exercise-min-hint")).toHaveTextContent(
+            "Sharing needs at least 5 exercises",
+        );
+    });
+});

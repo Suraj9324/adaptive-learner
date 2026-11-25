@@ -1,0 +1,272 @@
+"""Tests for the manifest + lesson parsers
+(Phase 43 / EXP-002 / 2C-cache — P-104 + Q-101).
+"""
+
+from __future__ import annotations
+
+import json
+import textwrap
+
+import pytest
+from adaptive_learner_content_loader.exceptions import ContentSchemaError
+from adaptive_learner_content_loader.manifest_parser import (
+    parse_lesson_json,
+    parse_manifest_yaml,
+)
+from adaptive_learner_content_loader.models import (
+    MANIFEST_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_MAJOR,
+    ContentManifest,
+    is_supported_schema_version,
+)
+
+
+class TestSchemaVersion:
+    def test_the_declared_version_is_the_mirrors_manifest_default(self) -> None:
+        # #3835: the version a writer declares is read from the generated
+        # model, not kept as a literal that has to follow every re-pin.
+        default = ContentManifest.model_fields["schema_version"].default
+        assert MANIFEST_SCHEMA_VERSION == default
+        assert default.split(".", 1)[0] == SUPPORTED_SCHEMA_MAJOR
+
+    def test_every_1x_minor_is_supported(self) -> None:
+        for v in [
+            "1.0",
+            "1.1",
+            "1.2",
+            "1.3",
+            "1.4",
+            "1.5",
+            "1.6",
+            "1.7",
+            "1.8",
+            "1.9",
+            "1.0.0",
+            "1.3.2",
+        ]:
+            assert is_supported_schema_version(v), v
+
+    def test_other_majors_rejected(self) -> None:
+        assert not is_supported_schema_version("2.0")
+        assert not is_supported_schema_version("0.9")
+        assert not is_supported_schema_version("not-a-version")
+
+
+VALID_MANIFEST = textwrap.dedent(
+    """
+    schema_version: '1.0'
+    name: Adaptive Learner Content Pilot
+    description: French A1 plus future sets.
+    sets:
+      - id: language-fr-a1
+        title: French A1
+        language: fr
+        level: A1
+        version: '1.0.0'
+        lesson_count: 12
+        domain: language
+        tags: [beginner, travel]
+      - id: language-fr-a2
+        title: French A2
+        language: fr
+        level: A2
+        version: '1.0.0'
+        lesson_count: 14
+    metadata:
+      license: CC-BY-SA-4.0
+      author: Asterios Raptis
+    """
+).strip()
+
+
+VALID_LESSON = json.dumps(
+    {
+        "id": "01-greetings",
+        "title": "Greetings",
+        "estimated_minutes": 12,
+        "cards": [
+            {"id": "bonjour", "front": "Bonjour", "back": "Hello"},
+            {"id": "merci", "front": "Merci", "back": "Thank you"},
+        ],
+        "steps": [
+            {
+                "id": "intro",
+                "type": "theory",
+                "body": "# Greetings\n\nA few common phrases.",
+            },
+            {
+                "id": "ex-1",
+                "type": "exercise",
+                "exercise": {
+                    "id": "ex-1",
+                    "type": "matching",
+                    "prompt": "Match the French words.",
+                    "card_ids": ["bonjour", "merci"],
+                    "pairs": [
+                        {"left": "Bonjour", "right": "Hello"},
+                        {"left": "Merci", "right": "Thank you"},
+                    ],
+                },
+            },
+        ],
+    },
+)
+
+
+# --- Manifest parser ---------------------------------------------------
+
+
+class TestParseManifestYaml:
+    def test_valid_manifest_round_trips(self) -> None:
+        manifest = parse_manifest_yaml(VALID_MANIFEST)
+        assert manifest.name == "Adaptive Learner Content Pilot"
+        assert len(manifest.sets) == 2
+        assert manifest.sets[0].id == "language-fr-a1"
+        assert manifest.metadata["license"] == "CC-BY-SA-4.0"
+
+    def test_missing_schema_version_defaults_to_engine_default(self) -> None:
+        # #1744: when the author omits schema_version, the ENGINE-generated
+        # model default applies; it moves independently of the lesson
+        # mirror's x-schema-version.
+        yaml_no_version = "name: Pilot\nsets: []\n"
+        manifest = parse_manifest_yaml(yaml_no_version)
+        engine_default = ContentManifest.model_fields["schema_version"].default
+        assert manifest.schema_version == engine_default
+
+    def test_unsupported_schema_version_rejected_with_friendly_hint(
+        self,
+    ) -> None:
+        future = "schema_version: '2.0'\nname: Future\nsets: []\n"
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_manifest_yaml(future)
+        # The error message names the version + asks the
+        # user to upgrade — not a wall of validation errors.
+        assert "2.0" in str(exc.value)
+        assert "upgrade" in str(exc.value).lower()
+
+    def test_malformed_yaml_caught(self) -> None:
+        broken = "name: 'unclosed\nsets: []\n"
+        with pytest.raises(ContentSchemaError):
+            parse_manifest_yaml(broken)
+
+    def test_non_mapping_rejected(self) -> None:
+        # YAML parses fine; the top level is a list, which we
+        # reject explicitly.
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_manifest_yaml("- item1\n- item2\n")
+        assert "mapping" in str(exc.value).lower()
+
+    def test_schema_version_must_be_string(self) -> None:
+        # YAML 1.0 (no quotes) parses as float, not str.
+        # We reject this with a clear message.
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_manifest_yaml("schema_version: 1.0\nname: x\nsets: []\n")
+        assert "string" in str(exc.value).lower()
+
+    def test_pydantic_failures_wrapped(self) -> None:
+        # A non-semver ``version`` gets caught by the ContentSet
+        # validator (the backend compares and sorts versions, so
+        # the shape is its own concern); the parser wraps the
+        # Pydantic error.
+        bad = textwrap.dedent(
+            """
+            schema_version: '1.0'
+            name: Bad
+            sets:
+              - id: x
+                title: x
+                language: fr
+                level: A1
+                version: latest
+                lesson_count: 1
+            """
+        ).strip()
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_manifest_yaml(bad)
+        # ``message`` stays short for the toast; the wrapped
+        # Pydantic error lands in ``detail`` so the Settings
+        # UI can show the author what to fix.
+        assert "schema validation" in str(exc.value).lower()
+        assert "version" in exc.value.detail.lower()
+
+
+# --- Lesson parser -----------------------------------------------------
+
+
+class TestParseLessonJson:
+    def test_valid_lesson_round_trips(self) -> None:
+        lesson = parse_lesson_json(VALID_LESSON)
+        assert lesson.id == "01-greetings"
+        assert lesson.title == "Greetings"
+        assert len(lesson.cards) == 2
+        assert lesson.steps[1].exercise is not None
+
+    def test_malformed_json_caught(self) -> None:
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_lesson_json("{not valid json")
+        assert "json" in str(exc.value).lower()
+
+    def test_non_object_rejected(self) -> None:
+        with pytest.raises(ContentSchemaError) as exc:
+            parse_lesson_json('["just", "a", "list"]')
+        assert "object" in str(exc.value).lower()
+
+    def test_a_language_tag_the_engine_accepts_loads(self) -> None:
+        # #3245 option (b): the backend had its own language-tag regex
+        # (``^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$``) and rejected lessons the
+        # engine's E-LANG-TAG accepts. The tag shape is the engine's
+        # call; the backend only stores and serves the lesson.
+        tagged = json.loads(VALID_LESSON)
+        tagged["target_language"] = "sr-Latn-RS"
+        tagged["source_language"] = "zh-Hant-TW"
+        lesson = parse_lesson_json(json.dumps(tagged))
+        assert lesson.target_language == "sr-Latn-RS"
+        assert lesson.source_language == "zh-Hant-TW"
+
+
+# The worked example from learn-content-engine's own docs
+# (docs/lesson-format.md#variables-parametric-exercises, schema v1.14,
+# engine#151), copied verbatim per the #3108 acceptance criteria: "a
+# lesson carrying variables loads without error (rendered with the
+# braces visible is fine at this stage)".
+PARAMETRIC_LESSON = json.dumps(
+    {
+        "id": "addition-parametrisch",
+        "title": "Addition mit Zufallszahlen",
+        "steps": [
+            {
+                "id": "s1",
+                "type": "exercise",
+                "exercise": {
+                    "id": "e1",
+                    "type": "free_text",
+                    "prompt": "Was ist {{a}} + {{b}}?",
+                    "variables": [
+                        {"name": "a", "min": 1, "max": 20},
+                        {"name": "b", "min": 1, "max": 20, "step": 0.5},
+                        {"name": "sum", "expression": "a + b", "tolerance": 0.01},
+                    ],
+                    "accept": ["{{sum}}"],
+                    "explanation": "Die Summe von {{a}} und {{b}} ist {{sum}}.",
+                },
+            }
+        ],
+    },
+)
+
+
+class TestParseLessonJsonWithVariables:
+    """Schema v1.14 acceptance (#3108): the parser accepts a parametric
+    exercise without error. Nothing samples, evaluates or substitutes the
+    ``{{name}}`` references yet - that is the consumer half (#3109)."""
+
+    def test_parametric_lesson_loads_without_error(self) -> None:
+        lesson = parse_lesson_json(PARAMETRIC_LESSON)
+        assert lesson.id == "addition-parametrisch"
+        exercise = lesson.steps[0].exercise
+        assert exercise is not None
+        assert exercise.variables is not None
+        assert [v.name for v in exercise.variables] == ["a", "b", "sum"]
+        # Braces are left exactly as authored - visible, unsubstituted.
+        assert exercise.prompt == "Was ist {{a}} + {{b}}?"
+        assert exercise.accept == ["{{sum}}"]

@@ -1,0 +1,418 @@
+# Adaptive Learner
+
+[![Version](https://img.shields.io/badge/version-v2.17.1-blue)](https://github.com/astrapi69/adaptive-learner/releases/latest)
+[![CI (develop)](https://github.com/astrapi69/adaptive-learner/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/astrapi69/adaptive-learner/actions/workflows/ci.yml?query=branch%3Adevelop)
+[![Night shift](https://github.com/astrapi69/adaptive-learner/actions/workflows/red-runs-rollup.yml/badge.svg)](https://github.com/astrapi69/adaptive-learner/actions/workflows/red-runs-rollup.yml)
+[![Image](https://img.shields.io/github/v/release/astrapi69/adaptive-learner?label=image)](https://github.com/astrapi69/adaptive-learner/pkgs/container/adaptive-learner)
+[![Tests](https://img.shields.io/badge/tests-13433%20green-brightgreen)](#tests)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-online-blue)](https://astrapi69.github.io/adaptive-learner/docs/en/)
+
+A complete adaptive-learning platform built on the six-method
+learning model (Asterios Raptis, *From Theory to Practice: The Series*, Medium
+series). Pick the method that fits the learner — deductive,
+inductive, error-based, dialogic, contextual, or AI-adaptive —
+walk through a seven-step cycle on every session, and let a
+dual-prompt AI decide when the learner is ready to advance.
+Auto-loop into a new cycle once the topic is integrated. Bring
+your own AI key (Anthropic / OpenAI / Gemini) and enter it
+under Settings > AI.
+
+[🇩🇪 Deutsch](README-de.md)
+
+## Documentation
+
+Full documentation (German default at `/docs/`, English at
+`/docs/en/`):
+[**astrapi69.github.io/adaptive-learner/docs/en/**](https://astrapi69.github.io/adaptive-learner/docs/en/)
+
+- [User Guide](https://astrapi69.github.io/adaptive-learner/docs/en/user-guide/getting-started/)
+  — how to use the app
+- [The Learning Method](https://astrapi69.github.io/adaptive-learner/docs/en/concept/philosophy/)
+  — why adaptive learning works
+- [Developer Guide](https://astrapi69.github.io/adaptive-learner/docs/en/developer/architecture/)
+  — architecture, plugins, contributing
+- [API Reference](https://astrapi69.github.io/adaptive-learner/docs/en/api/overview/)
+  — all endpoints and models
+- [Configuration](docs/configuration.md) — three-layer config
+  chain (env > `secrets.yaml` > DB)
+- [App Flow](docs/reference/APP-FLOW.md): every screen, how it is
+  reached, and the main journeys through the app
+- [Design Brief](docs/reference/DESIGN-BRIEF.md): audience, design
+  principles, visual system and open design questions
+
+## What you get
+
+The full, canonical feature list lives on the docs site:
+**[Feature overview](https://astrapi69.github.io/adaptive-learner/docs/en/features/overview/)**
+(one source, kept current with every release; this README only
+summarizes). In short:
+
+- **Learning core** - six learning methods, a seven-step session
+  cycle with a dual-prompt evaluator, auto-loop, method switching.
+- **AI tutor chat** - assistant-ui thread with streaming replies,
+  voice input, read-aloud, imported-conversation continuation;
+  bring your own key (Anthropic / OpenAI / Gemini).
+- **Exercises** - six core types (matching, picture choice, free
+  text, cloze, word tiles, multiple choice) plus five extension
+  types (categorization, error correction, reading comprehension,
+  graded quiz, audio dictation).
+- **Lessons** - seven play modes (Practice / Exam / Timed / Reverse /
+  Shuffle / Endless / train-errors), SRS review, adaptive lessons
+  from your own errors, pause/resume.
+- **Authoring** - the Create-Lesson wizard: editable exercises,
+  book-text ingestion (paste or EPUB/DOCX/TXT/MD upload with chapter
+  picker and batch generation), AI exercise generation with a
+  quality gate.
+- **Content** - downloadable lesson sets from federated GitHub
+  content repos, community sharing via pull request, per-set deep
+  links and QR codes.
+- **Import + analysis** - chat-history import (ChatGPT / Claude /
+  Gemini / markdown) with AI analysis into curricula, sessions, or
+  offline lessons.
+- **Gamification** - XP, tiered badges, streaks, daily missions,
+  celebrations.
+- **Exports + backup** - Anki, NotebookLM, learning repository,
+  Markdown/PDF reports, `.alb` backups and encrypted `.alk` key
+  export.
+- **Platform** - installable offline PWA, dual storage (browser
+  IndexedDB or self-hosted server), desktop launcher for
+  Linux/macOS/Windows, eleven UI languages.
+- **Accessibility** - WCAG-AA themes, keyboard-first navigation,
+  screen-reader support, reduced motion, TTS.
+
+### Bundled Content
+
+<!-- CONTENT-STATS:START -->
+[![Content](https://img.shields.io/badge/content-25%20sets%2C%2012%20language%20pairs-brightgreen)](#bundled-content)
+
+**329 lessons · 28 sets · 2 domain(s)** (language, software) — bundled offline into the GitHub Pages build from [astrapi69/adaptive-learner-content](https://github.com/astrapi69/adaptive-learner-content).
+
+| Set | Source | Target | Level | Lessons | Review |
+|-----|--------|--------|-------|--------:|--------|
+| Englisch A1 (für Deutschsprachige) | de | en | A1 | 15 | authored |
+| Englisch A2 - Grundlagen | de | en | A2 | 15 | authored |
+| Englisch B1 - Mittelstufe | de | en | B1 | 15 | authored |
+| Spanisch A1 (für Deutschsprachige) | de | es | A1 | 15 | authored |
+| Spanisch A2 - Grundlagen | de | es | A2 | 15 | authored |
+| Spanisch B1 - Mittelstufe | de | es | B1 | 15 | authored |
+| Französisch A1 (für Deutschsprachige) | de | fr | A1 | 16 | authored |
+| Französisch A2 - Grundlagen | de | fr | A2 | 16 | authored |
+| Französisch B1 - Mittelstufe | de | fr | B1 | 16 | authored |
+| Italienisch A1 (für Deutschsprachige) | de | it | A1 | 10 | authored |
+| Japanisch Schrift: Hiragana (Vorstufe) | de | ja | A0 | 10 | authored |
+| Japanisch A1 (für Deutschsprachige) | de | ja | A1 | 10 | generated |
+| Koreanisch A1 (für Deutschsprachige) | de | ko | A1 | 10 | generated |
+| Portugiesisch (Brasilianisch) A1 (für Deutschsprachige) | de | pt | A1 | 10 | authored |
+| Chinesisch A1 (für Deutschsprachige) | de | zh | A1 | 10 | generated |
+| German A1 (for English speakers) | en | de | A1 | 5 | authored |
+| German A2 (for English speakers) | en | de | A2 | 5 | authored |
+| Spanish A1 (for English speakers) | en | es | A1 | 15 | authored |
+| Spanish A2 - Elementary | en | es | A2 | 15 | authored |
+| Spanish B1 - Intermediate | en | es | B1 | 15 | authored |
+| Spanish B2 (for English speakers) | en | es | B2 | 5 | authored |
+| French A1 (for English speakers) | en | fr | A1 | 16 | authored |
+| French A2 - Elementary | en | fr | A2 | 15 | authored |
+| French B1 (for English speakers) | en | fr | B1 | 5 | authored |
+| Γαλλικά A1 (για ελληνόφωνους) | el | fr | A1 | 8 | authored |
+| अंग्रेज़ी A1 (हिंदी भाषियों के लिए) | hi | en | A1 | 10 | authored |
+| अंग्रेज़ी A2 (हिंदी भाषियों के लिए) | hi | en | A2 | 5 | authored |
+| Adaptive Learner - App-Tutorial | de | de | none | 12 | authored |
+
+_3 AI-generated sets excluded from the badge pending native-speaker review._
+<!-- CONTENT-STATS:END -->
+
+### Content repos
+
+The content system is open: beyond the bundled library, anyone can host
+their own **content repository** on GitHub, connect it in
+**Settings > Data > Content repositories**, and have it browsed (and
+optionally recommended) in the app. The official library and user repos
+share the exact same format, so a validating repo is a first-class
+content source.
+
+Want to create your own lessons? See the
+[Content-Repo Guide](docs/reference/CONTENT-REPO-GUIDE.md) — what a content repo
+is, the directory layout, local validation, trust levels, and the
+ready-made [starter kit](https://github.com/astrapi69/adaptive-learner-content-test).
+
+## Install
+
+Four ways to run Adaptive Learner, in order of friction.
+
+### 1. Try online (zero install)
+
+The public PWA runs in **Local mode**: among other things, your
+progress, your statistics, your settings and your API keys are stored
+in your browser. Others get parts of them only when a feature needs
+them, for example GitHub, when the app asks for new content on its own
+at start-up. AI calls are an example too: they go straight from your
+browser to your AI provider, such as Anthropic, OpenAI or Google
+Gemini, using your own API key and without a detour through a server
+of the operator. No install needed.
+
+[**Open the live app →**](https://astrapi69.github.io/adaptive-learner/)
+
+Once you are on the dashboard, Chrome, Edge and other Chromium
+browsers show an "Add to home screen" card at the top with an
+Install button; on iPhone and iPad, Safari shows an "Install as
+an app" hint there (Share, then "Add to Home Screen"). Accept,
+and Adaptive Learner becomes a standalone PWA you launch from
+your desktop or phone home screen.
+
+### 2. Desktop app (native launcher)
+
+Pre-built single-binary executables that manage the backend for
+you and open the app in your default browser. The launcher drives
+Docker itself, so you still need Docker installed and running, but
+no manual Docker or Compose commands. The per-platform start guide
+(set the execute bit on Linux, get past Gatekeeper on macOS or
+SmartScreen on Windows, verify the checksum) is at
+[Start the desktop launcher](https://astrapi69.github.io/adaptive-learner/docs/en/install/launcher/).
+
+Download from the
+[**latest GitHub release**](https://github.com/astrapi69/adaptive-learner/releases/latest):
+
+| OS | Asset | How to run |
+|---|---|---|
+| Linux | `adaptive-learner-launcher` | `chmod +x adaptive-learner-launcher && ./adaptive-learner-launcher` |
+| macOS | `adaptive-learner-launcher-macos.zip` | Unzip, then double-click (or `./adaptive-learner-launcher` from Terminal) |
+| Windows | `adaptive-learner-launcher.exe` | Double-click |
+
+Each release also ships a `.sha256` next to each binary for
+integrity verification. On first run the launcher pulls the
+published app image from `ghcr.io/astrapi69/adaptive-learner`
+(nothing is built on your machine) and starts the app on
+`http://localhost:8501`. Enter your provider API keys under
+Settings > AI; they are stored encrypted in the app's data
+volume and survive updates. A `secrets.yaml` on the host is not
+read by the launcher's container; that file applies only to a
+backend run from source (see
+[configuration](docs/configuration.md)).
+
+### 3. Docker (self-hosted)
+
+Prerequisite: Docker (Docker Desktop or Docker Engine with
+Compose).
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/astrapi69/adaptive-learner/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/astrapi69/adaptive-learner/main/install.ps1 | iex
+```
+
+Both scripts clone the tagged release into `~/adaptive-learner/`,
+generate an `ADAPTIVE_LEARNER_SECRET_KEY` (Fernet at-rest
+encryption), build the Docker images, and start the stack at
+`http://localhost:8501` (single port, single container; FastAPI
+serves the static frontend and `/api/*` itself). By default the
+port is bound to `127.0.0.1`, so the app is reachable only from
+this machine. It has no authentication: to reach it from other
+devices, deliberately set `ADAPTIVE_LEARNER_BIND_ADDRESS=0.0.0.0`
+in `~/adaptive-learner/.env` - only in a network you trust, or
+behind your own auth layer (reverse proxy with basic auth, VPN).
+
+```bash
+cd ~/adaptive-learner
+./stop.sh   # docker compose down
+./start.sh  # docker compose up -d
+# uninstall: ./stop.sh && cd ~ && rm -rf adaptive-learner
+```
+
+### 4. Developer setup (source build)
+
+Manual Poetry + Bun setup for contributors. Prerequisites:
+Python 3.12, Node ≥24, Poetry, Bun 1.4+, Make.
+
+```bash
+git clone git@github.com:astrapi69/adaptive-learner.git
+cd adaptive-learner
+make install   # Poetry + Bun + all 14 plugins as path-deps
+make dev       # backend :18001 + frontend :15174 (Vite dev server)
+```
+
+### Testing on a real phone in your LAN
+
+To check the app on a real iPhone/Android without deploying, use the
+single-origin LAN mode. Your computer and phone must be on the **same
+Wi-Fi**:
+
+```bash
+make dev-lan   # builds the frontend, then serves it + the API on one origin at 0.0.0.0:18001
+```
+
+It prints a URL like `http://<your-PC-LAN-IP>:18001` — open that in mobile
+Safari/Chrome. The frontend and API share one origin (no CORS hop, no
+second server), and the backend runs without `--reload` so app state
+survives. This is a **dev build served over plain HTTP**, not the
+installed PWA — for the PWA install flow, deploy or use the launcher.
+Stop with Ctrl+C.
+
+New contributors should start with the
+[Developer Onboarding guide](https://astrapi69.github.io/adaptive-learner/docs/en/developer/onboarding/)
+— a step-by-step walkthrough of your first bug-fix. The full setup
+reference lives at
+[docs/developer/setup](https://astrapi69.github.io/adaptive-learner/docs/en/developer/setup/).
+
+## Tech stack
+
+| Layer | Tech |
+|---|---|
+| Backend | Python 3.12, FastAPI ^0.141, SQLAlchemy ^2.0, Pydantic v2, Alembic, aiosqlite, cryptography (Fernet), platformdirs, Poetry |
+| Frontend | React 19, TypeScript 6 (strict), Vite 8, React Router 8, react-toastify, Recharts 3, TipTap 3 + official extensions, Dexie 4 (IndexedDB), html5-qrcode, sql.js + jszip |
+| PWA | vite-plugin-pwa, Workbox SW, manifest + maskable PNG icons |
+| Plugins | pluginforge ^0.10.0 (PyPI), identity-gated `target_application = "adaptive_learner"` |
+| AI providers | Anthropic SDK, OpenAI SDK, google.genai 2.x |
+| Launcher | PyInstaller, cross-OS (Linux + macOS + Windows) |
+| Testing | pytest ^9, Vitest 5 (happy-dom), Playwright (E2E smoke) |
+| Tooling | Poetry, Bun, Docker, Make, ruff, pre-commit |
+
+## Plugins shipped
+
+14 plugins, all under `plugins/`. Routes mounted at
+`/api/plugins/<name>/*`.
+
+| Plugin | Routes | Purpose |
+|---|---|---|
+| ai-anthropic | hook-only | `ai_complete*` for `claude-*` |
+| ai-openai | hook-only | `ai_complete*` for `gpt-*` |
+| ai-gemini | hook-only | `ai_complete*` for `gemini-*` |
+| assessment | /questions, /evaluate, /profile/{id} | 12-question profile → six-method weights |
+| session | /start, /{id}/message, /message/stream, /rate, /end, /switch, /pronunciation/* | 7-step cycles, dual-prompt eval, streaming, auto-loop, pronunciation judge |
+| tracking | /progress/{id}, /commits/{id} | Per-project aggregates + step-evaluation insights |
+| tools | /recommendations/{id}, /spaced/{id} | Method-tailored tool list + spaced practice |
+| gamification | /xp/*, /badges/*, /streak/*, /reset | XP + 28 tiered badges + streak heatmap |
+| anki | /cards CRUD, /extract/{session,conversation}, /mark-exported | AI-extracted flashcards + .apkg export |
+| notebooklm | /questions CRUD, /generate/{session,project}, /study-guide/{id} | Active-recall questions + study guide + ZIP export |
+| learning-repo | /render/{id}, /export-zip/{id}, /persist/{id} | Git-backed Learning Repository (Markdown artefacts + opt-in commit) |
+| content-loader | /sets, /sets/{src}/{id}/download, /sets/{src}/{id}/lessons | Downloads structured lesson sets from public GitHub repos; caches locally |
+| missions | /templates, /today/{user_id}, /regenerate/{user_id} | Daily adaptive missions evaluated against existing data |
+
+## Useful make targets
+
+```bash
+make dev               # backend (18001) + frontend (15174)
+make test              # backend + plugins + Vitest (counts: see Tests)
+make test-coverage     # opt-in coverage (CI runs it nightly)
+make sync-versions     # propagate the version to every derived file
+make sync-i18n         # backend YAML → frontend JSON bundles
+make docs-serve        # MkDocs preview on :8000 with hot-reload
+make prod / prod-down  # docker compose stack
+```
+
+E2E smoke: `cd e2e && npx playwright test --project=smoke`
+(the specs under `e2e/smoke/`).
+
+## Tests
+
+The badge above states a size, not a strength: it counts passing
+tests. How much the suite actually catches is probed by mutation
+testing (frontend logic layers, nightly interleaved shards via
+Stryker); its per-shard reports are CI artifacts, not a single rate,
+which is why no mutation-score badge exists (#2257).
+
+Verified 2026-09-17 (v2.15.0):
+
+| Suite | Count |
+|---|---|
+| Backend (pytest) | 1858 |
+| Plugins (14 × pytest) | 1137 |
+| Frontend (Vitest) | 10438 |
+| **Total** | **13433** |
+
+Plus the Playwright smoke specs under `e2e/smoke/`, covering among
+others: landing,
+onboarding+assessment, session (3-chunk SSE), curriculum,
+settings, mobile viewports, sync pairing, backup roundtrip,
+multi-cycle auto-loop, import + analysis, MD export,
+subjects/tags filter, rich-text notes, model picker — and a
+separate Dexie-mode release gate (`make test-dexie-smoke`)
+walking every nav-reachable route against the GH-Pages build.
+
+## Local project references
+
+- [`CLAUDE.md`](CLAUDE.md) — development guide for Claude Code
+  (under 10K, single-line state pointer).
+- [`docs/configuration.md`](docs/configuration.md) — the
+  three-layer config chain.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — phase history + next.
+- [`docs/backlog.md`](docs/backlog.md) — daily-planning view
+  (P0–P5 tiers + blocked items).
+- [`docs/adaptive-learner-project-reference.md`](docs/adaptive-learner-project-reference.md)
+  — original plan + shipped architecture.
+
+User-facing prose lives on the [**docs site**](https://astrapi69.github.io/adaptive-learner/docs/);
+the in-repo files above are for contributors.
+
+## Status
+
+Active development. The current release is **v2.17.1**, a correction on
+v2.17.0: the legal notice and the privacy policy name the right contact
+address. v2.17.0 is a **privacy release**: the privacy policy was rewritten in all eight help languages and
+describes when and where data leaves your device, the documentation site
+loads nothing from servers other than GitHub Pages, and an error report
+includes the environment info and the action history only when you tick
+them. The end of a lesson now leads to **fixing it**: when a run had
+mistakes, the compact summary offers Fix mistakes, and the detailed
+evaluation marks each mistake Corrected or Still open. In exam mode, a set
+that brings its own evaluation rules is graded by them. **Backups** now also
+carry connected repositories, redeemed invites and AI content-check reports,
+and importing another learner's backup merges its progress into the active
+profile. Restore a backup made with v2.17.0 only in v2.17.0 or newer. Full
+notes: [`changelog/releases/v2.17.1.md`](changelog/releases/v2.17.1.md) and
+[`changelog/releases/v2.17.0.md`](changelog/releases/v2.17.0.md).
+
+Earlier releases, newest first (full details in
+[`changelog/releases/`](changelog/releases/)):
+
+- **v2.16.0** - errors that used to vanish say what went wrong (a failed tutor reply, a history that could not load, a crashed page, Settings actions, exports, lesson progress), the exercise editor, the share check and repository validation follow the content engine's rules, backups carry every stored field and restore across the desktop app and the browser version, phone fixes for the compact menu below 1280 px and the dashboard.
+- **v2.15.0** - parametric exercises whose values are drawn fresh for every attempt, three new exercise types (Hotspot, Parsons, Ordering) authorable in the lesson creator, explanations after an answer, a compact lesson summary with a Detailed evaluation, Settings in labelled sections, Refresh in My content applies every available set update at once, a legal notice and privacy policy in German and English.
+- **v2.14.0** - optional Game Mode (combo streaks, checkpoints, answer physics, hearts/countdown) with XP-unlocked arcade minigames, mascot colour variants and avatar presets/frames, set pages with lesson progress and a set-completion review, three audio/speech extension types adoptable from the creation wizard.
+- **v2.13.0** - in-place exercise-type conversion in the lesson editor, a discoverable "Edit as a copy" action on downloaded content sets, a large UI-consolidation pass (shared Settings/Modal/DashboardCard components, shadcn Button), FastAPI 0.141 + TipTap 3.30 dependency refresh.
+- **v2.12.0** - restart a finished set as a fresh run (a "Durchgang") with the spaced-repetition history carried along, key import from a Topos `.alk` export, Perplexity as a backend AI provider.
+- **v2.11.0** - learning progress anchored to stable identities (one-time local migration), so content corrections no longer orphan review cards; a reworked matching-exercise layout.
+- **v2.10.0** - security release: the app binds to `127.0.0.1` and is reachable only from your own computer instead of on every network interface.
+- **v2.9.0** - the downloaded launcher can be closed again on desktops without a system tray.
+- **v2.8.2** - security patch on v2.8.0: no more white page in image mode, and the bare container no longer defaults to debug mode.
+- **v2.8.0** - distribution switch: the desktop launcher pulls a published, per-architecture verified image from GHCR instead of building on-device, guarded by a volume-migration stop; image-description exercises (`ext:al-image-description`), single-lesson deletion, a set-update guard against silently orphaning learning progress.
+- **v2.6.x** - session chat rebuilt on assistant-ui, Create-Lesson's book path became a real ingestion tool (book-file upload, chapter multi-select, batch generation), dictation authoring completed with audio-file upload.
+- **v2.5.0** - Create-Lesson became a full exercise authoring tool (every core type editable, hand-added exercises, an extension-authoring wizard for all AI-authored extension types plus `ext:al-dictation`); PWA updates and the AI key vault became consumed npm packages (`@astrapi69/pwa-update`, `@astrapi69/ai-key-vault`).
+- **v2.4.0** - Create-Lesson authoring upgrade (knowledge lesson from pasted text, editing/combining lessons, card image upload), free-text multiple accepted answers with an AI second opinion, engine re-pinned to 0.13.0 (schema 1.8) for picture-choice image uploads.
+- **v2.3.0** - EXP-044 CSS concern-split (byte-identity gated), reworked lesson-player UX, listen-first audio exercises, hardened lesson/set import/export.
+- **v2.2.0** - an extension-exercise tier (four AI-authored types), native `multiple_choice`, lesson schema/types consumed from `learn-content-engine`, a federated content-repository registry.
+
+Also shipped: the **Content hub** redesign (Discover / My content /
+Import tabs, list/grid toggle, a compact search/filter bar), the full
+**lesson-mode system** (Practice / Exam / Timed / Reverse / Shuffle /
+Endless + train-errors), **cloze multiselect**, an exam-mode SRS
+interval boost, **passphrase-encrypted `.alk`** key export, and a
+single-primary-navigation cleanup (one nav per viewport).
+
+## Support this project
+
+Adaptive Learner is built and maintained by a single developer. If it
+helps you, donations are welcome and go directly into development
+time - see [`DONATE.md`](DONATE.md) ([`DONATE-de.md`](DONATE-de.md)
+for German) for all channels (GitHub Sponsors, Liberapay, Ko-fi,
+PayPal) and the reasoning behind them.
+
+## Origin
+
+The plugin-loader infrastructure, layered architecture, test
+discipline, and Python + React stack were extracted from
+[Bibliogon](https://github.com/astrapi69/bibliogon) v0.33.0 in
+March 2026. The Bibliogon book-domain models and plugins were
+removed; adaptive-learner has diverged on domain (learning
+sessions, curricula, assessment, AI integration) entirely. The
+launcher shape carries over; the application is a separate
+codebase.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

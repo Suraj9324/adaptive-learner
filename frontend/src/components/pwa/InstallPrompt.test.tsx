@@ -1,0 +1,212 @@
+import {act, fireEvent, render, screen, waitFor} from "@testing-library/react";
+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
+
+import InstallPrompt from "./InstallPrompt";
+
+/**
+ * Fake ``BeforeInstallPromptEvent`` — the real type is a
+ * browser-only API not present in happy-dom. We construct a
+ * plain Event + tack on the two methods the component uses.
+ */
+function fireBeforeInstallPrompt(
+    promptResult: "accepted" | "dismissed" = "accepted",
+) {
+    const ev = new Event("beforeinstallprompt") as Event & {
+        prompt: () => Promise<void>;
+        userChoice: Promise<{outcome: "accepted" | "dismissed"}>;
+    };
+    ev.prompt = vi.fn(() => Promise.resolve());
+    ev.userChoice = Promise.resolve({outcome: promptResult});
+    window.dispatchEvent(ev);
+    return ev;
+}
+
+describe("InstallPrompt", () => {
+    beforeEach(() => {
+        localStorage.clear();
+        // The install event is captured app-wide (lib/pwa/install); start
+        // every test without a captured one.
+        window.dispatchEvent(new Event("appinstalled"));
+    });
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it("renders nothing before the beforeinstallprompt event fires", () => {
+        render(<InstallPrompt />);
+        expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument();
+    });
+
+    it("shows when the event fired before it mounted (#3782)", async () => {
+        // The banner lives on the dashboard; the browser fires the event
+        // once, usually before the user reaches it.
+        fireBeforeInstallPrompt();
+        render(<InstallPrompt />);
+        expect(await screen.findByTestId("install-prompt")).toBeInTheDocument();
+    });
+
+    it("is a card in the page flow, never laid over the page (#3782)", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        const card = await screen.findByTestId("install-prompt");
+        const classes = card.className.split(/\s+/);
+        expect(classes.filter((c) => /^(fixed|absolute|sticky|z-|install-prompt$)/.test(c))).toEqual([]);
+    });
+
+    it("renders the banner after beforeinstallprompt fires", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        await waitFor(() =>
+            expect(screen.getByTestId("install-prompt")).toBeInTheDocument(),
+        );
+        expect(screen.getByTestId("install-prompt-install")).toBeInTheDocument();
+        expect(screen.getByTestId("install-prompt-dismiss")).toBeInTheDocument();
+    });
+
+    it("calling prompt() and accepted does NOT permanently dismiss", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt("accepted");
+        });
+        await screen.findByTestId("install-prompt");
+        await act(async () => {
+            fireEvent.click(screen.getByTestId("install-prompt-install"));
+        });
+        // The component hides because the prompt resolved + we
+        // cleared the deferred ref; but localStorage stays empty
+        // since the user ACCEPTED (so a future browser session
+        // could re-prompt if needed).
+        await waitFor(() =>
+            expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument(),
+        );
+        expect(localStorage.getItem("adaptive-learner.install_dismissed")).toBeNull();
+    });
+
+    it("native prompt dismissed → 7-day dismissal timestamp persisted", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt("dismissed");
+        });
+        await screen.findByTestId("install-prompt");
+        await act(async () => {
+            fireEvent.click(screen.getByTestId("install-prompt-install"));
+        });
+        await waitFor(() =>
+            expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument(),
+        );
+        const stored = localStorage.getItem("adaptive-learner.install_dismissed");
+        expect(Number(stored)).toBeGreaterThan(0);
+    });
+
+    it("clicking Later persists a dismissal timestamp", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        await screen.findByTestId("install-prompt");
+        fireEvent.click(screen.getByTestId("install-prompt-dismiss"));
+        await waitFor(() =>
+            expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument(),
+        );
+        const stored = localStorage.getItem("adaptive-learner.install_dismissed");
+        expect(Number.isFinite(Number(stored))).toBe(true);
+        expect(Number(stored)).toBeGreaterThan(0);
+    });
+
+    it("stays hidden within the 7-day dismissal window", async () => {
+        // Dismissed 1 day ago — still inside the 7-day window.
+        localStorage.setItem(
+            "adaptive-learner.install_dismissed",
+            String(Date.now() - 24 * 60 * 60 * 1000),
+        );
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument();
+    });
+
+    it("re-offers after the 7-day dismissal window expires", async () => {
+        // Dismissed 8 days ago — window expired, should re-offer.
+        localStorage.setItem(
+            "adaptive-learner.install_dismissed",
+            String(Date.now() - 8 * 24 * 60 * 60 * 1000),
+        );
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        await waitFor(() =>
+            expect(screen.getByTestId("install-prompt")).toBeInTheDocument(),
+        );
+    });
+
+    it("does NOT render when the app is already installed (standalone)", async () => {
+        const original = window.matchMedia;
+        window.matchMedia = vi.fn().mockImplementation((q: string) => ({
+            matches: q.includes("standalone"),
+            media: q,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            onchange: null,
+            dispatchEvent: vi.fn(),
+        })) as unknown as typeof window.matchMedia;
+        try {
+            render(<InstallPrompt />);
+            await act(async () => {
+                fireBeforeInstallPrompt();
+            });
+            expect(
+                screen.queryByTestId("install-prompt"),
+            ).not.toBeInTheDocument();
+        } finally {
+            window.matchMedia = original;
+        }
+    });
+
+    it("does NOT render again on remount when legacy-permanently dismissed", async () => {
+        localStorage.setItem("adaptive-learner.install_dismissed", "1");
+        const {rerender} = render(<InstallPrompt />);
+        // Even if the event fires, the dismissed flag wins.
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        // No re-render trigger from the event alone (the dismissed
+        // state was already true at mount); force a rerender to be
+        // safe.
+        rerender(<InstallPrompt />);
+        expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument();
+    });
+
+    it("hides when appinstalled event fires (user installed via browser UI)", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        await screen.findByTestId("install-prompt");
+        await act(async () => {
+            window.dispatchEvent(new Event("appinstalled"));
+        });
+        await waitFor(() =>
+            expect(screen.queryByTestId("install-prompt")).not.toBeInTheDocument(),
+        );
+    });
+
+    it("region has correct aria attributes", async () => {
+        render(<InstallPrompt />);
+        await act(async () => {
+            fireBeforeInstallPrompt();
+        });
+        const region = await screen.findByTestId("install-prompt");
+        expect(region.getAttribute("role")).toBe("region");
+        expect(region.getAttribute("aria-label")).toMatch(
+            /Install Adaptive Learner|Adaptive Learner installieren|Instalar Adaptive Learner|Installer Adaptive Learner|Εγκατάσταση Adaptive Learner/,
+        );
+    });
+});

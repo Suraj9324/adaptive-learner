@@ -1,0 +1,231 @@
+name: Deploy GitHub Pages
+
+# Phase 10G + 11G — publish the Dexie-mode frontend at the root
+# AND the MkDocs documentation site at /docs/ to GitHub Pages.
+# Gitflow (#334): this is the PRODUCTION site, so it deploys only on
+# push to main (main is written solely by release/* merges, so the
+# public site updates only on a release cut). The development version
+# is published separately to the preview host on every develop merge
+# (see deploy-preview.yml). Can also be run manually from the Actions
+# tab. Frontend uses the Dexie storage backend (no backend required);
+# docs are static MkDocs Material in DE + EN.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Defensive opt-in: any JavaScript-runtime action still declaring
+# Node 20 (third-party or stragglers) is coerced to Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # GH Pages serves the site under ``/<repo>/``. Vite's ``base``
+  # reads this env so every asset URL gets the right prefix.
+  VITE_BASE: "/adaptive-learner/"
+  # Force the Dexie storage backend on the deployed site; the
+  # storage factory falls back to ApiStorage when this is empty.
+  VITE_STORAGE_MODE: "dexie"
+  # No backend in the public deployment.
+  VITE_API_BASE: ""
+
+permissions:
+  # contents: write so the build job can auto-heal a stale README
+  # CONTENT-STATS block and push the fix back (issue #651).
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # full history for git-revision-date plugin in mkdocs
+
+      # Phase 62 (EXP-018 follow-up): the lesson content lives in the
+      # separate astrapi69/adaptive-learner-content repo. Check it out
+      # so copy-bundled-content.mjs can bundle it into the static site
+      # (offline-first). Without this step the build fails open and the
+      # deployed site ships with no bundled content.
+      - name: Check out content repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: astrapi69/adaptive-learner-content
+          path: adaptive-learner-content
+          ref: main
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Issue #47 + #651 — self-healing drift handling on the deploy path
+      # (the PR gate lives in ci.yml). The content repo is an independent
+      # moving target, so a content-repo growth would otherwise break the
+      # next deploy until someone manually regenerates the README block.
+      # Instead: if the README CONTENT-STATS block drifted, regenerate it,
+      # commit it as github-actions[bot] with [skip ci] (so the push does
+      # NOT trigger another deploy run -> no loop), push it back, and let
+      # the build continue with the corrected README.
+      - name: Auto-heal README content stats against the content repo
+        env:
+          ADAPTIVE_LEARNER_CONTENT_DIR: ${{ github.workspace }}/adaptive-learner-content
+        run: |
+          pip install pyyaml
+          if python3 scripts/validate_bundled_content.py --check-readme; then
+            echo "README CONTENT-STATS block already current."
+          else
+            echo "README CONTENT-STATS block is stale -> auto-healing."
+            python3 scripts/validate_bundled_content.py --write-readme
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            if git diff --cached --quiet; then
+              echo "Nothing staged after --write-readme; skipping commit."
+            else
+              git commit -m "docs: auto-update content stats [skip ci]"
+              # Non-fatal push: a corrected README is already in the working
+              # tree for THIS build, so the deploy never breaks even if the
+              # push is rejected (e.g. a concurrent push race). [skip ci]
+              # keeps the push from triggering another deploy run.
+              git push origin "HEAD:${{ github.ref_name }}" \
+                || echo "push rejected (non-fatal); README fixed locally for this build."
+            fi
+          fi
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      # ---- Frontend build ----
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Compute build metadata
+        run: |
+          echo "VITE_BUILD_HASH=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "VITE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          # #1172 — strand provenance. This is the PRODUCTION site (deploys
+          # only on push to main), so the strand is the stable "Haupt".
+          echo "VITE_BUILD_BRANCH=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          echo "VITE_BUILD_STRANG=haupt" >> "$GITHUB_ENV"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: bun run build
+        env:
+          # Point the bundled-content script at the content-repo
+          # checkout (above). Absolute path so it resolves
+          # independent of the frontend working-directory.
+          ADAPTIVE_LEARNER_CONTENT_DIR: ${{ github.workspace }}/adaptive-learner-content
+          # Build provenance shown in Settings -> About (the GH-Pages
+          # build runs Dexie mode, which has no backend git to read).
+          VITE_BUILD_HASH: ${{ env.VITE_BUILD_HASH }}
+          VITE_BUILD_DATE: ${{ env.VITE_BUILD_DATE }}
+          # #1172 — deployment-strand provenance (Haupt/production).
+          VITE_BUILD_BRANCH: ${{ env.VITE_BUILD_BRANCH }}
+          VITE_BUILD_STRANG: ${{ env.VITE_BUILD_STRANG }}
+
+      # The default SPA-router fallback for GH Pages is to copy
+      # index.html to 404.html. Without it, any direct hit on a
+      # nested route (``/dashboard``, ``/settings``) returns a
+      # GH-Pages 404 instead of letting React Router resolve the
+      # path client-side.
+      #
+      # #1713 — the SPA route ``/content`` is shadowed by the REAL
+      # ``content/`` directory (the bundled content assets): GH Pages
+      # 301-redirects ``/content`` to ``/content/`` and, with no
+      # index.html inside the directory, answers 404 (the 404.html
+      # fallback still renders the app, but the console logs
+      # ``content/:1 Failed to load resource: 404`` on every SW-less
+      # load of "Meine Inhalte"). A real SPA shell inside the
+      # directory makes ``/content/`` a proper 200 — the same
+      # mechanism the bundled ``docs/`` subtree relies on.
+      # Pages serves static files only, so an unmatched path answers with
+      # 404.html AND a 404 status. Giving every static route a real file
+      # turns those into 200s (#2543); the route list is derived from the
+      # router, so a new route is covered without editing this workflow.
+      # Runs AFTER the build on purpose: the copies must not enter the
+      # service worker's precache manifest.
+      # ``--set-pages`` adds one page per set the registry names, so a
+      # short set link (``/content/set/<id>``) answers 200 too (#3819).
+      - name: Configure SPA fallback
+        run: python3 scripts/emit_spa_route_pages.py --set-pages
+
+      # ---- Docs build ----
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: poetry install --no-interaction
+
+      - name: Generate MkDocs navigation from _meta.yaml
+        working-directory: docs
+        run: poetry run python ../scripts/generate_mkdocs_nav.py
+
+      - name: Build docs
+        working-directory: docs
+        # ``--site-dir`` is resolved by mkdocs relative to the
+        # CONFIG FILE'S directory (= repo root for -f ../mkdocs.yml),
+        # not the working directory. The earlier ``../frontend/...``
+        # path therefore landed one level ABOVE the repo (outside
+        # the checkout) and the docs never made it into the
+        # upload-pages-artifact bundle. Use the repo-root-relative
+        # path instead.
+        run: poetry run mkdocs build -f ../mkdocs.yml --site-dir frontend/dist/docs
+
+      # #3802: a docs site whose pages contact a third party on load is never
+      # published. The same scan runs on every pull request in ci.yml (Docs
+      # drift verifier); this one checks the very files the upload carries.
+      - name: Docs site fetches nothing from a third-party host (#3802)
+        run: python3 scripts/check_external_hosts.py frontend/dist/docs
+
+      # ---- Upload combined artifact ----
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: frontend/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    # Head-room over the deploy-pages timeout below so the job never kills
+    # the action mid-deploy (issue #1105).
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          # GitHub's Pages backend can hold a deployment in
+          # ``deployment_queued`` well past the action's default 10-minute
+          # timeout, aborting an otherwise-fine deploy ("Timeout reached,
+          # aborting!"). Give a slow-but-progressing deployment room to
+          # finish (issue #1105). Value is in milliseconds.
+          timeout: 1200000

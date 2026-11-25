@@ -1,0 +1,281 @@
+# Dead-Classname-Detektor - Startbestand / Tracking-Liste (#1491, Refs #1485).
+#
+# Jeder Eintrag ist ein CSS-Klassenname, der in einem className-Attribut
+# unter frontend/src VERWENDET wird, aber weder
+#   (a) in einer CSS-Datei unter frontend/src definiert ist, noch
+#   (b) eine emittierte Tailwind-Utility ist (Abgleich gegen das generierte
+#       Build-CSS, frontend/dist/assets/*.css).
+#
+# Diese Liste ist der eingefrorene Startbestand (Ratchet). Der Gate
+# (scripts/check-dead-classnames.py) schlaegt NUR bei NEUEN toten Klassen an,
+# die hier nicht stehen. Die Liste darf nur SCHRUMPFEN: sobald ein Eintrag
+# echt gefixt ist (Klasse definiert / korrekte Utility / entfernt), hier
+# loeschen - der Gate weist ueberzaehlige Eintraege als "Ratchet runter" aus.
+#
+# Bewusst extern gestylte Klassen (Fremd-Library-DOM wie floating-ui .popper
+# oder assistant-ui .aui-*) bleiben legitim hier stehen (Legitimierungsweg c).
+# Reihenfolge: alphabetisch. Ein Name pro Zeile, ohne fuehrenden Punkt.
+#
+# Regenerieren (nach einem VITE_STORAGE_MODE=dexie npm run build):
+#   python3 scripts/check-dead-classnames.py --list
+# Migration der Eintraege ist ein eigener Auftrag, NICHT Teil dieses Gates.
+#
+# Punkt-5-Pruefung (#2135, 2026-07-29): das Orakel ist das GEBAUTE
+# Tailwind-CSS (frontend/dist), also build- und Tailwind-versionsabhaengig -
+# deshalb laeuft dieses Gate in `make ci-full`, nicht in `make ci`. Eintraege
+# sind Namen, keine Zahlen; eine Toleranz ergibt hier keinen Sinn. GEPRUEFT.
+#
+# Orakel-Pin (#2138, entschieden 2026-07-31): dieses Orakel bleibt bewusst
+# UNgepinnt. Das gebaute Tailwind-CSS ist selbst der Pruefgegenstand - ein
+# Pin hielte die falsche Sache fest (er wuerde eine alte Toolchain als
+# "Wahrheit" einfrieren, waehrend die App laengst mit der neuen baut). Radon
+# im Complexity-Gate ist dagegen gepinnt (siehe .complexity-baseline).
+# Entscheidung nicht erneut aufwerfen; Aenderung nur mit neuem Beschluss.
+#
+# Paket-Scan (#2486, 2026-08-13): der Gate scannt jetzt zusaetzlich
+# node_modules/@astrapi69/{ai-key-vault-react,pwa-update-react}/dist
+# (PACKAGE_CONSUMER_FILES in check-dead-classnames.py) - der #2477-Vorfall
+# entstand, weil ein Dead-CSS-Audit nur frontend/src grepte und Paket-
+# konsumierte Klassen faelschlich fuer verwaist hielt. Der erste Lauf mit
+# Paket-Scan fand 6 neue Eintraege, alle einzeln verifiziert (siehe #2587).
+# In #2587 nachgemessen und aufgeloest - von den 5 "Styling-Luecken" waren
+# es zwei, in zwei verschiedenen Klassen, und drei Fehlbefunde:
+#   min-h-4 (ai-key-vault-react): KEINE fehlende Regel, sondern ein
+#   Content-Scan-Loch. Tailwind v4 steigt nie in node_modules ab (es ehrt
+#   .gitignore), also wurde eine NUR vom Paket benutzte Utility nicht
+#   erzeugt. Alle anderen Paket-Utilities (rounded-app, bg-accent-hover,
+#   text-accent-foreground, ...) existierten bloss, weil frontend/src sie
+#   zufaellig ebenfalls benutzt - Styling per Zufall, nicht per
+#   Konstruktion (Lektion "zufaellige Uebereinstimmung", #2265). Behoben
+#   ueber @source-Direktiven in styles/tailwind.css; der Rebuild emittiert
+#   danach genau min-h-4 zusaetzlich und nichts faellt weg. Eintrag hier
+#   geloescht.
+#   akv-secret-toggle (ai-key-vault-react): die einzige echte Luecke. Der
+#   Reveal-Toggle trug ausschliesslich Geometrie, keinerlei Hover-
+#   Affordance. Der vom Issue vermisste "Design-Input" stand im Repo: die
+#   projekteigene shared/forms/SecretInput.tsx ist die Referenz. Regel in
+#   styles/legacy/01-base.css neben dem .akv-file-input-Praezedenzfall
+#   (#2556); Eintrag hier geloescht.
+#   pwa-update-prompt-apply/dismiss/hint (pwa-update-react): KEINE Luecken.
+#   Nachgemessen am dist-Markup traegt jedes dieser Elemente aus demselben
+#   className bereits die vollstaendige Behandlung (apply: bg-accent +
+#   hover:bg-accent-hover + text-accent-foreground + min-h-[44px];
+#   dismiss: text-fg-secondary + hover:bg-bg-elevated + 44px-Trefferflaeche;
+#   hint: pl-6 + text-xs + text-fg-secondary). Der semantische Token ist
+#   ein optionaler Override-Anker fuer den Host, exakt die lp-edge-Form
+#   unten - kein Defekt, der auf einen Fix wartet. Bleiben hier auf
+#   Legitimierungsweg (c); sie brauchen KEINEN Design-Input.
+#   lp-edge (frontend/src/lib/learning-path/layout.ts:74): kein Fund im
+#   package-Sinn, sondern eine echte Erweiterung der Gate-Abdeckung - die
+#   className:-Objektsyntax (React-Flow-Edge-Daten, keine JSX) war vorher
+#   fuer den Gate unsichtbar (nur className= wurde erkannt). Der Basis-
+#   Token traegt bewusst keine eigene Regel, er tritt nie ohne einen der
+#   drei echten Modifikatoren auf (.lp-edge--completed/--upcoming/--
+#   adaptive, styles/legacy/42-learning-path.css:262+) - legitim hier
+#   eingetragen, kein Fix noetig.
+activity-trend
+adaptive-save-row
+adaptive-summary-improvement
+adaptive-transparency
+anki-card--suggested
+anki-empty
+answer-feedback-pulse
+api-key-required-compact
+api-key-required-notice
+api-key-source-file-hint
+backup-actions
+backup-auto
+backup-auto-count
+backup-auto-list
+backup-auto-toggle
+backup-auto-when
+backup-compare-empty
+backup-compare-section-changed
+backup-comparison
+backup-comparison-table
+backup-contents
+backup-contents-list
+backup-contents-title
+backup-contents-total
+backup-last
+backup-pressure
+backup-reminder
+backup-summary
+backup-summary-errors
+backup-summary-tables
+badge-tile--earned
+badge-widget-grid
+badge-widget-view-all
+card-csv-preview
+card-csv-preview-list
+card-csv-row
+card-editor-count
+card-editor-csv
+card-editor-form
+card-editor-list
+card-row
+card-row-action
+card-row-back
+card-row-front
+card-row-handle
+card-row-notes
+chat-welcome
+check-fail
+check-pass
+cloze-blank-diff
+content-ai-fix
+content-ai-intro
+content-contribution-date
+content-contribution-row
+content-contribution-status
+content-contribution-title
+content-contributions-list
+content-contributor-badge
+content-domain-sub
+content-level-own-count
+content-my-contributions
+content-my-lessons
+content-search-results
+content-section
+content-section-head
+content-section-title
+content-set-aicheck-btn
+content-set-quality-btn
+content-source-knowledge
+content-source-other
+content-source-primary
+correct
+create-lesson-checklist
+create-lesson-header
+create-lesson-nav
+create-lesson-step
+create-lesson-step-indicator
+create-lesson-summary
+create-lesson-templates
+curriculum-description
+curriculum-description-actions
+custom
+danger
+dashboard-create-lesson
+dashboard-filter-bar
+dashboard-filter-controls
+dashboard-filter-header
+dashboard-filter-results
+dashboard-filter-row
+dashboard-filter-tags
+dashboard-learning-path
+dashboard-project-item
+dashboard-project-list
+dashboard-quick-actions
+done
+error-replay-summary-score
+exercise-gen-config
+exercise-gen-count
+exercise-gen-list
+exercise-gen-type
+exercise-gen-types
+exercise-row
+exercise-row-desc
+exercise-row-type
+extra
+extra-hook
+focus-areas-hint-answers
+focus-areas-item
+focus-areas-key
+focus-areas-list
+focus-areas-mastery-split
+focus-areas-progress
+focus-areas-tags
+form-field
+form-select
+free-text-diff
+free-text-diff-row
+free-text-input-code
+help-drawer-body
+import-language-pickers
+in_progress
+is-dragging
+is-flash
+is-paired
+landing-checking
+learning-repo-actions
+learning-repo-body
+learning-repo-content
+learning-repo-header
+learning-repo-meta
+learning-repo-sidebar
+learning-repo-topic-group
+lesson-node-exercises
+lesson-node-star
+lesson-resources
+lesson-reviewed-fallback
+lesson-reviewed-prompt
+lesson-reviewed-status
+lesson-step-nav
+lesson-summary-breakdown-diff
+lesson-summary-diff
+lesson-summary-explanations
+lesson-summary-export-actions
+lesson-summary-share
+lp-edge
+mastered
+missed
+model-override-row-head
+na
+nav-avatar
+not_started
+onboarding-subject-suggestions
+onboarding-wizard
+page
+page-header
+page-import-detail
+pass
+picture-tile-skeleton
+popper
+profile-radar
+prose-sm
+provider-chip-model
+pwa-update-prompt-apply
+pwa-update-prompt-dismiss
+pwa-update-prompt-hint
+review-summary-note
+shadow-elevated
+share-wizard-author
+share-wizard-author-privacy
+share-wizard-breadcrumb
+share-wizard-celebration
+share-wizard-copy-body
+share-wizard-counts
+share-wizard-diff
+share-wizard-domain-hint
+share-wizard-dup-actions
+share-wizard-empty
+share-wizard-existing
+share-wizard-header
+share-wizard-metadata
+share-wizard-metadata-intro
+share-wizard-mode
+share-wizard-newset
+share-wizard-note
+share-wizard-overlap
+share-wizard-path
+share-wizard-placement
+share-wizard-placement-line
+share-wizard-pr-body
+share-wizard-pr-progress
+share-wizard-progress
+share-wizard-step1-errors
+share-wizard-thanks
+spaced-rec-body
+spaced-rec-meta
+spaced-rec-title
+spaced-recs
+streak-calendar--empty
+streak-calendar--loading
+taxonomy-chip-list
+template-card
+template-card-desc
+template-card-title
+template-cards
+user
+wrong

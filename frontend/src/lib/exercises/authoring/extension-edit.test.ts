@@ -1,0 +1,788 @@
+/**
+ * Tests for the extension blank-factory + validation (#1852).
+ */
+
+import {describe, expect, it} from "vitest";
+
+import {
+    CATEGORIZATION_EXT_TYPE,
+    DICTATION_EXT_TYPE,
+    ERROR_CORRECTION_EXT_TYPE,
+    GRADED_QUIZ_EXT_TYPE,
+    HOTSPOT_EXT_TYPE,
+    IMAGE_DESCRIPTION_EXT_TYPE,
+    ORDERING_EXT_TYPE,
+    PARSONS_EXT_TYPE,
+    READING_COMPREHENSION_EXT_TYPE,
+    SPEAK_AND_RECORD_EXT_TYPE,
+    createBlankExtensionExercise,
+    newExtensionExerciseId,
+    normalizeExtensionExercise,
+    validateExtensionExercise,
+} from "./extension-edit";
+import type {ContentLessonExercise} from "../../../storage/types";
+
+function rc(payload: unknown, prompt = "Read + answer"): ContentLessonExercise {
+    return {
+        id: "r1",
+        type: READING_COMPREHENSION_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function gq(payload: unknown, prompt = "Answer the quiz"): ContentLessonExercise {
+    return {
+        id: "q1",
+        type: GRADED_QUIZ_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+
+function cat(payload: unknown, prompt = "Sort the signals"): ContentLessonExercise {
+    return {
+        id: "c1",
+        type: CATEGORIZATION_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function ec(payload: unknown, prompt = "Fix the wrong word"): ContentLessonExercise {
+    return {
+        id: "e1",
+        type: ERROR_CORRECTION_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function dict(payload: unknown, prompt = "Type what you hear"): ContentLessonExercise {
+    return {
+        id: "d1",
+        type: DICTATION_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function img(payload: unknown, prompt = "Describe the image"): ContentLessonExercise {
+    return {
+        id: "i1",
+        type: IMAGE_DESCRIPTION_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function sar(payload: unknown, prompt = "Say it out loud"): ContentLessonExercise {
+    return {
+        id: "s1",
+        type: SPEAK_AND_RECORD_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function ord(payload: unknown, prompt = "Put the steps in order"): ContentLessonExercise {
+    return {
+        id: "o1",
+        type: ORDERING_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function pars(payload: unknown, prompt = "Arrange the code"): ContentLessonExercise {
+    return {
+        id: "p1",
+        type: PARSONS_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+function hot(payload: unknown, prompt = "Click the spot"): ContentLessonExercise {
+    return {
+        id: "h1",
+        type: HOTSPOT_EXT_TYPE,
+        prompt,
+        card_ids: [],
+        distractors: [],
+        ext_payload: payload,
+    } as ContentLessonExercise;
+}
+
+describe("newExtensionExerciseId", () => {
+    it("is unique + prefixed", () => {
+        const a = newExtensionExerciseId();
+        const b = newExtensionExerciseId();
+        expect(a).not.toBe(b);
+        expect(a.startsWith("ex-ext-")).toBe(true);
+    });
+});
+
+describe("createBlankExtensionExercise", () => {
+    it("categorization blank has two empty buckets and is invalid", () => {
+        const ex = createBlankExtensionExercise(CATEGORIZATION_EXT_TYPE, "c");
+        expect(ex.type).toBe(CATEGORIZATION_EXT_TYPE);
+        expect((ex.ext_payload as {categories: unknown[]}).categories).toHaveLength(2);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("error_correction blank has two empty tokens and is invalid", () => {
+        const ex = createBlankExtensionExercise(ERROR_CORRECTION_EXT_TYPE, "e");
+        expect(ex.type).toBe(ERROR_CORRECTION_EXT_TYPE);
+        expect((ex.ext_payload as {tokens: unknown[]}).tokens).toHaveLength(2);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("reading_comprehension blank has an empty passage + one question and is invalid", () => {
+        const ex = createBlankExtensionExercise(READING_COMPREHENSION_EXT_TYPE, "r");
+        expect(ex.type).toBe(READING_COMPREHENSION_EXT_TYPE);
+        const p = ex.ext_payload as {passage: string; questions: unknown[]};
+        expect(p.passage).toBe("");
+        expect(p.questions).toHaveLength(1);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("dictation blank has an empty audio + no accept and is invalid", () => {
+        const ex = createBlankExtensionExercise(DICTATION_EXT_TYPE, "d");
+        expect(ex.type).toBe(DICTATION_EXT_TYPE);
+        expect(ex.ext_payload).toEqual({audio: "", accept: []});
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("image_description blank has an empty image + no accept and is invalid", () => {
+        const ex = createBlankExtensionExercise(IMAGE_DESCRIPTION_EXT_TYPE, "i");
+        expect(ex.type).toBe(IMAGE_DESCRIPTION_EXT_TYPE);
+        expect(ex.ext_payload).toEqual({image: "", accept: []});
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("speak_and_record blank has an empty sentence and is invalid", () => {
+        const ex = createBlankExtensionExercise(SPEAK_AND_RECORD_EXT_TYPE, "s");
+        expect(ex.type).toBe(SPEAK_AND_RECORD_EXT_TYPE);
+        expect(ex.ext_payload).toEqual({sentence: ""});
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("graded_quiz blank has a threshold + one question with points and is invalid", () => {
+        const ex = createBlankExtensionExercise(GRADED_QUIZ_EXT_TYPE, "q");
+        expect(ex.type).toBe(GRADED_QUIZ_EXT_TYPE);
+        const p = ex.ext_payload as {
+            pass_threshold: number;
+            questions: {points: number}[];
+        };
+        expect(p.pass_threshold).toBe(60);
+        expect(p.questions[0].points).toBe(1);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("ordering blank has two empty items and is invalid", () => {
+        const ex = createBlankExtensionExercise(ORDERING_EXT_TYPE, "o");
+        expect(ex.type).toBe(ORDERING_EXT_TYPE);
+        expect(ex.ext_payload).toEqual({items: ["", ""]});
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("parsons blank has two empty lines and is invalid", () => {
+        const ex = createBlankExtensionExercise(PARSONS_EXT_TYPE, "p");
+        expect(ex.type).toBe(PARSONS_EXT_TYPE);
+        const p = ex.ext_payload as {lines: unknown[]};
+        expect(p.lines).toHaveLength(2);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+    it("hotspot blank has an empty image + two zones and is invalid", () => {
+        const ex = createBlankExtensionExercise(HOTSPOT_EXT_TYPE, "h");
+        expect(ex.type).toBe(HOTSPOT_EXT_TYPE);
+        const p = ex.ext_payload as {src: string; zones: unknown[]};
+        expect(p.src).toBe("");
+        expect(p.zones).toHaveLength(2);
+        expect(validateExtensionExercise(ex).valid).toBe(false);
+    });
+});
+
+describe("validateExtensionExercise — reading_comprehension", () => {
+    const valid = {
+        passage: "Rex ran into the garden and barked.",
+        questions: [
+            {
+                prompt: "Where did Rex run?",
+                type: "multiple_choice",
+                options: [
+                    {text: "The garden", correct: true},
+                    {text: "The street"},
+                ],
+            },
+            {prompt: "The dog's name?", type: "free_text", accept: ["Rex"]},
+        ],
+    };
+    it("accepts a well-formed passage + questions", () => {
+        expect(validateExtensionExercise(rc(valid)).valid).toBe(true);
+    });
+    it("rejects an empty passage", () => {
+        const res = validateExtensionExercise(rc({...valid, passage: "   "}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("reading_comprehension");
+    });
+    it("rejects a multiple_choice question with no correct option", () => {
+        const res = validateExtensionExercise(
+            rc({
+                passage: "text",
+                questions: [
+                    {
+                        prompt: "q",
+                        type: "multiple_choice",
+                        options: [{text: "a"}, {text: "b"}],
+                    },
+                ],
+            }),
+        );
+        expect(res.valid).toBe(false);
+    });
+    it("rejects a free_text question with no accepted answer", () => {
+        const res = validateExtensionExercise(
+            rc({
+                passage: "text",
+                questions: [{prompt: "q", type: "free_text", accept: []}],
+            }),
+        );
+        expect(res.valid).toBe(false);
+    });
+});
+
+describe("validateExtensionExercise — graded_quiz", () => {
+    const valid = {
+        pass_threshold: 60,
+        questions: [
+            {
+                prompt: "2+2?",
+                type: "multiple_choice",
+                options: [{text: "4", correct: true}, {text: "5"}],
+                points: 2,
+            },
+            {prompt: "Synonym for fast?", type: "free_text", accept: ["quick"], points: 3},
+        ],
+    };
+    it("accepts a well-formed quiz", () => {
+        expect(validateExtensionExercise(gq(valid)).valid).toBe(true);
+    });
+    it("rejects a non-positive points value", () => {
+        const res = validateExtensionExercise(
+            gq({
+                questions: [
+                    {
+                        prompt: "q",
+                        type: "multiple_choice",
+                        options: [{text: "a", correct: true}, {text: "b"}],
+                        points: 0,
+                    },
+                ],
+            }),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("graded_quiz");
+    });
+    it("rejects an out-of-range pass_threshold", () => {
+        const res = validateExtensionExercise(gq({...valid, pass_threshold: 140}));
+        expect(res.valid).toBe(false);
+    });
+});
+
+describe("validateExtensionExercise — categorization (reuses payload validator)", () => {
+    it("accepts >= 2 buckets, each with >= 1 unique item", () => {
+        const ex = cat({
+            categories: [
+                {name: "Sight", items: ["flat hand"]},
+                {name: "Sound", items: ["Sit", "Down"]},
+            ],
+        });
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects fewer than 2 categories", () => {
+        const res = validateExtensionExercise(
+            cat({categories: [{name: "Sight", items: ["a"]}]}),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("categorization");
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(
+            cat(
+                {
+                    categories: [
+                        {name: "A", items: ["x"]},
+                        {name: "B", items: ["y"]},
+                    ],
+                },
+                "  ",
+            ),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects an item shared across two buckets", () => {
+        const res = validateExtensionExercise(
+            cat({
+                categories: [
+                    {name: "A", items: ["dup"]},
+                    {name: "B", items: ["dup"]},
+                ],
+            }),
+        );
+        expect(res.valid).toBe(false);
+    });
+    it("rejects a blank category name (wizard-level rule beyond the payload validator)", () => {
+        const res = validateExtensionExercise(
+            cat({
+                categories: [
+                    {name: "  ", items: ["x"]},
+                    {name: "Sound", items: ["y"]},
+                ],
+            }),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("categorization");
+    });
+});
+
+describe("validateExtensionExercise — error_correction", () => {
+    it("accepts valid tokens/index/accept", () => {
+        const ex = ec({
+            tokens: ["The", "dog", "follow", "orders"],
+            error_index: 2,
+            accept: ["follows"],
+        });
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an out-of-range error_index", () => {
+        const res = validateExtensionExercise(
+            ec({tokens: ["a", "b"], error_index: 5, accept: ["x"]}),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("error_correction");
+    });
+    it("rejects a correction equal to the marked token", () => {
+        const res = validateExtensionExercise(
+            ec({tokens: ["a", "wrong"], error_index: 1, accept: ["wrong"]}),
+        );
+        expect(res.valid).toBe(false);
+    });
+});
+
+describe("normalizeExtensionExercise", () => {
+    it("trims + drops empty categories/items", () => {
+        const out = normalizeExtensionExercise(
+            cat(
+                {
+                    categories: [
+                        {name: " Sight ", items: [" flat hand ", " "]},
+                        {name: "Empty", items: ["  "]},
+                        {name: "Sound", items: ["Sit"]},
+                    ],
+                },
+                "  Sort  ",
+            ),
+        );
+        expect(out.prompt).toBe("Sort");
+        const cats = (out.ext_payload as {categories: {name: string; items: string[]}[]})
+            .categories;
+        expect(cats).toEqual([
+            {name: "Sight", items: ["flat hand"]},
+            {name: "Sound", items: ["Sit"]},
+        ]);
+    });
+    it("trims error_correction tokens in place (positional) + clamps index", () => {
+        const out = normalizeExtensionExercise(
+            ec({tokens: [" The ", " das "], error_index: 9, accept: [" dem ", " "]}),
+        );
+        const p = out.ext_payload as {
+            tokens: string[];
+            error_index: number;
+            accept: string[];
+        };
+        expect(p.tokens).toEqual(["The", "das"]);
+        expect(p.error_index).toBe(1);
+        expect(p.accept).toEqual(["dem"]);
+    });
+    it("reading_comprehension: trims passage + drops the unused question branch", () => {
+        const out = normalizeExtensionExercise(
+            rc(
+                {
+                    passage: "  A passage.  ",
+                    questions: [
+                        {
+                            prompt: "  q1  ",
+                            type: "multiple_choice",
+                            options: [
+                                {text: " A ", correct: true},
+                                {text: "", correct: false},
+                                {text: "B", correct: false},
+                            ],
+                            accept: ["leftover"],
+                        },
+                        {
+                            prompt: "q2",
+                            type: "free_text",
+                            options: [{text: "x", correct: true}],
+                            accept: [" Rex ", "  "],
+                        },
+                    ],
+                },
+                "  Read  ",
+            ),
+        );
+        expect(out.prompt).toBe("Read");
+        const p = out.ext_payload as {passage: string; questions: unknown[]};
+        expect(p.passage).toBe("A passage.");
+        expect(p.questions[0]).toEqual({
+            prompt: "q1",
+            type: "multiple_choice",
+            options: [
+                {text: "A", correct: true},
+                {text: "B", correct: false},
+            ],
+        });
+        expect(p.questions[1]).toEqual({
+            prompt: "q2",
+            type: "free_text",
+            accept: ["Rex"],
+        });
+    });
+    it("graded_quiz: carries points + partial_credit, drops the unused branch", () => {
+        const out = normalizeExtensionExercise(
+            gq({
+                pass_threshold: 70,
+                questions: [
+                    {
+                        prompt: "q1",
+                        type: "multiple_choice",
+                        options: [
+                            {text: "a", correct: true},
+                            {text: "b", correct: true},
+                        ],
+                        accept: ["x"],
+                        points: 4,
+                        partial_credit: true,
+                    },
+                ],
+            }),
+        );
+        const p = out.ext_payload as {
+            pass_threshold: number;
+            questions: Record<string, unknown>[];
+        };
+        expect(p.pass_threshold).toBe(70);
+        expect(p.questions[0]).toEqual({
+            prompt: "q1",
+            type: "multiple_choice",
+            options: [
+                {text: "a", correct: true},
+                {text: "b", correct: true},
+            ],
+            points: 4,
+            partial_credit: true,
+        });
+    });
+    it("dictation: trims the audio path + drops empty accept entries", () => {
+        const out = normalizeExtensionExercise(
+            dict(
+                {audio: "  assets/audio/one.mp3  ", accept: [" un ", "", "  "]},
+                "  Listen  ",
+            ),
+        );
+        expect(out.prompt).toBe("Listen");
+        expect(out.ext_payload).toEqual({
+            audio: "assets/audio/one.mp3",
+            accept: ["un"],
+        });
+    });
+});
+
+describe("validateExtensionExercise — dictation (reuses payload validator)", () => {
+    it("accepts a non-empty audio path + >= 1 accept entry", () => {
+        const ex = dict({audio: "assets/audio/one.mp3", accept: ["un"]});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(
+            dict({audio: "assets/audio/one.mp3", accept: ["un"]}, "   "),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects a missing/empty audio path", () => {
+        const res = validateExtensionExercise(dict({audio: "  ", accept: ["un"]}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("dictation");
+    });
+    it("rejects an empty accept list", () => {
+        const res = validateExtensionExercise(
+            dict({audio: "assets/audio/one.mp3", accept: []}),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("dictation");
+    });
+});
+
+describe("normalizeExtensionExercise — image_description", () => {
+    it("trims the image reference + drops empty accept entries", () => {
+        const out = normalizeExtensionExercise(
+            img(
+                {image: "  data:image/jpeg;base64,AAAA  ", accept: [" a cat ", "", "  "]},
+                "  Describe  ",
+            ),
+        );
+        expect(out.prompt).toBe("Describe");
+        expect(out.ext_payload).toEqual({
+            image: "data:image/jpeg;base64,AAAA",
+            accept: ["a cat"],
+        });
+    });
+
+    it("emits an ext_payload with no null/undefined keys and is idempotent (#1919)", () => {
+        // The #1919 reconstruction hands the SAVED payload back verbatim, and
+        // Save re-normalizes it: normalize(normalize(x)) must equal normalize(x),
+        // with every key concretely valued (never undefined) so API-mode
+        // ``exclude_none`` cannot serialize a rejected ``null``.
+        const once = normalizeExtensionExercise(
+            img({image: "assets/img/cat.png", accept: ["a cat"]}),
+        );
+        const twice = normalizeExtensionExercise(once);
+        expect(twice.ext_payload).toEqual(once.ext_payload);
+        const payload = once.ext_payload as Record<string, unknown>;
+        for (const value of Object.values(payload)) {
+            expect(value).not.toBeUndefined();
+            expect(value).not.toBeNull();
+        }
+    });
+});
+
+describe("validateExtensionExercise — image_description (reuses payload validator)", () => {
+    it("accepts a non-empty image + >= 1 accept entry", () => {
+        const ex = img({image: "assets/img/cat.png", accept: ["a cat"]});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(
+            img({image: "assets/img/cat.png", accept: ["a cat"]}, "   "),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects a missing/empty image", () => {
+        const res = validateExtensionExercise(img({image: "  ", accept: ["a cat"]}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("image_description");
+    });
+    it("rejects a remote image URL (offline-first)", () => {
+        const res = validateExtensionExercise(
+            img({image: "https://example.com/cat.png", accept: ["a cat"]}),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("image_description");
+    });
+    it("rejects an empty accept list", () => {
+        const res = validateExtensionExercise(
+            img({image: "assets/img/cat.png", accept: []}),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("image_description");
+    });
+});
+
+describe("normalizeExtensionExercise — speak_and_record", () => {
+    it("trims the sentence + drops an empty audio field", () => {
+        const out = normalizeExtensionExercise(
+            sar({sentence: "  Guten Tag  ", audio: "   "}, "  Speak  "),
+        );
+        expect(out.prompt).toBe("Speak");
+        expect(out.ext_payload).toEqual({sentence: "Guten Tag"});
+    });
+    it("trims + keeps a non-empty audio reference", () => {
+        const out = normalizeExtensionExercise(
+            sar({sentence: "  Guten Tag  ", audio: "  assets/audio/gt.mp3  "}),
+        );
+        expect(out.ext_payload).toEqual({
+            sentence: "Guten Tag",
+            audio: "assets/audio/gt.mp3",
+        });
+    });
+});
+
+describe("validateExtensionExercise — speak_and_record (reuses payload validator, ungraded)", () => {
+    it("accepts a non-empty sentence with no audio at all", () => {
+        const ex = sar({sentence: "Guten Tag"});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("accepts a non-empty sentence plus an optional audio reference", () => {
+        const ex = sar({sentence: "Guten Tag", audio: "assets/audio/gt.mp3"});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(sar({sentence: "Guten Tag"}, "   "));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects a missing/empty sentence", () => {
+        const res = validateExtensionExercise(sar({sentence: "   "}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("speak_and_record");
+    });
+});
+
+describe("explanation on the extension editor (#2992)", () => {
+    it("rejects an over-long explanation with the explanation code", () => {
+        const ex = sar({sentence: "Guten Tag"});
+        const res = validateExtensionExercise({
+            ...ex,
+            explanation: "x".repeat(2001),
+        });
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("explanation");
+    });
+
+    it("trims a kept explanation and drops a blank one on normalize", () => {
+        const ex = sar({sentence: "Guten Tag"});
+        expect(
+            normalizeExtensionExercise({...ex, explanation: " **Regel:** x "}).explanation,
+        ).toBe("**Regel:** x");
+        expect(
+            "explanation" in normalizeExtensionExercise({...ex, explanation: "  "}),
+        ).toBe(false);
+    });
+});
+
+describe("normalizeExtensionExercise — ordering (#3110)", () => {
+    it("trims + drops empty items", () => {
+        const out = normalizeExtensionExercise(
+            ord({items: [" Engage clutch ", "", "  Select gear  "]}, "  Order it  "),
+        );
+        expect(out.prompt).toBe("Order it");
+        expect(out.ext_payload).toEqual({items: ["Engage clutch", "Select gear"]});
+    });
+});
+
+describe("validateExtensionExercise — ordering (reuses payload validator, #3110)", () => {
+    it("accepts >= 2 unique items", () => {
+        const ex = ord({items: ["a", "b", "c"]});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(ord({items: ["a", "b"]}, "   "));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects fewer than 2 items", () => {
+        const res = validateExtensionExercise(ord({items: ["a"]}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("ordering");
+    });
+    it("rejects a duplicate item", () => {
+        const res = validateExtensionExercise(ord({items: ["a", "b", "a"]}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("ordering");
+    });
+});
+
+describe("normalizeExtensionExercise — parsons (#3110)", () => {
+    it("trims code + drops empty lines, keeps a non-empty language", () => {
+        const out = normalizeExtensionExercise(
+            pars(
+                {
+                    lines: [
+                        {code: "  def f():  ", indent: 0},
+                        {code: "  ", indent: 1},
+                        {code: "return 1", indent: 1},
+                    ],
+                    language: "  python  ",
+                },
+                "  Arrange  ",
+            ),
+        );
+        expect(out.prompt).toBe("Arrange");
+        expect(out.ext_payload).toEqual({
+            lines: [
+                {code: "def f():", indent: 0},
+                {code: "return 1", indent: 1},
+            ],
+            language: "python",
+        });
+    });
+
+    it("drops the language key entirely when blank", () => {
+        const out = normalizeExtensionExercise(
+            pars({lines: [{code: "a", indent: 0}, {code: "b", indent: 0}], language: "  "}),
+        );
+        expect(out.ext_payload).toEqual({
+            lines: [
+                {code: "a", indent: 0},
+                {code: "b", indent: 0},
+            ],
+        });
+    });
+});
+
+describe("validateExtensionExercise — parsons (reuses payload validator, #3110)", () => {
+    it("accepts >= 2 non-empty lines", () => {
+        const ex = pars({lines: [{code: "a", indent: 0}, {code: "b", indent: 1}]});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(
+            pars({lines: [{code: "a", indent: 0}, {code: "b", indent: 0}]}, "   "),
+        );
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects fewer than 2 lines", () => {
+        const res = validateExtensionExercise(pars({lines: [{code: "a", indent: 0}]}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("parsons");
+    });
+});
+
+describe("normalizeExtensionExercise — hotspot (#3110)", () => {
+    it("trims the src reference; zones pass through", () => {
+        const zones = [
+            {shape: "rect", coords: {x: 1, y: 1, width: 2, height: 2}, is_correct: "true"},
+            {shape: "circle", coords: {cx: 50, cy: 50, radius: 10}},
+        ];
+        const out = normalizeExtensionExercise(
+            hot({src: "  assets/img/map.png  ", zones}, "  Click it  "),
+        );
+        expect(out.prompt).toBe("Click it");
+        expect(out.ext_payload).toEqual({src: "assets/img/map.png", zones});
+    });
+});
+
+describe("validateExtensionExercise — hotspot (reuses payload validator, #3110)", () => {
+    const zones = [
+        {shape: "rect", coords: {x: 1, y: 1, width: 2, height: 2}, is_correct: "true"},
+        {shape: "circle", coords: {cx: 50, cy: 50, radius: 10}},
+    ];
+    it("accepts a non-empty src + >= 2 zones with exactly one correct", () => {
+        const ex = hot({src: "assets/img/map.png", zones});
+        expect(validateExtensionExercise(ex).valid).toBe(true);
+    });
+    it("rejects an empty prompt", () => {
+        const res = validateExtensionExercise(hot({src: "assets/img/map.png", zones}, "   "));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("prompt");
+    });
+    it("rejects a missing/empty src", () => {
+        const res = validateExtensionExercise(hot({src: "  ", zones}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("hotspot");
+    });
+    it("rejects zero correct zones", () => {
+        const noneCorrect = zones.map((z) => ({...z, is_correct: undefined}));
+        const res = validateExtensionExercise(hot({src: "assets/img/map.png", zones: noneCorrect}));
+        expect(res.valid).toBe(false);
+        expect(res.code).toBe("hotspot");
+    });
+});

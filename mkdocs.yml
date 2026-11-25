@@ -1,0 +1,684 @@
+site_name: Adaptive Learner
+site_description: Adaptive learning system based on the six-method learning model.
+site_url: https://astrapi69.github.io/adaptive-learner/docs/
+repo_url: https://github.com/astrapi69/adaptive-learner
+repo_name: astrapi69/adaptive-learner
+docs_dir: docs/help
+theme:
+  name: material
+  language: de
+  # #3802 - no page of this site contacts a third party on load. font: false
+  # keeps Material from linking Roboto from Google Fonts; the pages use the
+  # system font stack. custom_dir holds two overrides: partials/source.html
+  # keeps the repository link but not the widget that fetches release, stars
+  # and forks from api.github.com, and main.html gives browsers without
+  # ResizeObserver a stand-in, so Material never loads its polyfill from
+  # unpkg.com. The docs-third-party check of scripts/verify_docs.py pins all
+  # three; scripts/check_external_hosts.py scans the built site in CI.
+  font: false
+  custom_dir: docs/help-overrides
+  palette:
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  # #3843 - no search.highlight: it adds the search terms to every result
+  # link as ?h=, so a click sends them to GitHub Pages, while the privacy
+  # policy says they never leave the browser. search.share stays, it copies
+  # a link with the query only when the reader clicks share. Pinned by the
+  # docs-third-party check of scripts/verify_docs.py.
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - search.suggest
+    - search.share
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+  icon:
+    repo: fontawesome/brands/github
+edit_uri: edit/main/docs/help/
+# #2417 - Material's language selector requests <lang>/sitemap.xml per
+# alternate to map the current page onto its sister page; the i18n build
+# emits only the root sitemap. The hook splits it per language after
+# every build (local + CI), failing the build closed when the root
+# sitemap is missing or shapeless.
+hooks:
+  - scripts/mkdocs_split_sitemap.py
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        # AUTO-GENERATED-LANGUAGES-START (do not edit; regenerate via make sync-mkdocs-nav)
+        - locale: de
+          name: Deutsch
+          default: true
+          build: true
+        - locale: en
+          name: English
+          build: true
+          nav_translations:
+            Docker Desktop installieren: Install Docker Desktop
+            Desktop-Launcher starten: Start the desktop launcher
+            Den Port ändern: Changing the port
+            Benutzerhandbuch: User Guide
+            Erste Schritte: Getting started
+            App-Tutorial: App tutorial
+            Lerntyp-Test: Assessment
+            Lern-Session: Learning session
+            Lektionen und Wiederholungen: Lessons and reviews
+            Meine Lektionen: My Lessons
+            Lernpfad: Learning Path
+            Fortschritt: Progress
+            Einstellungen: Settings
+            Lob und Belohnungen: Praise and celebrations
+            Tägliche Missionen: Daily missions
+            KI-Inhaltsprüfung: AI content check
+            Feature-Übersicht: Feature overview
+            Content Browser: Content browser
+            Inhalte entdecken: Discover content
+            KI-Übungsgenerierung: AI exercise generation
+            Mehrere Content-Repositories: Multiple content repositories
+            Backup und Wiederherstellung: Backup and restore
+            Set-Abschluss-Übersicht: Set-completion review
+            Konzept: Concept
+            Philosophie: Philosophy
+            Die sechs Methoden: The six methods
+            Der Sieben-Schritt-Zyklus: The seven-step cycle
+            Werkzeuge: Tools
+            Entwickler-Dokumentation: Developer docs
+            Tore, Ratchets und Zweigschutz: Gates, ratchets, and branch protection
+            Architektur: Architecture
+            Plugin-Leitfaden: Plugin guide
+            Storage-Layer: Storage layer
+            Datenmodell: Data model
+            Theme-System: Theme system
+            Lektionen + SRS: Lessons + SRS
+            KI-Integration: AI integration
+            Testen: Testing
+            Belohnungs-Schicht: Celebration layer
+            Lektionsinhalte erstellen: Authoring lesson content
+            Neuen Aufgabentyp hinzufügen: Adding a new exercise type
+            Lektionsformat-Referenz: Lesson format reference
+            Release-Prozess: Release workflow
+            Für Content-Ersteller: For content creators
+            Überblick: Overview
+            Mentor-Modus: Mentor mode
+            Content-Repos: Content repos
+            Buchempfehlungen: Book recommendations
+            Design-Tokens: Design tokens
+            API-Referenz: API reference
+            Übersicht: Overview
+            Alle Endpoints: All endpoints
+            Core-Endpoints: Core endpoints
+            Plugin-Endpoints: Plugin endpoints
+            Modelle: Models
+            Rechtliches: Legal
+            Impressum: Legal notice
+            Datenschutzerklärung: Privacy policy
+        - locale: es
+          name: Español
+          build: true
+          nav_translations:
+            Installation: Instalación
+            Docker Desktop installieren: Instalar Docker Desktop
+            Desktop-Launcher starten: Iniciar el launcher de escritorio
+            Den Port ändern: Cambiar el puerto
+            Benutzerhandbuch: Guía del usuario
+            Erste Schritte: Primeros pasos
+            App-Tutorial: Tutorial de la app
+            Navigation: Navegación
+            Onboarding: Introducción
+            Lerntyp-Test: Evaluación
+            Lern-Session: Sesión de aprendizaje
+            Lektionen und Wiederholungen: Lecciones y repasos
+            Meine Lektionen: Mis lecciones
+            Lernpfad: Ruta de aprendizaje
+            Dashboard: Panel
+            Curriculum: Currículo
+            Fortschritt: Progreso
+            Einstellungen: Configuración
+            Lob und Belohnungen: Elogios y celebraciones
+            Tägliche Missionen: Misiones diarias
+            KI-Inhaltsprüfung: Verificación de contenido con IA
+            FAQ: Preguntas frecuentes
+            Features: Funciones
+            Feature-Übersicht: Resumen de funciones
+            Content Browser: Explorador de contenido
+            Inhalte entdecken: Descubrir contenido
+            KI-Übungsgenerierung: Generación de ejercicios con IA
+            Mehrere Content-Repositories: Varios repositorios de contenido
+            Backup und Wiederherstellung: Copia de seguridad y restauración
+            Set-Abschluss-Übersicht: Resumen de finalización de set
+            Konzept: Concepto
+            Philosophie: Filosofía
+            Die sechs Methoden: Los seis métodos
+            Der Sieben-Schritt-Zyklus: El ciclo de siete pasos
+            Tracking: Seguimiento
+            Werkzeuge: Herramientas
+            Entwickler-Dokumentation: Documentación para desarrolladores
+            Tore, Ratchets und Zweigschutz: Puertas, trinquetes y protección de rama
+            Architektur: Arquitectura
+            Setup: Configuración inicial
+            Plugin-Leitfaden: Guía de plugins
+            Storage-Layer: Capa de almacenamiento
+            Datenmodell: Modelo de datos
+            Theme-System: Sistema de temas
+            Lektionen + SRS: Lecciones + SRS
+            KI-Integration: Integración de IA
+            Testen: Pruebas
+            Belohnungs-Schicht: Capa de celebración
+            Deployment: Despliegue
+            Lektionsinhalte erstellen: Crear contenido de lecciones
+            Neuen Aufgabentyp hinzufügen: Añadir un tipo de ejercicio
+            Lektionsformat-Referenz: Referencia del formato de lección
+            Release-Prozess: Flujo de publicación
+            Für Content-Ersteller: Para creadores de contenido
+            Überblick: Visión general
+            Mentor-Modus: Modo mentor
+            Content-Repos: Repositorios de contenido
+            Buchempfehlungen: Recomendaciones de libros
+            Design-Tokens: Tokens de diseño
+            Sync: Sincronización
+            API-Referenz: Referencia de la API
+            Übersicht: Visión general
+            Alle Endpoints: Todos los endpoints
+            Core-Endpoints: Endpoints principales
+            Plugin-Endpoints: Endpoints de plugins
+            Modelle: Modelos
+            Rechtliches: Aviso legal
+            Impressum: Aviso legal
+            Datenschutzerklärung: Política de privacidad
+        - locale: fr
+          name: Français
+          build: true
+          nav_translations:
+            Docker Desktop installieren: Installer Docker Desktop
+            Desktop-Launcher starten: Démarrer le launcher de bureau
+            Den Port ändern: Changer de port
+            Benutzerhandbuch: Guide de l'utilisateur
+            Erste Schritte: Premiers pas
+            App-Tutorial: Tutoriel de l'app
+            Onboarding: Intégration
+            Lerntyp-Test: Évaluation
+            Lern-Session: Session d'apprentissage
+            Lektionen und Wiederholungen: Leçons et révisions
+            Meine Lektionen: Mes leçons
+            Lernpfad: Parcours d'apprentissage
+            Dashboard: Tableau de bord
+            Fortschritt: Progression
+            Einstellungen: Paramètres
+            Lob und Belohnungen: Encouragements et célébrations
+            Tägliche Missionen: Missions quotidiennes
+            KI-Inhaltsprüfung: Vérification de contenu par IA
+            Features: Fonctionnalités
+            Feature-Übersicht: Aperçu des fonctionnalités
+            Content Browser: Explorateur de contenu
+            Inhalte entdecken: Découvrir du contenu
+            KI-Übungsgenerierung: Génération d'exercices par IA
+            Mehrere Content-Repositories: Plusieurs dépôts de contenu
+            Backup und Wiederherstellung: Sauvegarde et restauration
+            Set-Abschluss-Übersicht: Bilan de fin de set
+            Konzept: Concept
+            Die sechs Methoden: Les six méthodes
+            Der Sieben-Schritt-Zyklus: Le cycle en sept étapes
+            Tracking: Suivi
+            Werkzeuge: Outils
+            Entwickler-Dokumentation: Documentation développeur
+            Tore, Ratchets und Zweigschutz: Barrières, cliquets et protection de branche
+            Architektur: Architecture
+            Setup: Installation
+            Plugin-Leitfaden: Guide des plugins
+            Storage-Layer: Couche de stockage
+            Datenmodell: Modèle de données
+            Theme-System: Système de thèmes
+            Lektionen + SRS: Leçons + SRS
+            KI-Integration: Intégration de l'IA
+            Testen: Tests
+            Belohnungs-Schicht: Couche de célébration
+            Deployment: Déploiement
+            Lektionsinhalte erstellen: Création de contenu de leçon
+            Neuen Aufgabentyp hinzufügen: Ajouter un type d'exercice
+            Lektionsformat-Referenz: Référence du format de leçon
+            Release-Prozess: Processus de publication
+            Für Content-Ersteller: Pour les créateurs de contenu
+            Überblick: Vue d'ensemble
+            Mentor-Modus: Mode mentor
+            Content-Repos: Dépôts de contenu
+            Buchempfehlungen: Recommandations de livres
+            Design-Tokens: Jetons de design
+            Sync: Synchronisation
+            API-Referenz: Référence de l'API
+            Übersicht: Vue d'ensemble
+            Alle Endpoints: Tous les endpoints
+            Core-Endpoints: Endpoints principaux
+            Plugin-Endpoints: Endpoints des plugins
+            Modelle: Modèles
+            Rechtliches: Mentions légales
+            Impressum: Mentions légales
+            Datenschutzerklärung: Politique de confidentialité
+        - locale: el
+          name: Ελληνικά
+          build: true
+          nav_translations:
+            Installation: Εγκατάσταση
+            Docker Desktop installieren: Εγκατάσταση Docker Desktop
+            Desktop-Launcher starten: Εκκίνηση του Desktop-Launcher
+            Den Port ändern: Αλλαγή θύρας
+            Benutzerhandbuch: Οδηγός χρήσης
+            Erste Schritte: Ξεκινώντας
+            App-Tutorial: Οδηγός εφαρμογής
+            Navigation: Πλοήγηση
+            Onboarding: Εισαγωγή
+            Lerntyp-Test: Αξιολόγηση
+            Lern-Session: Συνεδρία μάθησης
+            Lektionen und Wiederholungen: Μαθήματα και επαναλήψεις
+            Meine Lektionen: Τα μαθήματά μου
+            Lernpfad: Μαθησιακή διαδρομή
+            Dashboard: Πίνακας ελέγχου
+            Curriculum: Πρόγραμμα σπουδών
+            Fortschritt: Πρόοδος
+            Einstellungen: Ρυθμίσεις
+            Lob und Belohnungen: Έπαινος και γιορτές
+            Tägliche Missionen: Καθημερινές αποστολές
+            KI-Inhaltsprüfung: Έλεγχος περιεχομένου με AI
+            FAQ: Συχνές ερωτήσεις
+            Features: Λειτουργίες
+            Feature-Übersicht: Επισκόπηση λειτουργιών
+            Content Browser: Περιήγηση περιεχομένου
+            Inhalte entdecken: Ανακάλυψη περιεχομένου
+            KI-Übungsgenerierung: Δημιουργία ασκήσεων με AI
+            Mehrere Content-Repositories: Πολλαπλά αποθετήρια περιεχομένου
+            Backup und Wiederherstellung: Αντίγραφο ασφαλείας και επαναφορά
+            Set-Abschluss-Übersicht: Επισκόπηση ολοκλήρωσης σετ
+            Konzept: Έννοια
+            Philosophie: Φιλοσοφία
+            Die sechs Methoden: Οι έξι μέθοδοι
+            Der Sieben-Schritt-Zyklus: Ο κύκλος επτά βημάτων
+            Tracking: Παρακολούθηση
+            Werkzeuge: Εργαλεία
+            Entwickler-Dokumentation: Τεκμηρίωση προγραμματιστή
+            Tore, Ratchets und Zweigschutz: Πύλες, καστάνιες και προστασία κλάδου
+            Architektur: Αρχιτεκτονική
+            Setup: Εγκατάσταση
+            Plugin-Leitfaden: Οδηγός προσθέτων
+            Storage-Layer: Επίπεδο αποθήκευσης
+            Datenmodell: Μοντέλο δεδομένων
+            Theme-System: Σύστημα θεμάτων
+            Lektionen + SRS: Μαθήματα + SRS
+            KI-Integration: Ενσωμάτωση AI
+            Testen: Δοκιμές
+            Belohnungs-Schicht: Επίπεδο γιορτής
+            Deployment: Ανάπτυξη
+            Lektionsinhalte erstellen: Δημιουργία περιεχομένου μαθημάτων
+            Neuen Aufgabentyp hinzufügen: Προσθήκη νέου τύπου άσκησης
+            Lektionsformat-Referenz: Αναφορά μορφής μαθήματος
+            Release-Prozess: Ροή έκδοσης
+            Für Content-Ersteller: Για δημιουργούς περιεχομένου
+            Überblick: Επισκόπηση
+            Mentor-Modus: Λειτουργία μέντορα
+            Content-Repos: Αποθετήρια περιεχομένου
+            Buchempfehlungen: Προτάσεις βιβλίων
+            Design-Tokens: Design tokens
+            Sync: Συγχρονισμός
+            API-Referenz: Αναφορά API
+            Übersicht: Επισκόπηση
+            Alle Endpoints: Όλα τα endpoints
+            Core-Endpoints: Βασικά endpoints
+            Plugin-Endpoints: Endpoints προσθέτων
+            Modelle: Μοντέλα
+            Rechtliches: Νομικά
+            Impressum: Στοιχεία εκδότη
+            Datenschutzerklärung: Πολιτική απορρήτου
+        - locale: pt
+          name: Português
+          build: true
+          nav_translations:
+            Installation: Instalação
+            Docker Desktop installieren: Instalar o Docker Desktop
+            Desktop-Launcher starten: Iniciar o launcher de desktop
+            Den Port ändern: Mudar a porta
+            Benutzerhandbuch: Guia do usuário
+            Erste Schritte: Primeiros passos
+            App-Tutorial: Tutorial do app
+            Navigation: Navegação
+            Onboarding: Integração
+            Lerntyp-Test: Avaliação
+            Lern-Session: Sessão de aprendizagem
+            Lektionen und Wiederholungen: Lições e revisões
+            Meine Lektionen: Minhas lições
+            Lernpfad: Caminho de aprendizagem
+            Dashboard: Painel
+            Curriculum: Currículo
+            Fortschritt: Progresso
+            Einstellungen: Configurações
+            Lob und Belohnungen: Elogios e celebrações
+            Tägliche Missionen: Missões diárias
+            KI-Inhaltsprüfung: Verificação de conteúdo por IA
+            FAQ: Perguntas frequentes
+            Features: Funcionalidades
+            Feature-Übersicht: Visão geral das funcionalidades
+            Content Browser: Explorador de conteúdo
+            Inhalte entdecken: Descobrir conteúdo
+            KI-Übungsgenerierung: Geração de exercícios por IA
+            Mehrere Content-Repositories: Múltiplos repositórios de conteúdo
+            Backup und Wiederherstellung: Backup e restauração
+            Set-Abschluss-Übersicht: Revisão de conclusão de set
+            Konzept: Conceito
+            Philosophie: Filosofia
+            Die sechs Methoden: Os seis métodos
+            Der Sieben-Schritt-Zyklus: O ciclo de sete passos
+            Tracking: Acompanhamento
+            Werkzeuge: Ferramentas
+            Entwickler-Dokumentation: Documentação do desenvolvedor
+            Tore, Ratchets und Zweigschutz: Portões, catracas e proteção de branch
+            Architektur: Arquitetura
+            Setup: Configuração
+            Plugin-Leitfaden: Guia de plugins
+            Storage-Layer: Camada de armazenamento
+            Datenmodell: Modelo de dados
+            Theme-System: Sistema de temas
+            Lektionen + SRS: Lições + SRS
+            KI-Integration: Integração de IA
+            Testen: Testes
+            Belohnungs-Schicht: Camada de celebração
+            Deployment: Implantação
+            Lektionsinhalte erstellen: Criar conteúdo de lições
+            Neuen Aufgabentyp hinzufügen: Adicionar um tipo de exercício
+            Lektionsformat-Referenz: Referência do formato de lição
+            Release-Prozess: Fluxo de lançamento
+            Für Content-Ersteller: Para criadores de conteúdo
+            Überblick: Visão geral
+            Mentor-Modus: Modo mentor
+            Content-Repos: Repositórios de conteúdo
+            Buchempfehlungen: Recomendações de livros
+            Design-Tokens: Tokens de design
+            Sync: Sincronização
+            API-Referenz: Referência da API
+            Übersicht: Visão geral
+            Alle Endpoints: Todos os endpoints
+            Core-Endpoints: Endpoints principais
+            Plugin-Endpoints: Endpoints de plugins
+            Modelle: Modelos
+            Rechtliches: Informação legal
+            Impressum: Ficha técnica
+            Datenschutzerklärung: Política de privacidade
+        - locale: tr
+          name: Türkçe
+          build: true
+          nav_translations:
+            Installation: Kurulum
+            Docker Desktop installieren: Docker Desktop kurulumu
+            Desktop-Launcher starten: Masaüstü launcher'ı başlatma
+            Den Port ändern: Bağlantı noktasını değiştirme
+            Benutzerhandbuch: Kullanıcı kılavuzu
+            Erste Schritte: Başlarken
+            App-Tutorial: Uygulama eğitimi
+            Navigation: Gezinme
+            Onboarding: Başlangıç kurulumu
+            Lerntyp-Test: Değerlendirme
+            Lern-Session: Öğrenme oturumu
+            Lektionen und Wiederholungen: Dersler ve tekrarlar
+            Meine Lektionen: Derslerim
+            Lernpfad: Öğrenme yolu
+            Dashboard: Panel
+            Curriculum: Müfredat
+            Fortschritt: İlerleme
+            Einstellungen: Ayarlar
+            Lob und Belohnungen: Övgü ve kutlamalar
+            Tägliche Missionen: Günlük görevler
+            KI-Inhaltsprüfung: Yapay zekâ ile içerik denetimi
+            FAQ: SSS
+            Features: Özellikler
+            Feature-Übersicht: Özelliklere genel bakış
+            Content Browser: İçerik tarayıcı
+            Inhalte entdecken: İçerik keşfet
+            KI-Übungsgenerierung: Yapay zekâ ile alıştırma üretimi
+            Mehrere Content-Repositories: Birden çok içerik deposu
+            Backup und Wiederherstellung: Yedekleme ve geri yükleme
+            Set-Abschluss-Übersicht: Set tamamlama incelemesi
+            Konzept: Kavram
+            Philosophie: Felsefe
+            Die sechs Methoden: Altı yöntem
+            Der Sieben-Schritt-Zyklus: Yedi adımlı döngü
+            Tracking: Takip
+            Werkzeuge: Araçlar
+            Entwickler-Dokumentation: Geliştirici belgeleri
+            Tore, Ratchets und Zweigschutz: Kapılar, cırcırlar ve dal koruması
+            Architektur: Mimari
+            Setup: Kurulum
+            Plugin-Leitfaden: Eklenti kılavuzu
+            Storage-Layer: Depolama katmanı
+            Datenmodell: Veri modeli
+            Theme-System: Tema sistemi
+            Lektionen + SRS: Dersler + SRS
+            KI-Integration: Yapay zekâ entegrasyonu
+            Testen: Test
+            Belohnungs-Schicht: Kutlama katmanı
+            Deployment: Dağıtım
+            Lektionsinhalte erstellen: Ders içeriği oluşturma
+            Neuen Aufgabentyp hinzufügen: Yeni alıştırma türü ekleme
+            Lektionsformat-Referenz: Ders biçimi başvurusu
+            Release-Prozess: Yayın süreci
+            Für Content-Ersteller: İçerik oluşturanlar için
+            Überblick: Genel bakış
+            Mentor-Modus: Mentor modu
+            Content-Repos: İçerik depoları
+            Buchempfehlungen: Kitap önerileri
+            Design-Tokens: Tasarım token'ları
+            Sync: Senkronizasyon
+            API-Referenz: API başvurusu
+            Übersicht: Genel bakış
+            Alle Endpoints: Tüm endpoint'ler
+            Core-Endpoints: Temel endpoint'ler
+            Plugin-Endpoints: Eklenti endpoint'leri
+            Modelle: Modeller
+            Rechtliches: Yasal bilgiler
+            Impressum: Künye
+            Datenschutzerklärung: Gizlilik politikası
+        - locale: ja
+          name: 日本語
+          build: true
+          nav_translations:
+            Installation: インストール
+            Docker Desktop installieren: Docker Desktop のインストール
+            Desktop-Launcher starten: デスクトップランチャーの起動
+            Den Port ändern: ポートの変更
+            Benutzerhandbuch: ユーザーガイド
+            Erste Schritte: はじめに
+            App-Tutorial: アプリチュートリアル
+            Navigation: ナビゲーション
+            Onboarding: オンボーディング
+            Lerntyp-Test: 評価
+            Lern-Session: 学習セッション
+            Lektionen und Wiederholungen: レッスンと復習
+            Meine Lektionen: マイレッスン
+            Lernpfad: 学習パス
+            Dashboard: ダッシュボード
+            Curriculum: カリキュラム
+            Fortschritt: 進捗
+            Einstellungen: 設定
+            Lob und Belohnungen: 称賛とお祝い
+            Tägliche Missionen: デイリーミッション
+            KI-Inhaltsprüfung: AIコンテンツチェック
+            FAQ: よくある質問
+            Features: 機能
+            Feature-Übersicht: 機能の概要
+            Content Browser: コンテンツブラウザ
+            Inhalte entdecken: コンテンツを探す
+            KI-Übungsgenerierung: AI演習生成
+            Mehrere Content-Repositories: 複数のコンテンツリポジトリ
+            Backup und Wiederherstellung: バックアップと復元
+            Arcade: アーケード
+            Set-Abschluss-Übersicht: セット完了レビュー
+            Konzept: コンセプト
+            Philosophie: 理念
+            Die sechs Methoden: 6つのメソッド
+            Der Sieben-Schritt-Zyklus: 7ステップのサイクル
+            Tracking: トラッキング
+            Werkzeuge: ツール
+            Entwickler-Dokumentation: 開発者ドキュメント
+            Tore, Ratchets und Zweigschutz: ゲート、ラチェット、ブランチ保護
+            Architektur: アーキテクチャ
+            Setup: セットアップ
+            Plugin-Leitfaden: プラグインガイド
+            Storage-Layer: ストレージレイヤー
+            Datenmodell: データモデル
+            Theme-System: テーマシステム
+            Lektionen + SRS: レッスン + SRS
+            KI-Integration: AI統合
+            Testen: テスト
+            Belohnungs-Schicht: お祝いレイヤー
+            Deployment: デプロイ
+            Lektionsinhalte erstellen: レッスンコンテンツの作成
+            Neuen Aufgabentyp hinzufügen: 新しい演習タイプの追加
+            Lektionsformat-Referenz: レッスン形式リファレンス
+            Release-Prozess: リリースワークフロー
+            Für Content-Ersteller: コンテンツ作成者向け
+            Überblick: 概要
+            Mentor-Modus: メンターモード
+            Content-Repos: コンテンツリポジトリ
+            Buchempfehlungen: 書籍の推薦
+            Design-Tokens: デザイントークン
+            Sync: 同期
+            API-Referenz: APIリファレンス
+            Übersicht: 概要
+            Alle Endpoints: 全エンドポイント
+            Core-Endpoints: コアエンドポイント
+            Plugin-Endpoints: プラグインエンドポイント
+            Modelle: モデル
+            Hooks: フック
+            Rechtliches: 法的情報
+            Impressum: 運営者情報
+            Datenschutzerklärung: プライバシーポリシー
+            Changelog: 変更履歴
+        # AUTO-GENERATED-LANGUAGES-END
+# #3800 - Mermaid is served from this site, a pinned copy of the npm release
+# (mermaid@11.17.2, dist/mermaid.min.js, checked by
+# scripts/verify_mermaid_blocks.mjs). With it loaded, Material never falls
+# back to its CDN, so the docs site gains no foreign host.
+extra_javascript:
+  - assets/javascripts/mermaid-11.17.2.min.js
+
+# #3828: wide diagrams scroll inside their block (assets/stylesheets/extra.css).
+extra_css:
+  - assets/stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.details
+  # #3800 - ```mermaid blocks become <pre class="mermaid">, which Material
+  # renders with the Mermaid loaded through extra_javascript below.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+nav:
+- Home: de/index.md
+# AUTO-GENERATED-NAV-START (do not edit; regenerate via make sync-mkdocs-nav)
+- Installation:
+  - Docker Desktop installieren: de/install/docker-desktop.md
+  - Desktop-Launcher starten: de/install/launcher.md
+  - Den Port ändern: de/install/changing-the-port.md
+- Benutzerhandbuch:
+  - Erste Schritte: de/user-guide/getting-started.md
+  - App-Tutorial: de/user-guide/app-tutorial.md
+  - Navigation: de/user-guide/navigation.md
+  - Onboarding: de/user-guide/onboarding.md
+  - Lerntyp-Test: de/user-guide/assessment.md
+  - Lern-Session: de/user-guide/learning-session.md
+  - Lektionen und Wiederholungen: de/user-guide/lessons.md
+  - Meine Lektionen: de/user-guide/my-lessons.md
+  - Lernpfad: de/user-guide/learning-path.md
+  - Dashboard: de/user-guide/dashboard.md
+  - Curriculum: de/user-guide/curriculum.md
+  - Fortschritt: de/user-guide/progress.md
+  - Einstellungen: de/user-guide/settings.md
+  - Lob und Belohnungen: de/user-guide/celebrations.md
+  - Tägliche Missionen: de/user-guide/missions.md
+  - KI-Inhaltsprüfung: de/user-guide/ai-validation.md
+  - FAQ: de/user-guide/faq.md
+- Features:
+  - Feature-Übersicht: de/features/overview.md
+  - Content Browser: de/features/content-browser.md
+  - Inhalte entdecken: de/features/discover.md
+  - KI-Übungsgenerierung: de/features/ai-exercise-generation.md
+  - Mehrere Content-Repositories: de/features/content-repos.md
+  - Backup und Wiederherstellung: de/features/backup.md
+  - Arcade: de/features/arcade.md
+  - Set-Abschluss-Übersicht: de/features/set-summary.md
+- Konzept:
+  - Philosophie: de/concept/philosophy.md
+  - Die sechs Methoden: de/concept/six-methods.md
+  - Der Sieben-Schritt-Zyklus: de/concept/seven-steps.md
+  - Tracking: de/concept/tracking.md
+  - Werkzeuge: de/concept/tools.md
+- Entwickler-Dokumentation:
+  - Onboarding: de/developer/onboarding.md
+  - Tore, Ratchets und Zweigschutz: de/developer/gates-and-ratchets.md
+  - Architektur: de/developer/architecture.md
+  - Setup: de/developer/setup.md
+  - Plugin-Leitfaden: de/developer/plugin-guide.md
+  - Storage-Layer: de/developer/storage-layer.md
+  - Datenmodell: de/developer/data-model.md
+  - Theme-System: de/developer/themes.md
+  - Lektionen + SRS: de/developer/lessons-and-srs.md
+  - KI-Integration: de/developer/ai-integration.md
+  - Testen: de/developer/testing.md
+  - Belohnungs-Schicht: de/developer/celebrations.md
+  - Tägliche Missionen: de/developer/missions.md
+  - Deployment: de/developer/deployment.md
+  - i18n: de/developer/i18n.md
+  - Lektionsinhalte erstellen: de/developer/authoring-content.md
+  - Neuen Aufgabentyp hinzufügen: de/developer/adding-exercise-type.md
+  - Lektionsformat-Referenz: de/developer/lesson-format-reference.md
+  - Release-Prozess: de/developer/release.md
+- Für Content-Ersteller:
+  - Überblick: de/content-creation/overview.md
+  - Mentor-Modus: de/content-creation/mentor-mode.md
+  - Content-Repos: de/content-creation/content-repos.md
+  - Buchempfehlungen: de/content-creation/books.md
+- Architektur:
+  - Design-Tokens: de/architecture/design-tokens.md
+  - Sync: de/architecture/sync.md
+- API-Referenz:
+  - Übersicht: de/api/overview.md
+  - Alle Endpoints: de/api/endpoints.md
+  - Core-Endpoints: de/api/core-endpoints.md
+  - Plugin-Endpoints: de/api/plugin-endpoints.md
+  - Modelle: de/api/models.md
+  - Hooks: de/api/hooks.md
+- Rechtliches:
+  - Impressum: de/legal/imprint.md
+  - Datenschutzerklärung: de/legal/privacy.md
+- Changelog: de/changelog.md
+# AUTO-GENERATED-NAV-END

@@ -1,0 +1,363 @@
+# Adaptive Learner — Help glossary: App features (English).
+
+category: features
+language: en
+entries:
+  - key: feature_method_switch
+    title: Method Switch
+    short: "The system recommends a different method when you stagnate - you decide whether to switch."
+    long: |
+      ## What is the method switch?
+
+      If your learning stagnates in a method while it causes
+      high stress, Adaptive Learner suggests a method switch.
+      You see the suggestion as a banner above the session
+      chat and can accept or dismiss it.
+
+      ## When the suggestion fires
+
+      The rule looks at your last three session ratings. Both
+      conditions must hold:
+
+      - **No progress in understanding**: the three
+        understanding scores do not rise (the same score three
+        times counts as stagnant).
+      - **Average stress above 3** (on the 1-5 scale) across
+        the same three ratings.
+
+      With fewer than three ratings there is no suggestion. A
+      difficult phase that still shows progress, or stagnation
+      without stress, does not trigger it.
+
+      ## Which method is suggested
+
+      The method with the highest weight in your learning
+      profile that you have not used recently. Without a
+      profile, the next method in the fixed method order.
+
+      ## You decide
+
+      The system recommends; you choose. Accepting switches
+      the session and records a ``MethodSwitch`` entry (a
+      trail for your profile). Dismissing hides the suggestion
+      for the rest of this session; the next session checks
+      again.
+
+      ## Why not automatic?
+
+      Method switches are a big change in the learning
+      experience. An automatic switch would break learning
+      continuity and could fire during a difficult but
+      productive phase. You know your context better than the
+      system does.
+
+  - key: feature_auto_loop
+    title: Auto-Loop
+    short: "In the desktop app a new cycle with fresh content starts automatically after step 7; in the browser version the session stays at step 7."
+    long: |
+      ## What is the auto-loop?
+
+      When you complete step 7 (integrate), the session can
+      automatically start a new cycle on the next topic from
+      your curriculum — without you pressing a "next cycle"
+      button.
+
+      Desktop app only: in the browser version the session stays
+      at step 7, and the session page tells you so. End the
+      session there and start a new one to keep learning.
+
+      ## How the next topic is chosen
+
+      - **If a curriculum exists**: the next topic in the
+        hierarchical order.
+      - **If no curriculum exists**: the AI generates a
+        suitable follow-up topic based on the current
+        trajectory.
+      - **If spaced-repetition cards are due**: they are
+        prioritized before new content.
+
+      ## Cycle counter
+
+      Every session shows a cycle counter ("3/5"). When
+      max_cycles is reached (default: 5), auto-loop pauses
+      and asks whether you want to continue. This protects
+      against runaway sessions.
+
+      ## How to interrupt the auto-loop
+
+      - **Submit a rating**: after each cycle, you get the
+        three sliders (understanding, stress, method fit). If
+        stress > 3, the system suggests a break.
+      - **"End session" button**: clickable at any time.
+      - **Accept a method switch**: breaks the current loop
+        and starts a new one with the new method.
+
+      ## When auto-loop is most valuable
+
+      For language learning with small topic units, where
+      "start a new session" overhead slows learning down. For
+      coding, auto-loop is often less useful because topic
+      transitions are larger.
+
+  - key: feature_spaced_repetition
+    title: Spaced Repetition
+    short: "Time-optimized review based on your learning history."
+    docs_slug: user-guide/lessons
+    long: |
+      ## What is spaced repetition?
+
+      Spaced repetition is the technique of placing reviews at
+      increasing intervals. It uses the forgetting-curve
+      effect: each successfully recalled item lasts longer
+      next time.
+
+      ## The bands in Adaptive Learner
+
+      Every exercise element you answer is tracked. The next
+      review date depends on how often in a row you answered
+      it correctly:
+
+      - **0 correct in a row** (or just answered wrong):
+        review 1 day later.
+      - **1 correct in a row**: 3 days later.
+      - **2 or more correct in a row**: 7 days later.
+
+      At **3 correct answers in a row** the element counts as
+      mastered and leaves the review queue. A later wrong
+      answer brings it back.
+
+      ## What shifts the date
+
+      - **Hint used**: the interval is halved, because the
+        answer came with help.
+      - **Correct in Exam mode**: the interval is doubled,
+        because an answer without help is stronger evidence.
+
+      ## When the system recommends reviews
+
+      When elements are due, a review card appears on the
+      Dashboard with the number of due and overdue elements
+      and an **Open review session** button. Overdue elements come
+      first, then those with the most errors. Details: see the
+      lessons guide.
+
+  - key: feature_conversation_analysis
+    title: Conversation Analysis / Import
+    short: "Analyze existing chat histories and extract concrete learning artifacts from them."
+    long: |
+      ## What is conversation analysis?
+
+      Adaptive Learner can analyze existing chats from
+      ChatGPT, Claude or Gemini and extract learning content
+      from them. You import the transcript once — the system
+      reads it, structures it, and turns it into a usable
+      learning artifact.
+
+      ## What gets extracted
+
+      - **Concepts** — terms and ideas discussed in the chat.
+      - **Knowledge gaps** — points where you asked follow-ups
+        or made mistakes.
+      - **Errors** — concrete misconceptions visible in the
+        chat.
+      - **Vocabulary / terminology** — domain words
+        (especially relevant for language learning or
+        specialized fields).
+
+      ## How the import works
+
+      1. Export your chat from ChatGPT, Claude or Gemini as
+        Markdown or JSON.
+      2. Upload the file into Adaptive Learner (drag-and-drop
+        or file picker).
+      3. The system detects the format automatically and
+        stores the messages.
+      4. Trigger the analysis — the AI reads the chat in your
+        learning language and produces the structured
+        breakdown.
+
+      ## What you can do next
+
+      Three actions follow from the analysis:
+
+      - **"Create curriculum"** — the extracted concepts feed
+        into a hierarchical curriculum.
+      - **"Start session"** — a session that starts directly
+        from the detected knowledge gaps.
+      - **"Generate Anki cards"** — flashcards from the
+        concepts and vocabulary.
+
+      ## Duplicates
+
+      If you import the same chat twice, the system detects it
+      via the content hash and offers to navigate to the
+      existing analysis instead of creating a copy.
+
+      ## Privacy
+
+      Chat contents go ONLY to your active AI provider (the
+      one you configured in settings). The system sends
+      nothing to a central server. When you delete the chat,
+      the contents are gone.
+
+  - key: feature_gamification
+    title: Gamification (XP, Badges, Streaks)
+    short: "Progress system with experience points, badges and streaks - motivation without gimmickry."
+    docs_slug: user-guide/dashboard
+    long: |
+      ## What is the gamification layer?
+
+      Three mechanics make learning progress visible and
+      rewarding:
+
+      - **XP (experience points)** - for completed sessions
+        and lessons, the assessment and conversation imports.
+        Levels rise with XP.
+      - **Badges** - for milestones (first session, staying
+        consistent, trying methods, depth, several languages).
+      - **Streaks** - consecutive days with learning activity.
+
+      ## How XP is earned
+
+      - **Completed session**: 50 XP, +10 XP per completed
+        cycle, +25 XP per cycle that reached step 7.
+      - **First session in a new method**: +50 XP.
+      - **Completed lesson**: 30 XP, +10 XP per star, +20 XP
+        for three stars with every step right on the first
+        attempt.
+      - **Streak multiplier**: +25% per streak day on session
+        and lesson XP, up to 7 days (at most 2.75x).
+      - **Game mode combo**: up to 20 extra XP for a lesson
+        played with combos.
+      - **Assessment completed**: 100 XP.
+      - **Conversation imported and analysed**: 75 XP.
+
+      Levels grow on a widening curve: level 2 at 100 XP,
+      level 3 at 300, level 4 at 600, level 5 at 1000 - each
+      gap is 100 XP larger than the one before.
+
+      ## Badges are not coercive
+
+      You do *not* need a single badge to use the app
+      productively. They are a mirror, not a target. Badge
+      notifications can be turned off in settings.
+
+      ## Streak freezes
+
+      Every 7 streak days earn one streak freeze, up to 3 in
+      stock. If you miss a day, a freeze is used automatically
+      and pauses your streak instead of resetting it. With
+      weekend mode on, Saturday and Sunday do not count as
+      gaps.
+
+      ## Why this works without gimmicks
+
+      Learning research shows: extrinsic reward can destroy
+      intrinsic motivation ("overjustification effect").
+      Adaptive Learner relies on the mechanics being a
+      **mirror** of progress, not an incentive system. No
+      leaderboards, no social features, no point-sharing -
+      the data stays with you.
+
+      ## Reset
+
+      If the gamification values no longer match your
+      situation (e.g. fresh start after a long break), you
+      can reset XP, badges and streak in settings. Curriculum,
+      sessions, and ratings are preserved.
+
+  - key: view_dashboard
+    title: Dashboard
+    short: "Your home base: progress, streak, XP, badges, due reviews, and quick actions."
+    docs_slug: user-guide/dashboard
+    long: |
+      ## What does the dashboard show?
+
+      The dashboard is your command center. "Continue learning"
+      sits at the top with your most recently touched lesson,
+      then the actionable cards (paused lessons, missions, focus
+      areas, review queue), then gamification (XP, streak,
+      badges), and finally the analytical panels.
+
+      ## Filter
+
+      A subject filter lists only your own subjects, sorted by
+      most-used first.
+
+  - key: view_content_browser
+    title: Content browser
+    short: "The page where you find, download, and start lesson sets."
+    docs_slug: features/content-browser
+    long: |
+      ## How do I find lessons?
+
+      The content browser at /content is built around the
+      learning flow: search first (instant, accent-tolerant),
+      then "Continue learning", then the catalogue. The catalogue
+      splits into "Languages" (source > target > level) and
+      "Knowledge" (non-language domains).
+
+      ## Sources and books
+
+      Source badges show where a set comes from; a source filter
+      hides individual sources. A domain can surface book
+      recommendations.
+
+  - key: view_lesson
+    title: Lesson
+    short: "The viewer that walks you step by step through a lesson's theory and exercises."
+    docs_slug: user-guide/lessons
+    long: |
+      ## How do the exercises work?
+
+      A lesson is a sequence of theory and exercise steps.
+      Every set can use the core exercise types (matching,
+      picture choice, free text, cloze, word tiles, multiple
+      choice); some sets add further types such as
+      categorization or audio dictation. The full list is in
+      the features overview.
+
+      ## Controls
+
+      Enter checks an answered exercise and advances. From an
+      exercise you can jump to the matching theory via "Re-read
+      theory". At the end you see your score with stars and can
+      export it as Markdown.
+
+  - key: view_settings
+    title: Settings
+    short: "Everything you can change without code or YAML - language, AI, learning, data, appearance."
+    docs_slug: user-guide/settings
+    long: |
+      ## What can I configure?
+
+      Settings bundle language, AI provider and keys, storage
+      mode, learning options (e.g. Enter shortcut, preferred
+      exercise direction), data (backup, content repositories),
+      appearance (12 themes), and gamification.
+
+      ## Your data in your hands
+
+      Under "Data" you create and import backups and connect your
+      own content repositories. None of it leaves your device
+      unasked.
+
+  - key: feature_backup
+    title: Backup and restore
+    short: "A complete snapshot of your learning state that you can save and restore elsewhere."
+    docs_slug: features/backup
+    long: |
+      ## What is a backup?
+
+      A backup is a complete snapshot: every data table
+      (projects, sessions, lesson progress, errors,
+      gamification, missions ...), your downloaded content
+      sets and your local preferences - bundled into one
+      ``.alb`` file (a ZIP archive). Older single-JSON backups
+      still import.
+
+      ## Cross-identity
+
+      You can import a backup into a fresh installation or under
+      a different profile; the restore re-resolves internal
+      references cleanly. On import you see a per-table summary.

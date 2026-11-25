@@ -1,0 +1,322 @@
+/**
+ * Step 4 of the Lesson Creator wizard (Phase 65D): review summary +
+ * the quality checklist + the Save / Save-and-share actions. Extracted
+ * from CreateLesson for the complexity burn-down (#400). Pure
+ * presentation; state + actions come via props.
+ */
+
+import {Copy, Download, Save, Share2} from "lucide-react";
+
+import {Button} from "@/components/ui/button";
+import FormHint from "../../shared/forms/FormHint";
+import type {DraftValidationChecks} from "../../lib/content/lesson/draft-to-lesson";
+import type {DraftShareChecks} from "../../lib/content/lesson/edit/draft-share-check";
+import {QUALITY_MINIMUMS as QUALITY} from "learn-content-engine/rules";
+import type {LessonCardDraft, LessonMeta} from "../../lib/content/lesson/lesson-draft";
+import type {ContentLessonExercise} from "../../storage/types";
+
+type Translate = (key: string, fallback?: string) => string;
+
+const ISSUES_URL = "https://github.com/astrapi69/adaptive-learner/issues/new";
+
+/** Build a prefilled bug-report URL for an INTERNAL validator error (#2384).
+ *  The raw technical detail rides along so the maintainer gets the concrete
+ *  message the user could not act on. */
+function structureErrorIssueUrl(detail: string): string {
+    const title = encodeURIComponent(`[Bug] Lesson Creator: ${detail}`);
+    const body = encodeURIComponent(
+        "While checking a lesson in the Lesson Creator, an internal error " +
+            "occurred:\n\n```\n" +
+            detail +
+            "\n```\n",
+    );
+    return `${ISSUES_URL}?title=${title}&body=${body}&labels=bug`;
+}
+
+const CHECK_ROWS: Array<
+    [
+        Exclude<
+            keyof DraftValidationChecks,
+            "schemaError" | "schemaErrorIsInternal"
+        >,
+        string,
+    ]
+> = [
+    ["hasTitle", "Has a title"],
+    // #1929 — the "language pair is valid" row is rendered again. It now
+    // means "both sides are supported language codes" (a same-language
+    // knowledge-domain pair is VALID, #1715), not the removed
+    // ``source !== target`` gate.
+    ["languagePair", "Language pair is valid"],
+    ["enoughCards", "At least 4 cards"],
+    ["schemaValid", "Valid lesson structure"],
+];
+
+/** #3389 - the engine's quality minimums, shown as their own list. They
+ *  gate "Save and share" only; local save stays on the rows above. */
+const SHARE_ROWS: Array<[keyof DraftShareChecks, string, string, number | null]> = [
+    ["minExercises", "check_min_exercises", "At least {n} exercises", QUALITY.minExercisesPerLesson],
+    ["minTypes", "check_min_types", "At least {n} exercise types", QUALITY.minExerciseTypes],
+    [
+        "exerciseMinimums",
+        "check_exercise_minimums",
+        "Every exercise has enough answers or pairs",
+        null,
+    ],
+];
+
+interface ReviewStepProps {
+    meta: LessonMeta;
+    cards: LessonCardDraft[];
+    exercises: ContentLessonExercise[];
+    draftChecks: DraftValidationChecks;
+    /** #3389 - the share rows; they gate "Save and share" only. Absent in
+     *  edit mode, which offers no share action. */
+    shareChecks?: DraftShareChecks;
+    saving: boolean;
+    /** #1740 — editing an existing lesson: the primary action overwrites
+     *  it and a "Save as a copy" action appears instead of "Save and
+     *  share". */
+    editMode?: boolean;
+    /** #1967 — a cardless (theory/exercise) lesson, e.g. one authored via
+     *  the book-text path. A book lesson legitimately has no vocabulary
+     *  cards, so the "At least 4 cards" requirement + summary row are
+     *  dropped and never gate the save. */
+    cardless?: boolean;
+    onSaveLocal: () => void;
+    onSaveShare: () => void;
+    /** #1740 — save the edited lesson as a new copy (edit mode only). */
+    onSaveCopy?: () => void;
+    t: Translate;
+}
+
+/** The review-and-save step (wizard step 4). */
+export default function ReviewStep({
+    meta,
+    cards,
+    exercises,
+    draftChecks,
+    shareChecks,
+    saving,
+    editMode = false,
+    cardless = false,
+    onSaveLocal,
+    onSaveShare,
+    onSaveCopy,
+    t,
+}: ReviewStepProps) {
+    // The card minimum (#1967) is guidance for a NEW card lesson, not a
+    // requirement for re-saving an existing one or for a cardless lesson.
+    // Title / language pair / schema validity always apply.
+    const rows = CHECK_ROWS.filter(([key]) => {
+        if ((editMode || cardless) && key === "enoughCards") return false;
+        return true;
+    });
+    const canSave =
+        rows.every(([key]) => draftChecks[key]) && !saving;
+    const canShare =
+        canSave &&
+        shareChecks !== undefined &&
+        SHARE_ROWS.every(([key]) => shareChecks[key]);
+    return (
+        <section
+            className="create-lesson-step flex flex-col gap-6"
+            data-testid="create-lesson-step-4"
+            aria-label={t("create_lesson.review.heading", "Review and save")}
+        >
+            <h2 className="text-xl font-semibold text-fg-primary">
+                {t("create_lesson.review.heading", "Review and save")}
+            </h2>
+            <ul
+                className="create-lesson-summary flex list-none flex-col gap-1 rounded-lg border border-border bg-card p-4"
+                data-testid="create-lesson-summary"
+            >
+                <li>
+                    {t("create_lesson.review.title", "Title")}:{" "}
+                    <strong>{meta.title}</strong>
+                </li>
+                <li>
+                    {t("create_lesson.review.pair", "Languages")}:{" "}
+                    {meta.sourceLanguage} → {meta.targetLanguage} · {meta.level}
+                </li>
+                {!cardless && (
+                    <li>
+                        {t("create_lesson.review.cards", "Cards")}:{" "}
+                        {cards.length}
+                    </li>
+                )}
+                <li>
+                    {t("create_lesson.review.exercises", "Exercises")}:{" "}
+                    {exercises.length}
+                </li>
+            </ul>
+            <ul
+                className="create-lesson-checklist flex list-none flex-col gap-1 p-0"
+                data-testid="create-lesson-checklist"
+            >
+                {rows.map(([key, fallback]) => {
+                    const pass = draftChecks[key];
+                    // #1722 / #2384 — a bare ✗ on the structure check is not
+                    // actionable. A genuine content violation shows the
+                    // validator's concrete reason (which card/field breaks
+                    // which rule). An INTERNAL error (an app bug the author
+                    // cannot fix by editing the lesson) instead gets a "this
+                    // is our bug, please report it" message so the raw
+                    // technical string is never framed as bad user content.
+                    const showStructureError =
+                        key === "schemaValid" &&
+                        !pass &&
+                        Boolean(draftChecks.schemaError);
+                    return (
+                        <li
+                            key={key}
+                            data-testid={`check-${key}`}
+                            data-pass={pass ? "true" : "false"}
+                            className={
+                                "flex flex-col gap-0.5 " +
+                                (pass
+                                    ? "check-pass text-[var(--success)]"
+                                    : "check-fail text-[var(--error)]")
+                            }
+                        >
+                            {pass ? "✓" : "✗"}{" "}
+                            {t(`create_lesson.review.check_${key}`, fallback)}
+                            {showStructureError &&
+                                (draftChecks.schemaErrorIsInternal ? (
+                                    <div
+                                        className="flex flex-col gap-1 text-sm text-muted-foreground"
+                                        data-testid="check-schemaValid-internal"
+                                    >
+                                        <span>
+                                            {t(
+                                                "create_lesson.review.structure_internal_error",
+                                                "An internal error occurred while checking this lesson. This is a problem in the app, not in your lesson. Please reload the page and try again; if it keeps happening, report the problem below.",
+                                            )}
+                                        </span>
+                                        <span>
+                                            {t(
+                                                "create_lesson.review.structure_error",
+                                                "Technical detail",
+                                            )}
+                                            : <code>{draftChecks.schemaError}</code>
+                                        </span>
+                                        <a
+                                            href={structureErrorIssueUrl(
+                                                draftChecks.schemaError ?? "",
+                                            )}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="underline"
+                                            data-testid="check-schemaValid-report"
+                                        >
+                                            {t(
+                                                "create_lesson.review.structure_report",
+                                                "Report this problem",
+                                            )}
+                                        </a>
+                                    </div>
+                                ) : (
+                                    <div
+                                        className="text-sm text-muted-foreground"
+                                        data-testid="check-schemaValid-detail"
+                                    >
+                                        {t(
+                                            "create_lesson.review.structure_error",
+                                            "Technical detail",
+                                        )}
+                                        : <code>{draftChecks.schemaError}</code>
+                                    </div>
+                                ))}
+                        </li>
+                    );
+                })}
+            </ul>
+            {!editMode && shareChecks && (
+                <div className="flex flex-col gap-1" data-testid="create-lesson-share-checklist">
+                    <h3 className="text-sm font-semibold text-fg-primary">
+                        {t("create_lesson.review.share_checks_heading", "Needed for sharing")}
+                    </h3>
+                    <ul className="flex list-none flex-col gap-1 p-0">
+                        {SHARE_ROWS.map(([key, labelKey, fallback, n]) => {
+                            const pass = shareChecks[key];
+                            const label = t(`create_lesson.review.${labelKey}`, fallback);
+                            return (
+                                <li
+                                    key={key}
+                                    data-testid={`check-${key}`}
+                                    data-pass={pass ? "true" : "false"}
+                                    className={
+                                        pass
+                                            ? "check-pass text-[var(--success)]"
+                                            : "check-fail text-[var(--error)]"
+                                    }
+                                >
+                                    {pass ? "✓" : "✗"}{" "}
+                                    {n === null ? label : label.replace("{n}", String(n))}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                </div>
+            )}
+            {editMode && (
+                <FormHint data-testid="create-lesson-edit-note">
+                    {t(
+                        "create_lesson.edit_note",
+                        "Editing an existing lesson. Saving overwrites it; use 'Save as a copy' to keep the original.",
+                    )}
+                </FormHint>
+            )}
+            {editMode && (
+                <FormHint data-testid="create-lesson-copy-progress-note">
+                    {t(
+                        "create_lesson.copy_progress_note",
+                        "A copy starts without learning progress; the original keeps its progress and review cards.",
+                    )}
+                </FormHint>
+            )}
+            <div className="mt-4 flex justify-end gap-3 max-[769px]:flex-col max-[769px]:items-stretch max-[769px]:gap-2">
+                <Button
+                    type="button"
+                    data-testid="create-lesson-save-local"
+                    disabled={!canSave}
+                    onClick={onSaveLocal}
+                >
+                    {editMode ? (
+                        <Save className="h-5 w-5" aria-hidden="true" />
+                    ) : (
+                        <Download className="h-5 w-5" aria-hidden="true" />
+                    )}
+                    {saving
+                        ? t("common.loading", "Loading…")
+                        : editMode
+                          ? t("create_lesson.save.save_changes", "Save changes")
+                          : t("create_lesson.save.save_local", "Save locally")}
+                </Button>
+                {editMode ? (
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        data-testid="create-lesson-save-copy"
+                        disabled={!canSave}
+                        onClick={onSaveCopy}
+                    >
+                        <Copy className="h-5 w-5" aria-hidden="true" />
+                        {t("create_lesson.save.save_copy", "Save as a copy")}
+                    </Button>
+                ) : (
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        data-testid="create-lesson-save-share"
+                        disabled={!canShare}
+                        onClick={onSaveShare}
+                    >
+                        <Share2 className="h-5 w-5" aria-hidden="true" />
+                        {t("create_lesson.save.save_share", "Save and share")}
+                    </Button>
+                )}
+            </div>
+        </section>
+    );
+}

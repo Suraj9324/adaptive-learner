@@ -1,0 +1,624 @@
+/**
+ * Tests for the useLesson hook
+ * (Phase 44 / EXP-002 / P-107 + P-109).
+ *
+ * Mocks the storage namespace + learnerState so the hook
+ * runs in isolation. Pins:
+ *
+ * - status="loading" → "ready" after fetch.
+ * - status="not-cached" when the lesson isn't downloaded.
+ * - Resumes on the next-uncompleted step from existing progress.
+ * - goNext / goPrev / goToStep clamp at bounds.
+ * - goToStepById resolves by id; ignores unknown ids.
+ * - recordStepResult calls storage.upsert with the right shape
+ *   and updates local progress state.
+ * - markCompleted flips status + stamps completed_at.
+ */
+
+import {act, renderHook, waitFor} from "@testing-library/react";
+import {beforeEach, describe, expect, it, vi} from "vitest";
+
+const getLessonMock = vi.fn();
+const getProgressMock = vi.fn();
+const upsertProgressMock = vi.fn();
+
+vi.mock("../../../storage", () => ({
+    getStorage: () => ({
+        contentLoader: {
+            getLesson: getLessonMock,
+            listSets: vi.fn(),
+            downloadSet: vi.fn(),
+            listLessons: vi.fn(),
+        },
+        lessonProgress: {
+            get: getProgressMock,
+            list: vi.fn(),
+            upsert: upsertProgressMock,
+        },
+    }),
+}));
+
+const {notifyErrorMock} = vi.hoisted(() => ({notifyErrorMock: vi.fn()}));
+vi.mock("../../../utils/notify", () => ({
+    notify: {error: notifyErrorMock, info: vi.fn(), success: vi.fn(), warn: vi.fn()},
+}));
+
+vi.mock("../../../lib/learning/learnerState", () => ({
+    readLearnerState: () => ({
+        userId: "user-1",
+        projectId: "project-1",
+        language: "en",
+    }),
+}));
+
+import {ApiError} from "../../../api/client";
+import {useLesson} from "./useLesson";
+
+const SOURCE = "astrapi69/adaptive-learner-content";
+const SET_ID = "language-fr-a1";
+const LESSON = "01-greetings.json";
+
+const LESSON_PAYLOAD = {
+    id: "01-greetings",
+    title: "Greetings",
+    estimated_minutes: 10,
+    cards: [],
+    steps: [
+        {id: "intro", type: "theory" as const, body: "# Intro"},
+        {id: "step-formality", type: "theory" as const, body: "## F"},
+        {id: "ex-1", type: "exercise" as const},
+    ],
+};
+
+const FRESH_PROGRESS = {
+    id: "user-1#astrapi69--adaptive-learner-content#language-fr-a1#01-greetings.json",
+    user_id: "user-1",
+    source: SOURCE,
+    set_id: SET_ID,
+    lesson_filename: LESSON,
+    status: "in_progress" as const,
+    step_results: {},
+    score_correct: 0,
+    score_total: 0,
+    time_spent_seconds: 0,
+    started_at: "2026-05-26T00:00:00Z",
+    updated_at: "2026-05-26T00:00:00Z",
+    completed_at: null,
+};
+
+beforeEach(() => {
+    getLessonMock.mockReset();
+    getProgressMock.mockReset();
+    upsertProgressMock.mockReset();
+    notifyErrorMock.mockReset();
+});
+
+describe("useLesson: load + status transitions", () => {
+    it("transitions loading -> ready when fetch succeeds", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(null);
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        expect(result.current.status).toBe("loading");
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        expect(result.current.lesson?.id).toBe("01-greetings");
+        expect(result.current.currentStepIndex).toBe(0);
+    });
+
+    it("surfaces status=not-cached when the lesson isn't downloaded", async () => {
+        // #3443: both storage modes reject a missing lesson with ApiError 404.
+        getLessonMock.mockRejectedValue(
+            new ApiError(404, "Set astrapi69/adaptive-learner-content/language-fr-a1 is not cached."),
+        );
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("not-cached");
+        });
+        expect(result.current.lesson).toBeNull();
+    });
+
+    it("resumes on the next-uncompleted step from saved progress", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            step_results: {
+                intro: {
+                    correct: 0,
+                    total: 0,
+                    attempts: 1,
+                    completed_at: "2026-05-26T00:01:00Z",
+                },
+            },
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        // Completed: intro. Resume on index 1 (step-formality).
+        expect(result.current.currentStepIndex).toBe(1);
+    });
+
+    it("BUG #41 — resumes at the saved current_step even when no step_results exist", async () => {
+        // The user read theory (steps never write a step_result) and
+        // paused on step 2 (an unanswered exercise). Before the fix
+        // the resume index was reconstructed from step_results only
+        // and snapped back to 0; current_step is the real position.
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            status: "paused" as const,
+            paused_at: "2026-06-05T00:05:00Z",
+            step_results: {},
+            current_step: 2,
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        expect(result.current.currentStepIndex).toBe(2);
+    });
+
+    it("BUG #41 — resume takes the furthest of current_step and step_results", async () => {
+        // step_results says step 0 is done (→ index 1) but the user
+        // navigated forward to step 2; the further position wins.
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            status: "paused" as const,
+            step_results: {
+                intro: {
+                    correct: 0,
+                    total: 0,
+                    attempts: 1,
+                    completed_at: "2026-06-05T00:01:00Z",
+                },
+            },
+            current_step: 2,
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        expect(result.current.currentStepIndex).toBe(2);
+    });
+
+    it("lands on the summary view when status=completed", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            status: "completed" as const,
+            completed_at: "2026-05-26T00:10:00Z",
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        // 3 steps → summary index is 3.
+        expect(result.current.currentStepIndex).toBe(3);
+    });
+});
+
+describe("useLesson: navigation", () => {
+    async function _setup() {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(null);
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        return result;
+    }
+
+    it("goNext advances by one and stops at the summary", async () => {
+        const result = await _setup();
+        act(() => result.current.goNext());
+        expect(result.current.currentStepIndex).toBe(1);
+        act(() => result.current.goNext());
+        act(() => result.current.goNext());
+        // Length = 3, summary is index 3. Next no-op past.
+        expect(result.current.currentStepIndex).toBe(3);
+        act(() => result.current.goNext());
+        expect(result.current.currentStepIndex).toBe(3);
+    });
+
+    it("goPrev moves back and clamps at 0", async () => {
+        const result = await _setup();
+        act(() => result.current.goToStep(2));
+        expect(result.current.currentStepIndex).toBe(2);
+        act(() => result.current.goPrev());
+        expect(result.current.currentStepIndex).toBe(1);
+        act(() => result.current.goPrev());
+        act(() => result.current.goPrev());
+        expect(result.current.currentStepIndex).toBe(0);
+    });
+
+    it("goToStepById resolves known ids", async () => {
+        const result = await _setup();
+        act(() => result.current.goToStepById("ex-1"));
+        expect(result.current.currentStepIndex).toBe(2);
+    });
+
+    it("goToStepById ignores unknown ids", async () => {
+        const result = await _setup();
+        act(() => result.current.goToStepById("no-such-step"));
+        expect(result.current.currentStepIndex).toBe(0);
+    });
+});
+
+describe("useLesson: persistence", () => {
+    it("recordStepResult calls storage.upsert with the right shape", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(null);
+        upsertProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            score_correct: 4,
+            score_total: 4,
+            step_results: {
+                "ex-1": {
+                    correct: 4,
+                    total: 4,
+                    attempts: 1,
+                    completed_at: "2026-05-26T00:01:00Z",
+                },
+            },
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+
+        await act(async () => {
+            await result.current.recordStepResult({
+                step_id: "ex-1",
+                correct: 4,
+                total: 4,
+            });
+        });
+
+        expect(upsertProgressMock).toHaveBeenCalledOnce();
+        const args = upsertProgressMock.mock.calls[0];
+        expect(args[0]).toBe("user-1");
+        const body = args[1];
+        expect(body.source).toBe(SOURCE);
+        expect(body.set_id).toBe(SET_ID);
+        expect(body.lesson_filename).toBe(LESSON);
+        expect(body.step_result?.step_id).toBe("ex-1");
+        expect(body.step_result?.correct).toBe(4);
+        expect(result.current.progress?.score_correct).toBe(4);
+    });
+
+    it("markCompleted upserts with mark_completed=true", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(null);
+        upsertProgressMock.mockResolvedValue({
+            ...FRESH_PROGRESS,
+            status: "completed" as const,
+            completed_at: "2026-05-26T00:10:00Z",
+        });
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        await act(async () => {
+            await result.current.markCompleted();
+        });
+        const body = upsertProgressMock.mock.calls[0][1];
+        expect(body.mark_completed).toBe(true);
+        expect(result.current.progress?.status).toBe("completed");
+    });
+
+    it("markCompleted rethrows when the upsert fails (#1787)", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(null);
+        upsertProgressMock.mockRejectedValue(
+            new Error("IndexedDB write failed"),
+        );
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        // Pre-#1787 the failure was swallowed into the hook's error state,
+        // which the summary never renders — the click died silently. The
+        // caller (the summary click handler) must be able to catch + toast.
+        await act(async () => {
+            await expect(result.current.markCompleted()).rejects.toThrow(
+                "IndexedDB write failed",
+            );
+        });
+        expect(result.current.error).toBe("IndexedDB write failed");
+    });
+});
+
+describe("useLesson: position persistence on step change (#3075)", () => {
+    async function _setupWith(progressRow: unknown) {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(progressRow);
+        upsertProgressMock.mockImplementation(
+            async (_userId: string, body: {current_step?: number}) => ({
+                ...FRESH_PROGRESS,
+                current_step: body.current_step ?? 0,
+            }),
+        );
+        const {result} = renderHook(() =>
+            useLesson({
+                source: SOURCE,
+                setId: SET_ID,
+                lessonFilename: LESSON,
+            }),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        return result;
+    }
+
+    it("goNext writes current_step before any exercise was graded", async () => {
+        const result = await _setupWith(null);
+        expect(upsertProgressMock).not.toHaveBeenCalled();
+        act(() => result.current.goNext());
+        await waitFor(() => {
+            expect(upsertProgressMock).toHaveBeenCalledTimes(1);
+        });
+        const body = upsertProgressMock.mock.calls[0][1];
+        expect(body).toMatchObject({
+            source: SOURCE,
+            set_id: SET_ID,
+            lesson_filename: LESSON,
+            current_step: 1,
+        });
+        expect(body.step_result).toBeUndefined();
+        expect(body.mark_paused).toBeUndefined();
+        // The row the write created now drives the in-progress guards.
+        await waitFor(() => {
+            expect(result.current.progress?.status).toBe("in_progress");
+        });
+    });
+
+    it("the position restored on load is not written back", async () => {
+        const result = await _setupWith({
+            ...FRESH_PROGRESS,
+            status: "paused",
+            current_step: 1,
+        });
+        expect(result.current.currentStepIndex).toBe(1);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(upsertProgressMock).not.toHaveBeenCalled();
+    });
+
+    it("reaching the summary index writes no position (completion owns it)", async () => {
+        const result = await _setupWith(null);
+        act(() => result.current.goToStep(LESSON_PAYLOAD.steps.length));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(upsertProgressMock).not.toHaveBeenCalled();
+    });
+
+    it("a completed lesson is not repositioned by browsing its steps", async () => {
+        const result = await _setupWith({
+            ...FRESH_PROGRESS,
+            status: "completed",
+            completed_at: "2026-05-26T00:10:00Z",
+        });
+        act(() => result.current.goToStep(1));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(upsertProgressMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("useLesson: the action log (#3365)", () => {
+    async function _ready(progressRow: unknown = null) {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(progressRow);
+        upsertProgressMock.mockImplementation(
+            async (_userId: string, body: {current_step?: number}) => ({
+                ...FRESH_PROGRESS,
+                current_step: body.current_step ?? 0,
+            }),
+        );
+        const {result} = renderHook(() =>
+            useLesson({source: SOURCE, setId: SET_ID, lessonFilename: LESSON}),
+        );
+        await waitFor(() => {
+            expect(result.current.status).toBe("ready");
+        });
+        return result;
+    }
+    const lastEvent = () => upsertProgressMock.mock.calls.at(-1)?.[1].step_event;
+
+    it("logs arriving on a step, forward and back, by index and id", async () => {
+        const result = await _ready();
+        act(() => result.current.goNext());
+        await waitFor(() => expect(upsertProgressMock).toHaveBeenCalledTimes(1));
+        expect(lastEvent()).toEqual({kind: "step", step_index: 1, step_id: "step-formality"});
+        act(() => result.current.goPrev());
+        await waitFor(() => expect(upsertProgressMock).toHaveBeenCalledTimes(2));
+        expect(lastEvent()).toEqual({kind: "step", step_index: 0, step_id: "intro"});
+    });
+
+    it.each([
+        {name: "fully correct", correct: 4, total: 4, expected: true},
+        {name: "partly wrong", correct: 2, total: 4, expected: false},
+    ])("logs a graded check as an answer: $name", async ({correct, total, expected}) => {
+        const result = await _ready();
+        act(() => result.current.goToStep(2));
+        await waitFor(() => expect(upsertProgressMock).toHaveBeenCalledTimes(1));
+        await act(async () => {
+            await result.current.recordStepResult({step_id: "ex-1", correct, total});
+        });
+        expect(lastEvent()).toEqual({
+            kind: "answer",
+            step_index: 2,
+            step_id: "ex-1",
+            correct: expected,
+        });
+    });
+
+    it("logs reaching the summary as complete, without a step id", async () => {
+        const result = await _ready();
+        act(() => result.current.goToStep(LESSON_PAYLOAD.steps.length));
+        await act(async () => {
+            await result.current.markCompleted();
+        });
+        expect(lastEvent()).toEqual({
+            kind: "complete",
+            step_index: LESSON_PAYLOAD.steps.length,
+            step_id: null,
+        });
+    });
+
+    it.each([
+        {name: "pause", run: (r: ReturnType<typeof useLesson>) => r.markPaused(), kind: "pause"},
+        {name: "exit", run: (r: ReturnType<typeof useLesson>) => r.markPaused("exit"), kind: "exit"},
+        {name: "restart", run: (r: ReturnType<typeof useLesson>) => r.markRestarted(), kind: "restart"},
+    ])("logs $name", async ({run, kind}) => {
+        const result = await _ready();
+        await act(async () => {
+            await run(result.current);
+        });
+        expect(lastEvent()).toEqual({kind, step_index: 0, step_id: "intro"});
+    });
+
+    it.each([
+        {name: "resume", run: (r: ReturnType<typeof useLesson>) => r.markResumed()},
+        {name: "abandon", run: (r: ReturnType<typeof useLesson>) => r.markAbandoned()},
+    ])("does not log $name", async ({run}) => {
+        const result = await _ready();
+        await act(async () => {
+            await run(result.current);
+        });
+        expect(upsertProgressMock).toHaveBeenCalledTimes(1);
+        expect(lastEvent()).toBeUndefined();
+    });
+
+    it("resumes on the step last arrived on, not the further position", async () => {
+        const result = await _ready({
+            ...FRESH_PROGRESS,
+            status: "paused",
+            current_step: 2,
+            recent_steps: [
+                {at: "2026-05-26T00:01:00Z", kind: "step", step_index: 2, step_id: "ex-1"},
+                {at: "2026-05-26T00:02:00Z", kind: "step", step_index: 1, step_id: "step-formality"},
+            ],
+        });
+        expect(result.current.currentStepIndex).toBe(1);
+    });
+});
+
+describe("useLesson: progress writes and reads never fail silently (#3364)", () => {
+    async function readyLesson() {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockResolvedValue(FRESH_PROGRESS);
+        const hook = renderHook(() =>
+            useLesson({source: SOURCE, setId: SET_ID, lessonFilename: LESSON}),
+        );
+        await waitFor(() => expect(hook.result.current.status).toBe("ready"));
+        return hook;
+    }
+
+    it("a failed autosave keeps its study time for the next successful write", async () => {
+        const now = vi.spyOn(performance, "now").mockReturnValue(0);
+        const {result} = await readyLesson();
+        upsertProgressMock
+            .mockRejectedValueOnce(new Error("disk full"))
+            .mockResolvedValue(FRESH_PROGRESS);
+        now.mockReturnValue(10_000);
+        await act(async () => {
+            await result.current.autosave();
+        });
+        now.mockReturnValue(15_000);
+        await act(async () => {
+            await result.current.autosave();
+        });
+        const deltas = upsertProgressMock.mock.calls.map(
+            ([, body]) => (body as {time_spent_seconds_delta?: number}).time_spent_seconds_delta,
+        );
+        expect(deltas).toEqual([10, 15]);
+        now.mockRestore();
+    });
+
+    it("failed writes raise one toast per lesson run, with the reason", async () => {
+        const {result} = await readyLesson();
+        upsertProgressMock.mockRejectedValue(new Error("QuotaExceededError"));
+        await act(async () => {
+            await result.current.recordStepResult({correct: 1, total: 1} as never);
+        });
+        await act(async () => {
+            await result.current.markPaused();
+        });
+        expect(notifyErrorMock).toHaveBeenCalledTimes(1);
+        expect(notifyErrorMock.mock.calls[0][1]).toMatchObject({
+            error: {message: "QuotaExceededError"},
+        });
+    });
+
+    it("a failed progress read stops with an error instead of starting over", async () => {
+        getLessonMock.mockResolvedValue(LESSON_PAYLOAD);
+        getProgressMock.mockRejectedValue(new Error("IndexedDB closed"));
+        const {result} = renderHook(() =>
+            useLesson({source: SOURCE, setId: SET_ID, lessonFilename: LESSON}),
+        );
+        await waitFor(() => expect(result.current.status).toBe("error"));
+        expect(result.current.error).toContain("IndexedDB closed");
+        expect(upsertProgressMock).not.toHaveBeenCalled();
+    });
+});

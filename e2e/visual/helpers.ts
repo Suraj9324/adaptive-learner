@@ -1,0 +1,2434 @@
+/**
+ * Helpers for the visual-regression suite (#244, infra block 8).
+ *
+ * Two concerns:
+ *   1. ``setTheme`` — pin a theme BEFORE first paint via the real
+ *      localStorage key (``adaptive-learner.theme``), so the index.html
+ *      pre-paint script applies it with no flash.
+ *   2. Per-view seeding + navigation — bring each of the 5 critical views
+ *      into a deterministic, screenshot-worthy state in the dexie build
+ *      (no backend), reusing the onboarding + lesson-playthrough patterns
+ *      the dexie smoke specs already rely on.
+ *
+ * THEME_IDS mirrors ``frontend/src/lib/themes.ts`` ``THEME_IDS`` exactly
+ * (verified against the registry, not guessed). If a theme is added /
+ * renamed there, update this list (a future enhancement could generate it).
+ */
+
+import {existsSync, readFileSync} from "node:fs";
+import {extname, join, normalize} from "node:path";
+
+import {expect, test, type Locator, type Page, type Route} from "@playwright/test";
+
+import {completeAssessment, completeOnboarding, declineDraftPrompt} from "../helpers";
+import {
+    RANDOM_PIN_GLOBAL,
+    isRandomPin,
+} from "../../frontend/src/lib/random/pinned-random";
+import {
+    FIXED_NOW_ISO,
+    VISUAL_RANDOM_PIN,
+    legacyRandomInitScript,
+    randomPinInitScript,
+    randomPinProblem,
+} from "../../frontend/src/test-utils/visual-pins";
+
+/**
+ * Skip a shot whose surface could not be reached, unless the shot already
+ * has a committed baseline (#3427, the #2704 rule): then the surface WAS
+ * reachable, so failing to reach it now is a regression, and a skip would
+ * silently drop it from the gate. A surface without a baseline yet (new,
+ * or deleted for a re-render, #3023) may still skip.
+ *
+ * @example
+ * const ready = await gotoSurface(page, surface);
+ * skipUnlessBaselined(ready, `${surface}-${viewport}.png`, surface);
+ */
+export function skipUnlessBaselined(ready: boolean, shotName: string, what: string): void {
+    if (ready) return;
+    const baseline = test.info().snapshotPath(shotName);
+    if (existsSync(baseline)) {
+        throw new Error(
+            `Could not reach ${what}, but ${shotName} has a committed baseline - ` +
+                "a baselined surface must fail, not skip (#3427)",
+        );
+    }
+    test.skip(true, `Could not reach ${what} deterministically (no baseline yet)`);
+}
+
+/** All 12 registered themes (6 recommended + 6 classic). */
+export const THEME_IDS = [
+    "catppuccin-latte",
+    "supabase",
+    "graphite",
+    "catppuccin-mocha",
+    "soft-pop",
+    "amethyst-haze",
+    "light",
+    "dark",
+    "ocean",
+    "forest",
+    "high-contrast",
+    "sepia",
+] as const;
+
+export type ThemeId = (typeof THEME_IDS)[number];
+
+/** The 7 critical views screenshotted across every theme. */
+export const VIEW_NAMES = [
+    "dashboard",
+    "learning-path",
+    "lesson-matching",
+    "lesson-result",
+    "lesson-reading-comprehension-checked",
+    "lesson-graded-quiz-checked",
+    "settings",
+] as const;
+
+export type ViewName = (typeof VIEW_NAMES)[number];
+
+/** A bundled set guaranteed present in the GH-Pages build. */
+const SET_ID = "fr-a1-from-en";
+
+/** Frozen card table for the seeded own lesson (#3011). Synthetic and
+ *  stable, mirroring the fixture shape of ``combine-lessons.spec.ts`` so
+ *  the "My Lessons" motif never depends on real content. */
+const OWN_LESSON_CARDS = [
+    {front: "Bonjour", back: "Guten Tag"},
+    {front: "Merci", back: "Danke"},
+    {front: "Oui", back: "Ja"},
+    {front: "Non", back: "Nein"},
+] as const;
+
+/** Title of the seeded own lesson (#3011). */
+export const OWN_LESSON_TITLE = "Mein erstes Vokabelset";
+
+/**
+ * Freeze ``Date`` to a fixed instant (``FIXED_NOW_ISO`` in
+ * ``frontend/src/test-utils/visual-pins.ts``) before any page script runs,
+ * so every relative-time / timestamp render is deterministic. Added before
+ * the first navigation (``addInitScript`` re-applies on each navigation in
+ * the context).
+ *
+ * No shuffle reads this clock any more (#3214): the matching and word-tiles
+ * mount seeds take their suffix from the pin ``pinRandomStreams`` installs.
+ * Call ``pinRandomStreams`` right after this at every visual entry point, or
+ * those seeds fall back to the page clock and the set-run builders to
+ * ``Math.random``.
+ */
+export async function freezeClock(page: Page): Promise<void> {
+    await page.addInitScript((iso) => {
+        const fixedMs = new Date(iso).getTime();
+        const OriginalDate = Date;
+        class FrozenDate extends OriginalDate {
+            constructor(...args: ConstructorParameters<typeof Date>) {
+                if (args.length === 0) {
+                    super(fixedMs);
+                } else {
+                    // @ts-expect-error — forward the original Date overloads.
+                    super(...args);
+                }
+            }
+            static now() {
+                return fixedMs;
+            }
+        }
+        globalThis.Date = FrozenDate as DateConstructor;
+    }, FIXED_NOW_ISO);
+}
+
+/**
+ * Pin the page-wide randomness sources so ID-derived UI is identical
+ * run-to-run (#1567): ``crypto.randomUUID`` becomes a counter sequence (the
+ * seeded user's id feeds the missions PRNG ``userId:dateISO`` - a random UUID
+ * re-rolls the daily missions on every capture run) and ``Math.random``
+ * becomes ONE fixed-seed mulberry32 stream shared by every remaining
+ * ``Math.random`` consumer on the page (confetti, sound, arcade games,
+ * exercise variables, the cloze generator, custom paths). Deterministic,
+ * still unique per call. Call ONCE before the first navigation, alongside
+ * ``freezeClock``.
+ *
+ * This shared stream no longer drives the option shuffles or the set-run
+ * builders (#3214). A draw from a shared stream depends on every draw before
+ * it anywhere on the page, so the Shuffle order differed between viewports
+ * under the same seed. Those consumers now draw from their OWN named streams,
+ * which ``pinRandomStreams`` installs; no other draw can move them.
+ *
+ * The generator is the app's own ``mulberry32`` (``prng.ts``), shipped as
+ * source text by ``legacyRandomInitScript`` in
+ * ``frontend/src/test-utils/visual-pins.ts``; the
+ * stream is bit-identical to the copy this helper used to carry.
+ */
+export async function pinRandomness(page: Page): Promise<void> {
+    await page.addInitScript({content: legacyRandomInitScript()});
+}
+
+/**
+ * Install the visual random pin (#3214) before the first navigation:
+ * ``VISUAL_RANDOM_PIN`` on ``globalThis[RANDOM_PIN_GLOBAL]``, read by
+ * ``frontend/src/lib/random/pinned-random.ts``.
+ *
+ * With it, the Shuffle builder draws from its own ``"shuffle-order"`` stream,
+ * the Endless repetitions from ``"endless-repeat"``, and the matching and
+ * word-tiles mount seeds use ``VISUAL_RANDOM_PIN.mountSalt`` instead of the
+ * page clock. Each stream is a fresh generator only its consumer advances,
+ * so a draw anywhere else on the page cannot move a baseline. The daily
+ * missions seed from the pin instead of the seeded learner's random id
+ * (#3824): a fresh id re-rolled them, and a mission the playthrough
+ * completed moved the XP on every dashboard, learning-path and statistics
+ * baseline.
+ *
+ * The pin is a frozen, non-writable, non-configurable property
+ * (``randomPinInitScript``), so no page script can swap it mid-capture.
+ *
+ * Fails closed twice: a pin the app would reject (``isRandomPin``) throws
+ * here, and every shared visual navigation helper checks afterwards that
+ * the page carries it (``assertRandomPinInstalled``).
+ *
+ * @example
+ * await freezeClock(page);
+ * await pinRandomStreams(page);
+ */
+export async function pinRandomStreams(page: Page): Promise<void> {
+    if (!isRandomPin(VISUAL_RANDOM_PIN)) {
+        throw new Error(
+            `pinRandomStreams: VISUAL_RANDOM_PIN ${JSON.stringify(VISUAL_RANDOM_PIN)} ` +
+                "is not a valid RandomPin; the app would ignore it and draw " +
+                "unpinned randomness (#3214).",
+        );
+    }
+    await page.addInitScript({content: randomPinInitScript()});
+}
+
+/**
+ * Throw unless the current page carries the visual random pin (#3214).
+ *
+ * Without the pin a visual spec still passes: it just photographs
+ * browser-random Shuffle, Endless, Matching and word-tiles orders. So the
+ * shared navigation helpers every visual loop goes through (``gotoView``,
+ * ``gotoSurface``, the set runners, the FeatureShot loop) call this once
+ * after they have navigated; one ``evaluate`` per navigation. Only an own
+ * property counts, the same rule the app applies.
+ *
+ * @example
+ * await page.goto("/shuffle-lesson/fr-a1-from-en");
+ * await assertRandomPinInstalled(page);
+ */
+export async function assertRandomPinInstalled(page: Page): Promise<void> {
+    const installed = await page.evaluate(
+        (name) => Object.getOwnPropertyDescriptor(globalThis, name)?.value,
+        RANDOM_PIN_GLOBAL,
+    );
+    const problem = randomPinProblem(installed);
+    if (problem !== null) {
+        throw new Error(
+            `Visual random pin missing on ${page.url()}: ${problem}. Call ` +
+                "pinRandomStreams(page) before the first navigation (#3214); " +
+                "without it the shot captures browser-random orders.",
+        );
+    }
+}
+
+/**
+ * Pin the theme before any navigation. ``addInitScript`` runs before page
+ * scripts on EVERY navigation in this context, so the pre-paint script
+ * (and React's useTheme) read the chosen theme from the first load on.
+ */
+export async function setTheme(page: Page, theme: ThemeId): Promise<void> {
+    await page.addInitScript((value) => {
+        try {
+            localStorage.setItem("adaptive-learner.theme", value);
+        } catch {
+            /* localStorage blocked — the default theme still renders. */
+        }
+    }, theme);
+}
+
+/**
+ * Frozen ``recommended-repos.json`` fixture (#1653).
+ *
+ * The "Empfohlene Repositories" section on ``/settings?tab=data`` (and the
+ * Discover surface) renders from ``recommended-repos.json`` fetched LIVE from
+ * the official content repo. That list changes independently of any app PR,
+ * so the settings-data / content-discover baselines re-stale on every
+ * content-repo edit (#1653, same family as the content-stats-drift CI split).
+ * Pinning the fetch to this SYNTHETIC frozen fixture decouples the surface
+ * from live content-repo state — it reflects app code only. Shape matches
+ * ``parseRecommendedRepos`` (``{repos: [...]}``); values are deliberately
+ * synthetic + stable so they never churn again.
+ */
+const RECOMMENDED_REPOS_FIXTURE = {
+    repos: [
+        {
+            url: "https://github.com/astrapi69/adaptive-learner-content",
+            branch: "main",
+            title: "Official Content",
+            description: "The official Adaptive Learner content repository.",
+            trust_level: 3,
+            self: true,
+            languages: ["de-fr", "de-es"],
+        },
+        {
+            url: "https://github.com/example/community-content",
+            branch: "main",
+            title: "Community Example",
+            description: "A sample community repository (visual-test fixture).",
+            trust_level: 1,
+            commit: "0000000000000000000000000000000000000000",
+            languages: ["de-en"],
+        },
+    ],
+} as const;
+
+/**
+ * Frozen ``media.yaml`` fixture (#1696).
+ *
+ * The Content Browser + set-detail surfaces render per-set media-availability
+ * badges (``SetMediaBadges``) from ``media.yaml``, fetched LIVE from the
+ * official content repo on EVERY /content mount (``fetchMediaResources`` is
+ * unconditional — unlike ``books.yaml`` it is not registry-gated). In a fresh
+ * dexie visual run there is no ``localStorage`` cache, so the file is always
+ * fetched live, and its ARRIVAL TIME relative to the fullPage shot toggles
+ * whether the badge row is present — a per-run set-row height (and therefore
+ * page height) swing that ``waitForStableLayout``'s bounded heuristic cannot
+ * fully absorb (the ~700px set-detail variance in #1696). This is the last
+ * live-network timing source feeding those surfaces. Pinning it to this
+ * SYNTHETIC frozen fixture removes the variance the same way — and for the
+ * same reason — as ``RECOMMENDED_REPOS_FIXTURE`` did for the registry (#1653):
+ * the render path stays exercised, only the churning live data is frozen.
+ *
+ * JSON is a subset of YAML, so the plain object serialises straight into the
+ * route body; the shape matches ``parseMediaYaml`` (flat ``<domain>: [...]``).
+ * The ``language`` domain covers the bundled ``fr-a1-from-en`` set the matrix
+ * uses, so that set's badge row renders deterministically.
+ */
+const MEDIA_YAML_FIXTURE = {
+    language: [
+        {
+            type: "youtube",
+            title: "French A1 basics (visual-test fixture)",
+            url: "https://www.youtube.com/watch?v=00000000000",
+            language: "fr",
+            level: "beginner",
+            duration: "12min",
+            free: true,
+        },
+        {
+            type: "article",
+            title: "A1 vocabulary guide (visual-test fixture)",
+            url: "https://example.com/fr-a1-vocab",
+            language: "fr",
+            free: true,
+        },
+    ],
+    psychology: [
+        {
+            type: "podcast",
+            title: "Intro to psychology (visual-test fixture)",
+            url: "https://example.com/psych-podcast",
+            free: true,
+        },
+    ],
+} as const;
+
+/**
+ * Frozen ``books.yaml`` fixture (#1696, defensive).
+ *
+ * ``fetchBookRecommendations`` only requests ``books.yaml`` from registry
+ * entries flagged ``books: true``; ``RECOMMENDED_REPOS_FIXTURE`` above sets no
+ * such flag, so with the registry pinned this file is NOT fetched today. It is
+ * pinned anyway to close the whole class of live content-repo fetches these
+ * surfaces make: should the registry fixture ever gain a ``books: true`` entry,
+ * the book-recommendations section stays deterministic instead of silently
+ * reopening the height variance. Shape matches ``projectDocument``
+ * (``{domains: {<domain>: {books: [...]}}}``).
+ */
+const BOOKS_YAML_FIXTURE = {
+    domains: {
+        language: {
+            books: [
+                {
+                    title: "French A1 companion (visual-test fixture)",
+                    author: "Visual Test",
+                    url: "https://example.com/fr-a1-book",
+                },
+            ],
+        },
+    },
+} as const;
+
+/**
+ * Pin every LIVE content-repo fetch the Content surfaces make to a frozen
+ * fixture, so surfaces that render the recommended-repos list (settings-data,
+ * content-discover) AND the per-set media/book sections (content-browser,
+ * set-detail) are deterministic and decoupled from live content-repo edits
+ * (#1653, #1696):
+ *   - ``recommended-repos.json`` — the federated registry (#1653).
+ *   - ``media.yaml`` — per-set media-availability badges, fetched live on
+ *     every /content mount; its arrival time otherwise shifts set-row (and
+ *     page) height run-to-run (#1696).
+ *   - ``books.yaml`` — per-domain book recommendations (defensive; only
+ *     fetched when a registry entry is flagged, see the fixture note above).
+ *
+ * ``page.route`` intercepts every matching request for the page's lifetime,
+ * so call it ONCE before the first navigation (alongside ``freezeClock`` /
+ * ``setTheme``). Surfaces that never fetch a file are unaffected. YAML is a
+ * JSON superset, so the object bodies parse unchanged for the ``.yaml`` files.
+ */
+export async function pinContentRegistry(page: Page): Promise<void> {
+    // #3745 - the guard first: Playwright runs matching routes in reverse
+    // registration order, so every fixture below answers its URL and the
+    // guard sees only what nothing answers.
+    await guardExternalRequests(page);
+    await pinOfficialContent(page);
+    await page.route("**/recommended-repos.json", (route) =>
+        route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(RECOMMENDED_REPOS_FIXTURE),
+        }),
+    );
+    await page.route("**/media.yaml", (route) =>
+        route.fulfill({
+            status: 200,
+            contentType: "text/yaml",
+            body: JSON.stringify(MEDIA_YAML_FIXTURE),
+        }),
+    );
+    await page.route("**/books.yaml", (route) =>
+        route.fulfill({
+            status: 200,
+            contentType: "text/yaml",
+            body: JSON.stringify(BOOKS_YAML_FIXTURE),
+        }),
+    );
+}
+
+/** Requests to a host outside the test environment that {@link guardExternalRequests} stopped, per page. */
+const externalGuardHits = new WeakMap<Page, string[]>();
+
+/**
+ * Abort and record every http(s) request to a host other than the local
+ * preview server, for the rest of the test (#3745).
+ *
+ * The visual run must render from this repository alone. Its live sources
+ * were found one by one, months apart (``recommended-repos.json`` #1653,
+ * ``media.yaml`` and ``books.yaml`` #1696, the official ``manifest.yaml``
+ * #3745), each time as baseline drift. With this guard a new live source
+ * fails its first run and the failure names the URL. Same pattern as
+ * ``guardGitHub`` in ``e2e/scripts/capture-feature-screenshots.ts`` (#3182),
+ * widened from GitHub to every external host. Measured on 2026-10-28: the
+ * Workbox worker sent none of these requests itself, so ``page.route`` sees
+ * them all.
+ */
+export async function guardExternalRequests(page: Page): Promise<void> {
+    const hits: string[] = [];
+    externalGuardHits.set(page, hits);
+    await page.route(
+        (url) =>
+            (url.protocol === "http:" || url.protocol === "https:") &&
+            url.hostname !== "localhost" &&
+            url.hostname !== "127.0.0.1",
+        async (route: Route) => {
+            hits.push(`${route.request().method()} ${route.request().url()}`);
+            await route.abort("blockedbyclient");
+        },
+    );
+}
+
+/**
+ * Fail the test when {@link guardExternalRequests} stopped any request, and
+ * return how many it stopped (0). "The guard was never installed" fails on
+ * its own, so it cannot print the same green as "nothing was stopped"
+ * (gate contract point 4, #2083).
+ */
+export function assertNoExternalRequests(page: Page): number {
+    const hits = externalGuardHits.get(page);
+    expect(hits, "the external-request guard was never installed (pinContentRegistry)").toBeDefined();
+    expect(hits, "requests that left the test environment (#3745)").toEqual([]);
+    return hits?.length ?? 0;
+}
+
+const OFFICIAL_CONTENT_PREFIX = "https://raw.githubusercontent.com/astrapi69/adaptive-learner-content/main/";
+const OFFICIAL_CONTENT_DIR = join(__dirname, "fixtures", "official-content");
+
+/**
+ * Serve the official content repository from the frozen snapshot in
+ * ``fixtures/official-content`` (#3745, see its ``SOURCE.md``): the root
+ * ``manifest.yaml`` and ``search-index.json`` and the ``en/fr-a1`` set that
+ * ``seedLearner`` downloads. A path not in the snapshot falls through to the
+ * next route, and in the end to {@link guardExternalRequests}, which stops it
+ * and fails the test. The synthetic fixtures in {@link pinContentRegistry}
+ * are registered after this route, so they answer their files first.
+ */
+async function pinOfficialContent(page: Page): Promise<void> {
+    await page.route(`${OFFICIAL_CONTENT_PREFIX}**`, async (route: Route) => {
+        const rel = normalize(decodeURIComponent(new URL(route.request().url()).pathname))
+            .replace(/^\/astrapi69\/adaptive-learner-content\/main\//, "");
+        const file = join(OFFICIAL_CONTENT_DIR, rel);
+        if (!file.startsWith(OFFICIAL_CONTENT_DIR + "/") || !existsSync(file)) {
+            await route.fallback();
+            return;
+        }
+        const type = extname(file) === ".json" ? "application/json" : "text/yaml";
+        await route.fulfill({status: 200, contentType: type, body: readFileSync(file)});
+    });
+}
+
+/**
+ * The page height a capture has to cover, in CSS pixels.
+ *
+ * ``document.documentElement.scrollHeight`` is NOT that height on this
+ * app. The shell locks the viewport elements (``html,body{overflow:hidden}``)
+ * and scrolls INSIDE ``#root`` (``overflow-y:auto`` — the single-scroll
+ * contract pinned by ``frontend/src/styles/single-scroll-container.test.ts``).
+ * A scroll container keeps its own overflow to itself, so it never reaches
+ * an ancestor's ``scrollHeight``: for a page that scrolls, the document
+ * reports roughly the viewport height and nothing more (#3016).
+ *
+ * Measured on settings-general (light theme, seeded learner): document
+ * 1080 / 1435 / 1913 px versus ``#root`` 2497 / 3088 / 3774 px at
+ * desktop / tablet / mobile. The baselines covered 43-51 % of the page
+ * and stayed green, because actual and reference were cut at the same
+ * line — the #2696 class one layer deeper: that fix replaced
+ * ``fullPage`` for the DOCUMENT scroll, this one measures the NESTED
+ * container the app actually scrolls.
+ *
+ * So the oracle is the maximum of the document and the app scroller's
+ * content bottom. A missing ``#root`` is a broken assumption, not an
+ * empty page: fail loud rather than silently measure the viewport and
+ * report a truncated capture as complete.
+ */
+export async function contentHeightToCover(
+    page: Page,
+    {requireRoot = true}: {requireRoot?: boolean} = {},
+): Promise<number> {
+    return page.evaluate((requireRoot) => {
+        const root = document.getElementById("root");
+        if (!root) {
+            if (requireRoot) {
+                throw new Error(
+                    "contentHeightToCover: #root is missing — the app shell's " +
+                        "scroll container is the height oracle (#3016)",
+                );
+            }
+            // A surface outside the app shell (the static /start/ landing
+            // page) scrolls the document itself; there is no nested
+            // scroller to read. Opt-in only, via SettleOptions.noAppShell.
+            return Math.ceil(document.documentElement.scrollHeight);
+        }
+        return Math.ceil(
+            Math.max(
+                document.documentElement.scrollHeight,
+                root.scrollHeight + root.offsetTop,
+            ),
+        );
+    }, requireRoot);
+}
+
+/**
+ * Wait until the page layout stops growing — the fullPage screenshot height
+ * is stable across consecutive samples (#1696).
+ *
+ * Content surfaces (content-browser, content-discover, set-detail) render
+ * lists that load asynchronously (bundled content from Dexie, the registry);
+ * a fullPage shot fired mid-load captures a different page height run-to-run
+ * (observed ~700px swings on set-detail). Poll {@link contentHeightToCover}
+ * (the app scroller, NOT ``documentElement`` — #3016)
+ * until it repeats ``stableSamples`` times in a row, or give up after
+ * ``maxWaitMs`` (bounded so a perpetually-animating surface can never hang —
+ * animations are already disabled by ``settleForScreenshot``).
+ */
+export async function waitForStableLayout(
+    page: Page,
+    {
+        stableSamples = 3,
+        intervalMs = 120,
+        maxWaitMs = 4_000,
+        requireRoot = true,
+    }: {
+        stableSamples?: number;
+        intervalMs?: number;
+        maxWaitMs?: number;
+        requireRoot?: boolean;
+    } = {},
+): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
+    let last = -1;
+    let stable = 0;
+    while (Date.now() < deadline) {
+        const height = await contentHeightToCover(page, {requireRoot});
+        if (height === last) {
+            stable += 1;
+            if (stable >= stableSamples) return;
+        } else {
+            stable = 0;
+            last = height;
+        }
+        await page.waitForTimeout(intervalMs);
+    }
+}
+
+/**
+ * Settle the page for a deterministic screenshot: wait for web fonts, kill
+ * any animation/transition durations, and allow one reflow after the
+ * font-swap (the gap between fallback and loaded font is a flake source).
+ */
+/** Options for {@link settleForScreenshot}. */
+export interface SettleOptions {
+    /** The surface DELIBERATELY baselines a persistent toast (#3081: the
+     *  held-back-update call to action). Skips the transient-toast wait
+     *  instead of racing it; every other surface keeps the #2721 cap. */
+    allowPersistentToast?: boolean;
+    /** The surface is a static page OUTSIDE the app shell (the ``/start/``
+     *  landing page), so there is no ``#root`` scroller: the height oracle
+     *  reads the document instead of failing loud. Every app surface keeps
+     *  the #3016 contract. */
+    noAppShell?: boolean;
+}
+
+export async function settleForScreenshot(
+    page: Page,
+    options: SettleOptions = {},
+): Promise<void> {
+    // #3688 - the toast timer bar is spared. react-toastify closes a toast
+    // on that bar's ``animationend``; cutting an animation that is already
+    // running to 0s did not fire it in Chromium (diagnosed: focus and
+    // visibility fine, play state running, duration 0s), so a toast that
+    // appeared just before this tag never closed. Its own autoClose then
+    // ends it inside the cap below.
+    await page.addStyleTag({
+        content:
+            "*:not(.Toastify__progress-bar), *::before, *::after {" +
+            " animation-duration: 0s !important;" +
+            " animation-delay: 0s !important; transition-duration: 0s !important;" +
+            " transition-delay: 0s !important; caret-color: transparent !important; }",
+    });
+    // #3792 - the milestone overlay (MilestoneHost: a badge, a level-up) is
+    // hidden, not waited for. Reaching the summary completes the lesson, and
+    // the celebration that follows can fly in after any absence check, even
+    // between the retried shots of toHaveScreenshot: three refreshes caught
+    // the "first lesson" badge on error replay. It is fixed-position, so
+    // hiding it changes no layout, and no motif covers the overlay itself.
+    await page.addStyleTag({
+        content: '[data-testid="milestone-overlay"] { display: none !important; }',
+    });
+    await page.evaluate(() => document.fonts.ready);
+    // 250ms (was 100ms): the post-font reflow on the mobile lesson surface
+    // occasionally landed AFTER the shot, shifting the page ~4px (#1540).
+    await page.waitForTimeout(250);
+    // #1785 — pin the scroll position to the TOP before the shot. On lesson
+    // routes the auto-hide header (v1.60.0, scroll-direction driven) makes
+    // the nav's presence in the shot depend on whether the seeding clicks
+    // scrolled the page - a height-NEUTRAL nondeterminism the stable-layout
+    // poll below cannot see (observed as per-run theme diffs with the nav
+    // bar present in one run and absent in the next). At the top the header
+    // is always revealed; for surfaces already at the top this is a no-op.
+    await page.evaluate(() => {
+        document.getElementById("root")?.scrollTo(0, 0);
+        window.scrollTo(0, 0);
+    });
+    await page.waitForTimeout(100);
+    // #1696 — the fullPage shot must not fire while a list is still loading
+    // (async bundled-content / registry renders change the page height
+    // run-to-run). Wait for the layout height to settle first. Bounded, so a
+    // never-settling surface can't hang; animations are already killed above.
+    await waitForStableLayout(page, {requireRoot: !options.noAppShell});
+    // #2721 — wait out TRANSIENT toasts before the shot. The lesson
+    // motivation toast (useLessonMotivation, autoClose: 3000) fires on
+    // entering the LAST step; ``playBundledLesson`` walks through that step
+    // on the way to the summary/result surfaces, so whether the toast is
+    // still fading at shot time depends on runner speed — under CI worker
+    // contention the walk sits near the 3s boundary and the toast's ~19k px
+    // flip between runs (the lesson-result/-summary flap; the diff artifact
+    // shows exactly the toast box). ``freezeClock`` only freezes ``Date``,
+    // real timers keep running, so every autoClose toast clears within its
+    // own lifetime; the 8s cap covers autoClose + exit fade with margin. A
+    // surface that ever legitimately BASELINES a persistent toast would
+    // time out here and must opt out explicitly instead of racing.
+    // #2898 - park the pointer in the neutral top-left corner BEFORE
+    // waiting the toasts out: the app's ToastContainer runs
+    // ``pauseOnHover`` at ``bottom-right`` (App.tsx), and the
+    // bundled-lesson walk leaves the mouse wherever its last
+    // ``lesson-next`` click landed - on the mobile viewport that is
+    // exactly where the motivation toast appears, so a still-fading
+    // toast freezes its autoClose under the parked pointer and
+    // outlives any cap. Moving the mouse lets every transient toast
+    // run its own lifetime; a genuinely persistent toast still trips
+    // the timeout below.
+    await page.mouse.move(0, 0);
+    if (options.allowPersistentToast) return;
+    try {
+        await page.waitForFunction(
+            () => document.querySelectorAll(".Toastify__toast").length === 0,
+            undefined,
+            {timeout: 8_000},
+        );
+    } catch {
+        throw new Error(
+            "settleForScreenshot: a toast is still visible after 8s - " +
+                "either a persistent toast leaked into this surface or an " +
+                "autoClose grew past the cap (#2721). " +
+                (await describeStuckToasts(page)),
+        );
+    }
+}
+
+/**
+ * Why a toast is still on screen (#3688): its text, whether it is an
+ * auto-closing toast at all (an error toast has no timer bar), and the timer
+ * bar's play state and duration, next to the page's focus and visibility.
+ * react-toastify closes a toast on the bar's ``animationend``; it pauses the
+ * bar on hover and, with ``pauseOnFocusLoss``, while the document has no
+ * focus, and a bar whose running animation was cut to 0s never ends (the
+ * #3688 cause). This names which one held the toast.
+ */
+async function describeStuckToasts(page: Page): Promise<string> {
+    try {
+        const state = await page.evaluate(() => ({
+            hasFocus: document.hasFocus(),
+            visibility: document.visibilityState,
+            toasts: [...document.querySelectorAll(".Toastify__toast")].map((toast) => {
+                const bar = toast.querySelector<HTMLElement>(".Toastify__progress-bar");
+                const style = bar ? getComputedStyle(bar) : null;
+                return {
+                    text: (toast.textContent ?? "").trim().slice(0, 80),
+                    timer: bar !== null,
+                    playState: style?.animationPlayState ?? null,
+                    inlinePlayState: bar?.style.animationPlayState ?? null,
+                    duration: style?.animationDuration ?? null,
+                };
+            }),
+        }));
+        return `State: ${JSON.stringify(state)}`;
+    } catch (err) {
+        return `State unreadable: ${String(err)}`;
+    }
+}
+
+/**
+ * Chromium hard-caps raster surfaces at 16384px; a capture near that limit
+ * would silently degrade, so the expansion fails loud well below it. The
+ * tallest real surface today is set-detail@mobile at ~14.6k.
+ */
+const MAX_EXPANDED_VIEWPORT_HEIGHT = 16_000;
+
+/** Growth rounds before the expansion gives up and fails loud (#3016).
+ *  Each round reflows ``dvh``-sized chrome, which can uncover more content;
+ *  every real surface converges in two. */
+const EXPANSION_ROUNDS = 6;
+
+/**
+ * Residue a viewport-tracking surface may leave outside the frame (#3016).
+ *
+ * On the lesson routes the page measures exactly ``viewport + 61px`` at
+ * EVERY frame size (measured in CI across the three theme viewports:
+ * 1438/1499, 1586/1647, 1687/1748 — the same 61 each time). The shell
+ * sizes ``#root`` off ``100dvh``, so growing the frame grows the surface
+ * with it and the residue never closes. The expansion stops at the frame
+ * it has reached: everything reachable is inside it, and one more round
+ * would only stretch the layout further from what a user sees.
+ *
+ * The cap keeps that from becoming a licence to truncate: a residue this
+ * size is viewport-sized chrome, one several times larger would be real
+ * content no capture can reach, and that fails loud instead.
+ */
+const MAX_VIEWPORT_TRACKING_RESIDUE = 200;
+
+/**
+ * Grow the viewport to the full document height so a plain (non-fullPage)
+ * screenshot captures the whole page — the replacement for ``fullPage: true``
+ * on this app's layout (#2696).
+ *
+ * ``fullPage`` uses CDP ``captureBeyondViewport``, which on the app's
+ * ``html,body{overflow:hidden}`` + ``#root{overflow-y:auto}`` nested-scroll
+ * layout never paints anything below the viewport: every tall-page baseline
+ * was blank from ~viewport height down (74-95% dead pixels, measured across
+ * content-browser / set-detail / settings-general@mobile at all three
+ * viewports) — and stayed green because actual and baseline were blank in
+ * the same place. With the viewport grown to the document height everything
+ * is genuinely in-viewport, so Chromium rasters every tile.
+ *
+ * #3016 — the height comes from {@link contentHeightToCover}, NOT from
+ * ``documentElement`` alone: the page scrolls inside ``#root``, whose
+ * overflow the document never reports, so the original oracle read the
+ * viewport height back on most surfaces and the expansion was a no-op
+ * exactly where it was needed. Measured before the fix: settings-general
+ * captured 43-51 % of its page at the three viewports, and the comparison
+ * stayed green because reference and actual were cut at the same line.
+ *
+ * Runs to a fixpoint: growing the viewport reflows ``dvh``-sized elements,
+ * which can uncover more content. No-op for pages that genuinely fit.
+ * Returns the covered content height so the caller can record WHAT was
+ * measured (gate-contract point 4) instead of only that it passed.
+ * Call AFTER ``settleForScreenshot`` so the measured height is stable.
+ */
+export async function expandViewportToDocument(page: Page): Promise<number> {
+    const viewport = page.viewportSize();
+    if (!viewport) return 0;
+    let height = viewport.height;
+    let contentHeight = height;
+    let previousResidue = -1;
+    for (let i = 0; i < EXPANSION_ROUNDS; i++) {
+        contentHeight = await contentHeightToCover(page);
+        if (contentHeight > MAX_EXPANDED_VIEWPORT_HEIGHT) {
+            throw new Error(
+                `expandViewportToDocument: the surface is ${contentHeight}px tall, ` +
+                    `over the ${MAX_EXPANDED_VIEWPORT_HEIGHT}px raster-safety cap — ` +
+                    "shrink the surface fixture instead of capturing a degraded shot",
+            );
+        }
+        if (contentHeight <= height) return contentHeight;
+        const residue = contentHeight - height;
+        // #3016 — a residue that does not move when the frame grows means
+        // the surface is sized off the viewport (``#root`` is ``100dvh``):
+        // the target travels with every round, so no frame size can ever
+        // close it. Stop here — the frame already covers everything that
+        // is reachable, and one more round would only stretch the layout
+        // further from what a user sees, for zero additional coverage.
+        if (Math.abs(residue - previousResidue) <= 2) {
+            if (residue > MAX_VIEWPORT_TRACKING_RESIDUE) {
+                throw new Error(
+                    `expandViewportToDocument: the surface tracks the viewport and ` +
+                        `still leaves ${residue}px outside the frame, over the ` +
+                        `${MAX_VIEWPORT_TRACKING_RESIDUE}px chrome allowance (#3016). ` +
+                        "That is content no capture at any frame size can reach — " +
+                        "fix the surface or its fixture, do not raise the allowance.",
+                );
+            }
+            return height;
+        }
+        previousResidue = residue;
+        height = contentHeight;
+        await page.setViewportSize({width: viewport.width, height});
+        await page.waitForTimeout(150);
+        await waitForStableLayout(page);
+    }
+    // #3016 — fail CLOSED. Falling out of the loop means the surface kept
+    // growing; capturing here would silently cut it off, which is exactly
+    // the condition that stayed green for months. "I could not cover it" is
+    // never "there is nothing below".
+    contentHeight = await contentHeightToCover(page);
+    if (contentHeight > height) {
+        throw new Error(
+            `expandViewportToDocument: the surface still measures ${contentHeight}px ` +
+                `inside a ${height}px viewport after ${EXPANSION_ROUNDS} growth ` +
+                "rounds — the capture would cut it off (#3016). Either the layout " +
+                "keeps reflowing with the viewport, or a late async render is " +
+                "still landing; do not lower the round count to make it pass.",
+        );
+    }
+    return contentHeight;
+}
+
+/** Seed a learner (onboarding quick-start + assessment) -> lands on /dashboard.
+ *  Exported so the per-feature capture script (#1023) reuses the single
+ *  onboarding path instead of re-implementing it. */
+export async function seedLearner(page: Page): Promise<void> {
+    await completeOnboarding(page, {migrationOffer: "none"});
+    await completeAssessment(page);
+    await page.waitForURL("**/dashboard", {timeout: 30_000});
+}
+
+/**
+ * Download the bundled set and play its first lesson. ``stopAt`` controls
+ * where the playthrough halts:
+ *   - "summary": answer every step, land on the lesson summary.
+ *   - "matching-result": pair the FIRST matching exercise with a
+ *     deliberate wrong rotation of ``wrongPairs`` pairs (default 2, the
+ *     one swapped pair), check it (showing correct + wrong feedback), and
+ *     stop there.
+ * Returns true if the requested state was reached, false otherwise (so the
+ * caller can skip rather than commit a meaningless baseline).
+ */
+/**
+ * Download the bundled set (if not already cached) and open its first
+ * lesson, leaving the page on the lesson runner (``lesson-page`` visible).
+ * Shared opener for every lesson-state seed. Exported for the per-feature
+ * capture script (#1023).
+ */
+export async function openFirstBundledLesson(page: Page): Promise<void> {
+    // #1257 flipped the global content-view default to "list"; this opener
+    // navigates through the grid/tree surface, so pin the pref to "grid"
+    // for this page before the navigation (#1414). Idempotent under the
+    // visual/dexie configs, which already seed the same value globally.
+    await page.addInitScript(() => {
+        localStorage.setItem("adaptive-learner.content_view_mode", "grid");
+    });
+    await page.goto("/content?tab=my");
+    await expect(page.getByTestId("content-tree")).toBeVisible({timeout: 20_000});
+    await page.getByTestId("content-other-toggle").click();
+    await page.getByTestId(`content-set-${SET_ID}-action`).click();
+    const openBtn = page.getByTestId(`content-set-${SET_ID}-open`);
+    await expect(openBtn).toBeVisible({timeout: 25_000});
+    await openBtn.click();
+    await expect(page.getByTestId("lesson-page")).toBeVisible({timeout: 20_000});
+    // #1540 data anchor: the "Set: …" context line resolves via an async
+    // listSets lookup and inserts a header row when it lands - the source
+    // of the ~4px content shift on the mobile lesson shots. The bundled
+    // set is always discoverable here, so the line ALWAYS appears; wait
+    // for it instead of racing it.
+    await expect(page.getByTestId("lesson-header-set")).toBeVisible({
+        timeout: 10_000,
+    });
+}
+
+export async function playBundledLesson(
+    page: Page,
+    stopAt: "summary" | "matching-result",
+    {wrongPairs = 2}: {wrongPairs?: number} = {},
+): Promise<boolean> {
+    await openFirstBundledLesson(page);
+
+    for (let i = 0; i < 60; i++) {
+        if (await page.getByTestId("lesson-summary").count()) break;
+
+        const isMatching = (await page.getByTestId("matching-exercise").count()) > 0;
+        if (isMatching && stopAt === "matching-result") {
+            const reached = await pairMatchingWithWrongCycle(page, wrongPairs);
+            if (reached) return true;
+        }
+
+        await answerCurrentStep(page);
+
+        const check = page.getByTestId("lesson-check");
+        if (await check.count()) {
+            await expect(check).toBeEnabled({timeout: 5_000});
+            await check.click();
+        }
+        const next = page.getByTestId("lesson-next");
+        if (await next.count()) {
+            await expect(next).toBeVisible({timeout: 5_000});
+            await next.click();
+            await page.waitForTimeout(80);
+        }
+    }
+
+    if (stopAt === "summary") {
+        await expect(page.getByTestId("lesson-summary")).toBeVisible({
+            timeout: 20_000,
+        });
+        await settleLessonCompletion(page);
+        return true;
+    }
+    // Requested a matching result but never hit a matching step.
+    return false;
+}
+
+/**
+ * #3792 - reaching the summary completes the lesson, and the completion flow
+ * runs asynchronously: the write, then the milestone celebration (the "first
+ * lesson" badge, a level-up), which the app-root MilestoneHost shows for 3s
+ * plus a 0.5s gap per queued milestone, also on whatever page a motif moves
+ * on to. settleForScreenshot hides the overlay; this wait keeps what follows
+ * deterministic instead: the completion is written (the heading's check
+ * mark) and its follow-ups (XP, celebration, missions refresh) have run, by
+ * waiting until no overlay has been in the DOM for a quiet window longer than
+ * the gap between two milestones. A run without a learner never completes and
+ * skips the wait.
+ */
+async function settleLessonCompletion(page: Page): Promise<void> {
+    try {
+        await page
+            .getByTestId("lesson-summary-completed")
+            .waitFor({state: "visible", timeout: 10_000});
+    } catch {
+        return;
+    }
+    const quietMs = 2_000;
+    const deadline = Date.now() + 20_000;
+    let quietSince = Date.now();
+    for (;;) {
+        const busy = (await page.getByTestId("milestone-overlay").count()) > 0;
+        const now = Date.now();
+        if (busy) quietSince = now;
+        else if (now - quietSince >= quietMs) return;
+        if (now > deadline) {
+            throw new Error(
+                "playBundledLesson: a milestone overlay is still cycling 20s after the completion (#3792)",
+            );
+        }
+        await page.waitForTimeout(100);
+    }
+}
+
+/** Answer whatever exercise the current step renders (any valid answer).
+ *  Exported for the per-feature capture script (#1023). */
+export async function answerCurrentStep(page: Page): Promise<void> {
+    if (await page.getByTestId("free-text-input").count()) {
+        await page.getByTestId("free-text-input").fill("Bonjour");
+    } else if (await page.getByTestId("word-tiles-exercise").count()) {
+        const tiles = page.locator('[data-testid^="word-tile-scrambled-"]');
+        let guard = 0;
+        while ((await tiles.count()) > 0 && guard++ < 12) {
+            await tiles.first().click();
+        }
+    } else if (await page.getByTestId("picture-exercise").count()) {
+        await page.locator('[data-testid^="picture-choice-"]').first().click();
+    } else if (await page.getByTestId("matching-exercise").count()) {
+        const lefts = page.getByTestId(/^matching-left-\d+$/);
+        const n = await lefts.count();
+        for (let j = 0; j < n; j++) {
+            await page.getByTestId(`matching-left-${j}`).click();
+            await page.getByTestId(`matching-right-${j}`).click();
+        }
+    } else if (await page.locator('[data-testid^="cloze-choices-"]').count()) {
+        // Cloze select-mode (canonical multiple-choice, #1341) renders each
+        // blank as a tappable button radiogroup — pick the first option.
+        const groups = page.locator('[data-testid^="cloze-choices-"]');
+        const n = await groups.count();
+        for (let j = 0; j < n; j++) {
+            await groups.nth(j).getByRole("radio").first().click();
+        }
+    } else {
+        const blanks = page.locator('[data-testid^="cloze-input-"]');
+        const n = await blanks.count();
+        for (let j = 0; j < n; j++) await blanks.nth(j).fill("Bonjour");
+    }
+}
+
+/**
+ * Pair a matching exercise so that the first ``cycle`` pairs are WRONG and
+ * the rest correct, then check, leaving the default post-check view ("My
+ * answers" before #3505; "Corrections" since) on screen. Returns false when the
+ * grid is too small for the cycle.
+ *
+ * The wrong pairs form a rotation (left ``i`` -> right ``(i + 1) % cycle``;
+ * the testids carry the ORIGINAL pair index, so any other right is wrong):
+ * the default ``cycle`` of 2 is the one swapped pair every lesson-matching
+ * view shows; the adaptive seed rotates 3, because the analyzer needs 3
+ * errors from one lesson before it forms a cluster, and only a cluster
+ * makes the generator borrow the source lesson's theory step (#3224).
+ *
+ * Inside a lesson the MatchingExercise is rendered ``controlled`` (see
+ * ``Lesson.tsx``), so its internal ``matching-submit`` button is NOT
+ * rendered: submission is driven by the shared external ``lesson-check``
+ * button (``exerciseRef.submit()`` -> ``setSubmitted(true)``), which then
+ * renders ``matching-result``. Issue #270.
+ */
+async function pairMatchingWithWrongCycle(page: Page, cycle: number): Promise<boolean> {
+    const lefts = page.getByTestId(/^matching-left-\d+$/);
+    const n = await lefts.count();
+    if (n < cycle) return false;
+    for (let i = 0; i < cycle; i++) {
+        await page.getByTestId(`matching-left-${i}`).click();
+        await page.getByTestId(`matching-right-${(i + 1) % cycle}`).click();
+    }
+    for (let j = cycle; j < n; j++) {
+        await page.getByTestId(`matching-left-${j}`).click();
+        await page.getByTestId(`matching-right-${j}`).click();
+    }
+    const submit = page.getByTestId("lesson-check");
+    await expect(submit).toBeEnabled({timeout: 5_000});
+    await submit.click();
+    await expect(page.getByTestId("matching-result")).toBeVisible({
+        timeout: 5_000,
+    });
+    // #1785 - "matching-result visible" is NOT the settled post-check
+    // state; pin the view toggle, then wait for the page height to stop
+    // moving (same determinism class as #1696).
+    // #3505 - a check with mistakes opens on "Corrections" (the graded grid
+    // with the correct partner under each mistake), so the pin is the
+    // active Corrections toggle.
+    await expect(page.getByTestId("matching-corrections")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+        {timeout: 5_000},
+    );
+    await waitForStableLayout(page);
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Checked-state extension exercises (#2646).
+ *
+ * The bundled set carries none of the adopted extension exercise types,
+ * so the reading-comprehension / graded-quiz CHECKED states (the whole
+ * point of #2633's verdict tinting) were captured by NO baseline — the
+ * #1640 gate could only answer 0-diff or the escape label for changes to
+ * those renderers. These seeds author a minimal lesson through the REAL
+ * create-lesson extension wizard (the same flow the
+ * ``extension-wizard-3-4`` dexie spec proves end to end), play it, answer
+ * deterministically, and stop on the post-check resolution so all four
+ * verdicts (correct / missed / wrong / neutral), the free-text solution
+ * line, and the graded-quiz score badge are in frame.
+ *
+ * Determinism notes:
+ * - Both renderers shuffle MC options via ``seededShuffle(options,
+ *   `${exercise.id}#${index}`)`` (#2317). The exercise ids come from
+ *   ``crypto.randomUUID`` at authoring time, so the caller MUST install
+ *   ``pinRandomness`` before first navigation — ids (and therefore the
+ *   displayed option order) are then identical run-to-run.
+ * - Answers are selected by option TEXT, never by position, so the seeds
+ *   stay correct even if the pinned shuffle order ever changes.
+ */
+
+/** Fill one MC sub-question in the extension editor: prompt + a correct
+ *  and a wrong option. ``base`` is e.g. ``exercise-ext-rc-q-<id>-0``. */
+async function fillEditorMcQuestion(
+    page: Page,
+    base: string,
+    prompt: string,
+    correct: string,
+    wrong: string,
+): Promise<void> {
+    await page.getByTestId(`${base}-prompt`).fill(prompt);
+    await page.getByTestId(`${base}-opt-text-0`).fill(correct);
+    await page.getByTestId(`${base}-opt-text-1`).fill(wrong);
+    await page.getByTestId(`${base}-opt-correct-0`).check();
+}
+
+/** The id of the currently-open inline extension editor (``ex-ext-N``). */
+async function openExtensionEditorId(page: Page): Promise<string> {
+    const editor = page.locator('[data-testid^="exercise-ext-editor-"]');
+    await expect(editor).toBeVisible({timeout: 10_000});
+    const testid = await editor.getAttribute("data-testid");
+    return testid!.replace("exercise-ext-editor-", "");
+}
+
+/**
+ * Author one lesson holding a reading-comprehension exercise (two MC
+ * sub-questions + one free-text) and a graded-quiz exercise (one MC
+ * question, default 60% threshold), save it locally, and open it in the
+ * lesson player. Leaves the page on the first step (the RC exercise).
+ */
+async function authorExtensionLesson(page: Page): Promise<boolean> {
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-page")).toBeVisible({
+        timeout: 15_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill("Visual: Extensions geprüft");
+    await page.getByTestId("create-lesson-templates-toggle").click();
+    await page.getByTestId("template-extensions").click();
+    await expect(page.getByTestId("create-lesson-extension-step")).toBeVisible();
+
+    // --- Reading comprehension: 2 MC + 1 free-text sub-question ---
+    await page.getByTestId("extension-add").click();
+    await page.getByTestId("extension-add-type-reading-comprehension").click();
+    const rcId = await openExtensionEditorId(page);
+    await page
+        .getByTestId(`exercise-ext-prompt-${rcId}`)
+        .fill("Lies den Text und beantworte die Fragen");
+    await page
+        .getByTestId(`exercise-ext-rc-passage-${rcId}`)
+        .fill("Rex lief in den Garten und bellte den Postboten an.");
+    await fillEditorMcQuestion(
+        page,
+        `exercise-ext-rc-q-${rcId}-0`,
+        "Wohin lief Rex?",
+        "In den Garten",
+        "Auf die Straße",
+    );
+    await page.getByTestId(`exercise-ext-rc-q-add-${rcId}`).click();
+    await fillEditorMcQuestion(
+        page,
+        `exercise-ext-rc-q-${rcId}-1`,
+        "Wen bellte Rex an?",
+        "Den Postboten",
+        "Die Katze",
+    );
+    await page.getByTestId(`exercise-ext-rc-q-add-${rcId}`).click();
+    const freeBase = `exercise-ext-rc-q-${rcId}-2`;
+    await page.getByTestId(`${freeBase}-type-free`).check();
+    await page.getByTestId(`${freeBase}-prompt`).fill("Was tat Rex im Garten?");
+    await page.getByTestId(`${freeBase}-accept-input`).fill("bellen");
+    await page.getByTestId(`${freeBase}-accept-add`).click();
+    await expect(page.getByTestId(`exercise-ext-save-${rcId}`)).toBeEnabled();
+    await page.getByTestId(`exercise-ext-save-${rcId}`).click();
+
+    // --- Graded quiz: 1 MC question, default threshold (60%) ---
+    await page.getByTestId("extension-add").click();
+    await page.getByTestId("extension-add-type-graded-quiz").click();
+    const gqId = await openExtensionEditorId(page);
+    await page.getByTestId(`exercise-ext-prompt-${gqId}`).fill("Kurzes Quiz");
+    await fillEditorMcQuestion(
+        page,
+        `exercise-ext-gq-q-${gqId}-0`,
+        "Wer bellte?",
+        "Rex",
+        "Der Postbote",
+    );
+    await expect(page.getByTestId(`exercise-ext-save-${gqId}`)).toBeEnabled();
+    await page.getByTestId(`exercise-ext-save-${gqId}`).click();
+
+    // --- Review, save locally, play ---
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-extension-review")).toBeVisible();
+    await page.getByTestId("create-lesson-save-local").click();
+    await expect(page.getByTestId("create-lesson-saved")).toBeVisible({
+        timeout: 15_000,
+    });
+    await page.getByTestId("create-lesson-play").click();
+    await expect(page.getByTestId("lesson-page")).toBeVisible({timeout: 15_000});
+    // The extension template may prepend theory/intro steps before the
+    // first exercise — advance until the RC step renders (bounded).
+    for (let i = 0; i < 10; i++) {
+        if (await page.getByTestId("reading-comprehension-exercise").count()) {
+            return true;
+        }
+        const next = page.getByTestId("lesson-next");
+        if (await next.count()) {
+            await next.click();
+            await page.waitForTimeout(120);
+            continue;
+        }
+        const check = page.getByTestId("lesson-check");
+        if (await check.count()) {
+            await expect(check).toBeEnabled({timeout: 5_000});
+            await check.click();
+            await page.waitForTimeout(120);
+            continue;
+        }
+        await page.waitForTimeout(250);
+    }
+    return (await page.getByTestId("reading-comprehension-exercise").count()) > 0;
+}
+
+/** Click the MC option carrying ``text`` inside sub-question ``q`` of the
+ *  reading-comprehension renderer (position-independent — options are
+ *  shuffle-displayed, #2317). */
+async function clickRcOptionByText(
+    page: Page,
+    q: number,
+    text: string,
+): Promise<void> {
+    await page
+        .locator(`[data-testid^="reading-comprehension-q${q}-option-"]`)
+        .filter({hasText: text})
+        .first()
+        .click();
+}
+
+/**
+ * Seed the CHECKED reading-comprehension state: q0 answered correctly
+ * (``correct`` verdict), q1 answered wrongly (``wrong`` + dashed-green
+ * ``missed`` on its correct option, ``neutral`` on the untouched ones),
+ * q2 free-text answered wrongly (green solution line). Ends on the
+ * post-check resolution.
+ */
+async function gotoReadingComprehensionChecked(page: Page): Promise<boolean> {
+    if (!(await authorExtensionLesson(page))) return false;
+    await clickRcOptionByText(page, 0, "In den Garten");
+    await clickRcOptionByText(page, 1, "Die Katze");
+    await page
+        .getByTestId("reading-comprehension-q2-input")
+        .fill("schlafen");
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await expect(page.getByTestId("reading-comprehension-result")).toBeVisible({
+        timeout: 10_000,
+    });
+    // The free-text solution line is the LAST verdict element to render —
+    // pin it before the shot so the fullPage height has settled. The lesson
+    // document scrolls inside #root (html/body are viewport-locked), so
+    // ``fullPage`` captures only the current scroll state — bring the
+    // solution line into frame; the q0-q2 verdict block is short enough
+    // that every verdict stays visible after the minimal scroll.
+    await expect(
+        page.getByTestId("reading-comprehension-q2-solution"),
+    ).toBeVisible({timeout: 5_000});
+    await waitForStableLayout(page);
+    return true;
+}
+
+/**
+ * Seed the CHECKED graded-quiz state: pass the RC step minimally, then
+ * answer the quiz question wrongly and check — the resolution shows the
+ * score badge (``failed`` at 0/1 under the default 60% threshold) plus
+ * the per-option verdict marks.
+ */
+async function gotoGradedQuizChecked(page: Page): Promise<boolean> {
+    if (!(await authorExtensionLesson(page))) return false;
+    // Step past the RC exercise with minimal correct-ish answers.
+    await clickRcOptionByText(page, 0, "In den Garten");
+    await clickRcOptionByText(page, 1, "Den Postboten");
+    await page.getByTestId("reading-comprehension-q2-input").fill("bellen");
+    const check = page.getByTestId("lesson-check");
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await expect(page.getByTestId("reading-comprehension-result")).toBeVisible({
+        timeout: 10_000,
+    });
+    const next = page.getByTestId("lesson-next");
+    await expect(next).toBeVisible({timeout: 5_000});
+    await next.click();
+    await expect(page.getByTestId("graded-quiz-exercise")).toBeVisible({
+        timeout: 10_000,
+    });
+    // Answer the single question WRONG (by text, position-independent):
+    // 0 points of 1 sits under the default 60% threshold -> failed badge.
+    await page
+        .getByTestId("graded-quiz-question-0")
+        .locator("label")
+        .filter({hasText: "Der Postbote"})
+        .first()
+        .click();
+    await expect(check).toBeEnabled({timeout: 5_000});
+    await check.click();
+    await expect(page.getByTestId("graded-quiz-result")).toBeVisible({
+        timeout: 10_000,
+    });
+    await expect(page.getByTestId("graded-quiz-score")).toBeVisible({
+        timeout: 5_000,
+    });
+    await waitForStableLayout(page);
+    return true;
+}
+
+/**
+ * Bring ``view`` into its screenshot state (theme already pinned by the
+ * caller). Returns true when ready, false when the view could not be
+ * deterministically reached (caller skips). A reached view must carry the
+ * random pin, or this throws (``assertRandomPinInstalled``, #3214).
+ *
+ * @example
+ * test.skip(!(await gotoView(page, "dashboard")), "not reachable");
+ */
+export async function gotoView(page: Page, view: ViewName): Promise<boolean> {
+    const ready = await reachView(page, view);
+    if (ready) await assertRandomPinInstalled(page);
+    return ready;
+}
+
+/** The per-view navigation behind {@link gotoView}. */
+async function reachView(page: Page, view: ViewName): Promise<boolean> {
+    switch (view) {
+        case "settings":
+            await seedLearner(page);
+            await page.goto("/settings");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "dashboard":
+            await seedLearner(page);
+            // A played lesson populates XP / progress / missions.
+            await playBundledLesson(page, "summary");
+            // #3016 — the SAME ready contract the critical-surfaces
+            // dashboard uses, down to the SRS quiescence wait. Waiting
+            // only for the page shell let the async cards land after the
+            // shot; harmless while the frame was viewport-sized, a
+            // per-run height flip (1449 vs 1580) once the frame follows
+            // the content. Two motifs of one surface with two different
+            // ready contracts is how one of them stays flaky.
+            await waitForSrsQuiescence(page, {expectRows: true});
+            await gotoDashboardInApp(page);
+            await settleDashboard(page, {populated: true});
+            return true;
+        case "learning-path":
+            await seedLearner(page);
+            await playBundledLesson(page, "summary");
+            await page.goto("/learning-path");
+            // Wait for the set rows (content loaded), not just the page shell
+            // (which also renders during loading/empty) — a stable ready signal.
+            await expect(page.getByTestId("learning-path-sets")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "lesson-result":
+            return playBundledLesson(page, "summary");
+        case "lesson-matching":
+            return playBundledLesson(page, "matching-result");
+        case "lesson-reading-comprehension-checked":
+            // #2646 — authored ids feed the option-shuffle seed (#2317);
+            // pin randomness BEFORE any navigation so ids and therefore
+            // the displayed option order are identical run-to-run. The
+            // taller viewport keeps the whole verdict block (down to the
+            // free-text solution line) in frame: ``settleForScreenshot``
+            // deliberately pins the scroll to the top (#1785), so the
+            // frame must FIT the content instead of scrolling to it.
+            await page.setViewportSize({width: 1440, height: 1220});
+            await pinRandomness(page);
+            await seedLearner(page);
+            return gotoReadingComprehensionChecked(page);
+        case "lesson-graded-quiz-checked":
+            await page.setViewportSize({width: 1440, height: 1220});
+            await pinRandomness(page);
+            await seedLearner(page);
+            return gotoGradedQuizChecked(page);
+        default:
+            return false;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Critical-surfaces matrix (#705) — surfaces × viewports, default theme.
+ *
+ * Phase 1 of #705: broaden the #244 theme matrix (which is 5 views ×
+ * desktop) into the critical user-facing surfaces, each shot at three
+ * responsive viewports so layout regressions (overflow, stacked nav,
+ * touch targets) are caught alongside the theme/contrast ones.
+ * ------------------------------------------------------------------ */
+
+/** The three responsive breakpoints every critical surface is shot at. */
+export const VIEWPORTS = {
+    desktop: {width: 1920, height: 1080},
+    tablet: {width: 768, height: 1024},
+    mobile: {width: 375, height: 667},
+    // #3355 - a narrow laptop: the range (769-1279 px) where the top bar
+    // collapses into the drawer. Rendered for LAPTOP_SURFACES only.
+    laptop: {width: 1024, height: 768},
+} as const;
+
+export type ViewportName = keyof typeof VIEWPORTS;
+
+/** The full matrix every surface renders at (#1640). */
+export const DEFAULT_VIEWPORTS: readonly ViewportName[] = ["desktop", "tablet", "mobile"];
+
+/** Every critical surface in the Phase-1 (default-theme) matrix. */
+export const SURFACE_NAMES = [
+    "dashboard-empty",
+    "dashboard-populated",
+    "dashboard-badges",
+    "dashboard-activity",
+    "content-browser",
+    "content-discover",
+    "content-import",
+    "content-my-lessons",
+    "create-lesson",
+    "set-detail",
+    "lesson-theory",
+    "lesson-cloze",
+    "lesson-matching",
+    "lesson-summary",
+    "review-session",
+    "shuffle-session",
+    "endless-session",
+    "adaptive-lesson",
+    "error-replay",
+    "statistics",
+    "settings-general",
+    "settings-data",
+    "settings-about",
+    "settings-ai",
+    "settings-learning",
+    "settings-plugins",
+    "shortcut-help",
+] as const;
+
+export type SurfaceName = (typeof SURFACE_NAMES)[number];
+
+/**
+ * Surfaces that also render at ``laptop`` (#3355). The header changes
+ * layout inside 769-1279 px and no matrix viewport sat there; one surface
+ * with the full header is enough to pin it without a fourth full matrix.
+ */
+export const LAPTOP_SURFACES: ReadonlySet<SurfaceName> = new Set<SurfaceName>([
+    "dashboard-populated",
+]);
+
+/**
+ * Elements a surface's comparison masks (Playwright ``mask``: painted over
+ * in both the baseline and the actual shot), keyed by surface, listed by
+ * testid. Only for content that MOVES between two renders of the same
+ * pinned state and cannot be pinned - today the Endless stat clock, a
+ * timer ``freezeClock`` does not stop (#3215). Everything around a masked
+ * element stays compared; a mask is never a way to hide a layout change.
+ * The other ``setInterval`` consumers (flash-round countdown, timed mode,
+ * arcade clocks, the import analysis phases, the Create-Lesson autosave)
+ * render on no captured surface or paint nothing, so they carry no entry.
+ */
+export const SURFACE_MASKS: Partial<Record<SurfaceName, readonly string[]>> = {
+    "endless-session": ["endless-stat-time"],
+};
+
+/** The ``mask`` locators of a surface (empty for surfaces without one). */
+export function surfaceMasks(page: Page, surface: SurfaceName): Locator[] {
+    return (SURFACE_MASKS[surface] ?? []).map((testId) => page.getByTestId(testId));
+}
+
+/**
+ * Advance the open lesson runner until ``predicate`` reports the wanted
+ * step is on screen, answering each intervening step. Returns true when
+ * the predicate matched, false if the lesson ended first (so the caller
+ * can skip rather than commit a meaningless baseline).
+ * Exported for the per-feature capture script (#1023).
+ */
+export async function advanceLessonUntil(
+    page: Page,
+    predicate: () => Promise<boolean>,
+): Promise<boolean> {
+    for (let i = 0; i < 60; i++) {
+        if (await predicate()) return true;
+        if (await page.getByTestId("lesson-summary").count()) return false;
+        await answerCurrentStep(page);
+        const check = page.getByTestId("lesson-check");
+        if (await check.count()) {
+            await expect(check).toBeEnabled({timeout: 5_000});
+            await check.click();
+        }
+        const next = page.getByTestId("lesson-next");
+        if (await next.count()) {
+            await expect(next).toBeVisible({timeout: 5_000});
+            await next.click();
+            await page.waitForTimeout(80);
+        }
+    }
+    return false;
+}
+
+/** Open the bundled lesson and stop on the first theory step.
+ *
+ * #2704 - the renderer's testid has been ``lesson-theory-body`` since the
+ * viewer shipped (Phase 44); this helper looked for a bare ``lesson-theory``
+ * that never existed, so the surface silently skipped at every viewport
+ * from the day the #705 matrix landed and never produced a baseline. */
+async function gotoLessonTheory(page: Page): Promise<boolean> {
+    await openFirstBundledLesson(page);
+    const theory = page.getByTestId("lesson-theory-body");
+    if (await theory.count()) {
+        await expect(theory.first()).toBeVisible({timeout: 10_000});
+        return true;
+    }
+    return advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("lesson-theory-body").count()) > 0,
+    );
+}
+
+/** Open the bundled lesson and stop on the first ``cloze-exercise`` step. */
+async function gotoLessonCloze(page: Page): Promise<boolean> {
+    await openFirstBundledLesson(page);
+    const reached = await advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("cloze-exercise").count()) > 0,
+    );
+    if (reached) {
+        await expect(page.getByTestId("cloze-exercise").first()).toBeVisible({
+            timeout: 10_000,
+        });
+    }
+    return reached;
+}
+
+/** Open the bundled lesson and stop on the unsolved ``matching-exercise``. */
+async function gotoLessonMatching(page: Page): Promise<boolean> {
+    await openFirstBundledLesson(page);
+    const reached = await advanceLessonUntil(
+        page,
+        async () => (await page.getByTestId("matching-exercise").count()) > 0,
+    );
+    if (reached) {
+        await expect(page.getByTestId("matching-exercise").first()).toBeVisible({
+            timeout: 10_000,
+        });
+    }
+    return reached;
+}
+
+
+/**
+ * #1540 — the exercise flow persists SRS rows fire-and-forget
+ * (``void onComplete(scored)`` -> ``elementErrors.recordBulk``), so a
+ * cross-document navigation right after a check can kill the write
+ * mid-flight. Whether the review queue (and the dashboard cards fed by
+ * it) later saw the rows was a per-run coin flip - the bimodality behind
+ * the wandering visual failures. Before leaving the lesson document,
+ * wait until the rows the review-queue read will actually hit (this
+ * learner + the bundled set, not mastered) are non-empty (``expectRows``)
+ * and QUIET: two reads 300ms apart see the same row count.
+ */
+async function waitForSrsQuiescence(
+    page: Page,
+    opts: {expectRows: boolean},
+): Promise<void> {
+    await page.waitForFunction(
+        async ({expectRows, setId}) => {
+            const countRows = () =>
+                new Promise<number>((resolve, reject) => {
+                    const open = indexedDB.open("adaptive-learner");
+                    open.onerror = () => reject(open.error);
+                    open.onsuccess = () => {
+                        const db = open.result;
+                        try {
+                            const req = db
+                                .transaction("elementErrors", "readonly")
+                                .objectStore("elementErrors")
+                                .getAll();
+                            req.onsuccess = () => {
+                                db.close();
+                                const userId = localStorage.getItem(
+                                    "adaptive-learner.user_id",
+                                );
+                                const rows = req.result as Array<
+                                    Record<string, unknown>
+                                >;
+                                resolve(
+                                    rows.filter(
+                                        (r) =>
+                                            r.user_id === userId &&
+                                            r.set_id === setId &&
+                                            !r.mastered,
+                                    ).length,
+                                );
+                            };
+                            req.onerror = () => {
+                                db.close();
+                                reject(req.error);
+                            };
+                        } catch (err) {
+                            db.close();
+                            reject(err);
+                        }
+                    };
+                });
+            const first = await countRows();
+            if (expectRows && first === 0) return false;
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            return (await countRows()) === first;
+        },
+        {expectRows: opts.expectRows, setId: SET_ID},
+        {timeout: 15_000, polling: 500},
+    );
+}
+
+/**
+ * Pin the offline-lesson cache to EMPTY for the settings-data motif
+ * (#3016).
+ *
+ * The "Offline-Cache" line counts what the service worker has stored in
+ * ``adaptive-learner-lessons``. In CI the sets arrive over the network
+ * while the page is open, so the count differs from run to run, and at
+ * the narrow viewports its text wraps to one more line: a 24 px height
+ * difference between the run that RENDERED the baseline and the run that
+ * compares against it (8286 vs 8262 on mobile). Waiting for the value to
+ * settle fixes it within a run and cannot make two runs agree - this is
+ * the live-data class of #1653, and the remedy there is the same: pin the
+ * source to a synthetic fixture instead of photographing whatever the
+ * network happened to deliver.
+ *
+ * Only ``keys()`` on that ONE cache is replaced, so the empty state is
+ * deterministic; every other cache and every other method still reaches
+ * the real Cache Storage.
+ */
+async function pinLessonCacheEmpty(page: Page): Promise<void> {
+    await page.addInitScript((cacheName: string) => {
+        if (typeof caches === "undefined") return;
+        const openOriginal = caches.open.bind(caches);
+        caches.open = async (name: string): Promise<Cache> => {
+            const cache = await openOriginal(name);
+            if (name !== cacheName) return cache;
+            return new Proxy(cache, {
+                get(target, prop, receiver) {
+                    if (prop === "keys") return async () => [];
+                    const value = Reflect.get(target, prop, receiver);
+                    return typeof value === "function"
+                        ? value.bind(target)
+                        : value;
+                },
+            });
+        };
+    }, "adaptive-learner-lessons");
+}
+
+/**
+ * Pin the user-badge store to EMPTY for the settings-data motif (#3035).
+ *
+ * "Deine Sicherung enthält" counts real backup rows per table
+ * (``getDexieBackupStats``: ``toArray()`` on every store, filtered to the
+ * user). Whether the seeded learner already holds the ``first_assessment``
+ * badge when that count runs is a race between the gamification write
+ * fired by the assessment and the Settings navigation - so the "Plaketten"
+ * line and the "Datensätze gesamt" total flipped between runs (35 vs 34, a
+ * 24 px page height) and the file came back as churn on unrelated PRs
+ * (#3034). Third data source in this one motif after the live
+ * recommended-repos list (#1653) and the offline-lesson cache (#3016), same
+ * remedy: pin the source instead of photographing what the run happened to
+ * produce.
+ *
+ * Only reads on the ``userBadges`` object store are pinned: each read goes
+ * to the REAL IndexedDB with a key range no row can match, so the store
+ * answers "no rows" through its own machinery - no fake request objects,
+ * and every other store, index and write is untouched. The block therefore
+ * renders the deterministic state "no badge row, total without badges".
+ */
+async function pinUserBadgesEmpty(page: Page): Promise<void> {
+    await page.addInitScript((storeName: string) => {
+        if (typeof IDBObjectStore === "undefined") return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const proto = IDBObjectStore.prototype as any;
+        const noRow = () => IDBKeyRange.only("__visual-pin-empty__");
+        for (const method of ["getAll", "getAllKeys", "count", "openCursor", "openKeyCursor"]) {
+            const original = proto[method];
+            proto[method] = function (this: IDBObjectStore, ...args: unknown[]) {
+                if (this.name !== storeName) return original.apply(this, args);
+                return original.call(this, noRow(), ...args.slice(1));
+            };
+        }
+    }, "userBadges");
+}
+
+/**
+ * Wait until a testid's text stops changing (#3016).
+ *
+ * For values a surface keeps refining while it is open - the offline
+ * cache line counts what the service worker has stored so far - there is
+ * no "done" signal to wait for; the page simply settles. Two agreeing
+ * reads a poll apart are that settling, the same shape as
+ * {@link waitForStableLayout}, and the bound keeps a never-settling value
+ * from hanging the run.
+ */
+async function waitForStableText(
+    page: Page,
+    testId: string,
+    {intervalMs = 400, maxWaitMs = 15_000} = {},
+): Promise<void> {
+    const locator = page.getByTestId(testId);
+    await expect(locator).toBeVisible({timeout: 20_000});
+    const deadline = Date.now() + maxWaitMs;
+    let previous: string | null = null;
+    while (Date.now() < deadline) {
+        const current = ((await locator.textContent()) ?? "").trim();
+        if (current && current !== "…" && current === previous) return;
+        previous = current;
+        await page.waitForTimeout(intervalMs);
+    }
+}
+
+/**
+ * Open the dashboard by CLIENT-SIDE navigation from wherever the seed
+ * left the browser (#3016).
+ *
+ * Not ``page.goto``: a full navigation fires ``beforeunload`` on the
+ * lesson route, and its handler writes a "paused" lesson-progress row
+ * (``useLessonFlowControl``, Phase 63B). That write races the dashboard's
+ * own read of those rows, and the "Weiterlernen" card it feeds is exactly
+ * the 131 px by which the dashboard measured 1449 or 1580 px - per run,
+ * per theme, in both directions. No wait can order the two: the write is
+ * started by the very navigation the read follows.
+ *
+ * A route change inside the app removes the listener through the effect
+ * cleanup instead of firing it, so no row is written and the card is
+ * deterministically absent. The brand link in the nav points at
+ * /dashboard in every nav state, the lesson-compact one included.
+ */
+async function gotoDashboardInApp(page: Page): Promise<void> {
+    await page.locator("a.nav-brand").first().click();
+    await page.waitForURL("**/dashboard", {timeout: 20_000});
+}
+
+/**
+ * #3504 - the dashboard Activity tab: year heatmap, learning-profile radar
+ * and the spaced-practice card list render only here, so without this
+ * motif a change to any of them synced as a 0-diff that checked nothing.
+ * Same seed as ``dashboard-populated`` (a played lesson, so the heatmap has
+ * a day and the review queue a row), reached in-app (no ``beforeunload``
+ * row, see {@link gotoDashboardInApp}), then the tab. Ready when the panel,
+ * the heatmap (not its loading stub) and the radar have rendered.
+ */
+async function gotoDashboardActivity(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await playBundledLesson(page, "summary");
+    await waitForSrsQuiescence(page, {expectRows: true});
+    await gotoDashboardInApp(page);
+    await page.getByTestId("dashboard-tab-activity").click();
+    await expect(page.getByTestId("dashboard-tab-activity-panel")).toBeVisible({
+        timeout: 20_000,
+    });
+    await expect(page.getByTestId("streak-calendar")).toBeVisible({timeout: 20_000});
+    await expect(page.getByTestId("profile-radar")).toBeVisible({timeout: 20_000});
+    await expect(page.getByTestId("review-queue-card-loading")).toHaveCount(0, {
+        timeout: 20_000,
+    });
+    return true;
+}
+
+/** Every loading placeholder the dashboard publishes (#3016). A card
+ *  still in its loading state means the page has not reached its final
+ *  height, and the capture would freeze a transient layout. */
+const DASHBOARD_LOADING_TESTIDS = [
+    "dashboard-loading",
+    "progress-loading",
+    "focus-areas-card-loading",
+    "review-queue-card-loading",
+    "statistics-loading",
+] as const;
+
+/**
+ * #1540 data anchors for the dashboard: the ``dashboard`` testid renders
+ * while the Übersicht tab is still a lazy Suspense hole and its cards are
+ * still fetching, so a shot raced whatever sections had landed. Wait until
+ * every async section is either visible or has EXPLICITLY resolved to
+ * absent before returning:
+ *   - the lazy overview chunk is mounted,
+ *   - Weitermachen rendered (its empty state also carries the testid),
+ *   - the AI invite card rendered (no key is configured in visual runs),
+ *   - the review-queue card left its loading stub (card or dropped).
+ * With ``populated`` the played lesson additionally guarantees a
+ * Weitermachen item list.
+ */
+async function settleDashboard(
+    page: Page,
+    opts: {populated: boolean},
+): Promise<void> {
+    await expect(page.getByTestId("dashboard")).toBeVisible({timeout: 20_000});
+    await expect(page.getByTestId("dashboard-tab-overview-panel")).toBeVisible({
+        timeout: 20_000,
+    });
+    await expect(page.getByTestId("continue-learning")).toBeVisible({
+        timeout: 20_000,
+    });
+    if (opts.populated) {
+        await expect(page.getByTestId("continue-learning-list")).toBeVisible({
+            timeout: 20_000,
+        });
+    }
+    await expect(page.getByTestId("ai-invite-card")).toBeVisible({
+        timeout: 20_000,
+    });
+    // #3016 — EVERY async card must have landed, not just the review
+    // queue. With the frame at a fixed height a late card only changed
+    // what sat below the fold; now it changes the IMAGE height, and the
+    // dashboard flipped between two heights per run (1449/1580 at 1440
+    // wide, 1864/2016 at 375). Waiting on the loading placeholders is the
+    // ready signal the surface already publishes - no heuristic sleep.
+    for (const loadingId of DASHBOARD_LOADING_TESTIDS) {
+        await expect(page.getByTestId(loadingId)).toHaveCount(0, {
+            timeout: 20_000,
+        });
+    }
+    if (opts.populated) {
+        // waitForSrsQuiescence guaranteed error rows before we navigated
+        // here, so the due-review card is a deterministic fixture.
+        await expect(page.getByTestId("review-queue-card")).toBeVisible({
+            timeout: 20_000,
+        });
+    }
+}
+
+/**
+ * Seed a learner, then drive a wrong-answer matching playthrough (which
+ * writes ``ElementError`` rows) and open the set's review session.
+ *
+ * #1540 data anchor: whether the review queue showed the seeded element
+ * or the empty state depended on the Dexie error-write landing before the
+ * queue read - a per-run coin flip that made the baseline unconvergeable.
+ * The wrong pair above ALWAYS produces due elements, so require the ACTIVE
+ * review session (``review-page`` + its step-count subtitle) and re-enter
+ * the route while the write is still in flight instead of accepting
+ * whichever state renders first.
+ */
+export async function gotoReviewSession(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    await playBundledLesson(page, "matching-result");
+    // The wrong pair guarantees error rows; make sure they LANDED before
+    // navigating away (the navigation would kill an in-flight write and
+    // leave the queue empty for the rest of the test).
+    await waitForSrsQuiescence(page, {expectRows: true});
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await page.goto(`/review/${SET_ID}`);
+        try {
+            await expect(page.getByTestId("review-page")).toBeVisible({
+                timeout: 5_000,
+            });
+            await expect(page.getByTestId("review-subtitle")).toBeVisible({
+                timeout: 5_000,
+            });
+            return true;
+        } catch {
+            // Queue not materialised yet - re-enter the route.
+        }
+    }
+    return false;
+}
+
+/**
+ * Open a set-level runner route on the bundled set and wait for its
+ * ready anchors (EXP-052 slice 2). Opening the first bundled lesson
+ * first guarantees the set is cached: Shuffle and Endless resolve the set
+ * through ``listSets`` and render their not-cached screen otherwise. The
+ * route is re-entered while the anchors are missing (the cache write can
+ * still be landing), the same bounded retry as ``gotoReviewSession``.
+ * Fails closed without the random pin: the order on screen would be
+ * browser-random (#3214).
+ */
+async function gotoSetRunner(
+    page: Page,
+    route: string,
+    anchors: readonly string[],
+): Promise<boolean> {
+    await seedLearner(page);
+    await openFirstBundledLesson(page);
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await page.goto(`${route}/${SET_ID}`);
+        try {
+            for (const anchor of anchors) {
+                await expect(page.getByTestId(anchor)).toBeVisible({timeout: 5_000});
+            }
+        } catch {
+            // Set list not materialised yet - re-enter the route.
+            continue;
+        }
+        // Outside the try: a missing pin must fail the test, not read as
+        // "not ready yet" and end in a silent skip.
+        await assertRandomPinInstalled(page);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Seed a learner and open the Shuffle session of the bundled set on its
+ * first step (EXP-052 slice 2). The Fisher-Yates order comes from the
+ * ``"shuffle-order"`` stream ``pinRandomStreams`` installs (#3214), so it is
+ * the same on every run and at every viewport, whatever else drew from
+ * ``Math.random`` first; the first question is stable.
+ */
+export async function gotoShuffleSession(page: Page): Promise<boolean> {
+    return gotoSetRunner(page, "/shuffle-lesson", [
+        "shuffle-page",
+        "shuffle-subtitle",
+        "shuffle-check",
+    ]);
+}
+
+/**
+ * Seed a learner and open the Endless stream of the bundled set on its
+ * first card (EXP-052 slice 2): header, the stat line in the progress
+ * slot, the card, and the footer with pause and End. The stream opens
+ * with new cards in lesson order, so the first card is stable (the
+ * repetitions after the queue draw from the ``"endless-repeat"`` stream
+ * ``pinRandomStreams`` installs, #3214). The stat line's clock is a
+ * ``setInterval`` counter (``useActiveSeconds``), which ``freezeClock``
+ * does not stop, so its digits depend on the seconds between ready and
+ * capture; the comparison masks them via ``SURFACE_MASKS`` (#3215) rather
+ * than leaving them to the diff tolerance, which would also swallow a real
+ * change of the same size (#3023).
+ */
+export async function gotoEndlessSession(page: Page): Promise<boolean> {
+    return gotoSetRunner(page, "/endless-lesson", [
+        "endless-page",
+        "endless-stat-line",
+        "endless-step",
+        "endless-end",
+    ]);
+}
+
+/**
+ * Seed a learner, record SRS error rows with three wrong matching pairs and
+ * open the set's adaptive lesson on its FIRST screen, the one a learner
+ * sees (EXP-052 slice 3, #3224): the session header with the F-115
+ * transparency block under the title, the shared progress bar, the theory
+ * page the generator borrows from the source lesson, and the footer with
+ * Previous and Next (no Check: a theory page has nothing to grade).
+ *
+ * Three wrong pairs, not the lesson views' one swapped pair: the analyzer
+ * forms a cluster only from 3 errors of one lesson, and only a cluster
+ * makes the generator borrow the theory step (``lesson-generator.ts``,
+ * ``_theoryStepForCluster``). With two errors the lesson had no theory
+ * page, and the capture never showed the state every real adaptive lesson
+ * opens on; the old helper additionally clicked past any leading
+ * non-exercise step, which is how "This exercise is missing its type" on
+ * that page stayed invisible (#3224).
+ *
+ * Fails closed on the first screen: a missing theory page, a Check in the
+ * footer or the missing-type placeholder throws instead of skipping. The
+ * generator draws no randomness, so the steps follow the analysis of the
+ * seeded rows. The route is re-entered while the lesson is not generated
+ * yet (the error write can still be landing), the same bounded retry as
+ * ``gotoReviewSession``. The first exercise is its own named step:
+ * {@link gotoAdaptiveExercise}.
+ */
+export async function gotoAdaptiveLesson(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    if (!(await playBundledLesson(page, "matching-result", {wrongPairs: 3}))) return false;
+    await waitForSrsQuiescence(page, {expectRows: true});
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await page.goto(`/adaptive-lesson/${SET_ID}`);
+        try {
+            for (const anchor of ["adaptive-lesson-page", "adaptive-transparency", "adaptive-lesson-footer"]) {
+                await expect(page.getByTestId(anchor)).toBeVisible({timeout: 5_000});
+            }
+        } catch {
+            // Lesson not generated yet - re-enter the route.
+            continue;
+        }
+        await assertAdaptiveTheoryPage(page);
+        return true;
+    }
+    return false;
+}
+
+/** The adaptive lesson's opening theory page, asserted (never skipped past). */
+async function assertAdaptiveTheoryPage(page: Page): Promise<void> {
+    await expect(page.getByTestId("adaptive-lesson-theory-body")).toBeVisible({timeout: 5_000});
+    await expect(page.getByTestId("adaptive-lesson-next")).toBeVisible();
+    await expect(page.getByTestId("adaptive-lesson-check")).toHaveCount(0);
+    await expect(page.getByTestId("lesson-exercise-placeholder-missing")).toHaveCount(0);
+}
+
+/**
+ * The adaptive lesson's first EXERCISE, one Next after the opening theory
+ * page {@link gotoAdaptiveLesson} asserts: the runner around an exercise,
+ * with the two-phase Check in the footer. A named step of its own, so the
+ * theory page is shown or passed on purpose, never stepped around.
+ */
+export async function gotoAdaptiveExercise(page: Page): Promise<boolean> {
+    if (!(await gotoAdaptiveLesson(page))) return false;
+    await page.getByTestId("adaptive-lesson-next").click();
+    await expect(page.getByTestId("adaptive-lesson-theory-body")).toHaveCount(0);
+    await expect(page.getByTestId("adaptive-lesson-check")).toBeVisible({timeout: 5_000});
+    return true;
+}
+
+/**
+ * Answer and check every remaining step of the OPEN lesson until its
+ * summary renders (the tail of a ``playBundledLesson(page,
+ * "matching-result")`` run, which stops right after the checked matching
+ * step).
+ */
+async function playOpenLessonToSummary(page: Page): Promise<void> {
+    for (let i = 0; i < 60; i++) {
+        if (await page.getByTestId("lesson-summary").count()) return;
+        const next = page.getByTestId("lesson-next");
+        if (await next.count()) {
+            await next.click();
+            await page.waitForTimeout(80);
+            continue;
+        }
+        await answerCurrentStep(page);
+        const check = page.getByTestId("lesson-check");
+        if (await check.count()) {
+            await expect(check).toBeEnabled({timeout: 5_000});
+            await check.click();
+        }
+    }
+    await expect(page.getByTestId("lesson-summary")).toBeVisible({timeout: 20_000});
+    // #3792 - the error-replay motif leaves the summary right away; let the
+    // completion's milestone overlay come and go first (see
+    // settleLessonCompletion).
+    await settleLessonCompletion(page);
+}
+
+/**
+ * Seed a learner, play the bundled lesson with the wrong matching pair to
+ * its summary, and open "Retry errors" from its mistakes section
+ * (EXP-052 slice 3): the replay on its first failed exercise with the
+ * session header (Back to lesson, "Retry errors: <lesson>"), the shared
+ * progress bar and the lesson footer with Previous. The replay reads its
+ * exercises from router state, so it can only be reached through the
+ * summary, never by URL. The compact summary holds the mistakes section
+ * behind "Detailed evaluation" (#3153) and the section itself may land
+ * collapsed (#2496); both are opened when present.
+ */
+export async function gotoErrorReplay(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    if (!(await playBundledLesson(page, "matching-result"))) return false;
+    await playOpenLessonToSummary(page);
+    const detailed = page.getByTestId("lesson-summary-detailed-toggle");
+    if (await detailed.count()) await detailed.click();
+    await expect(page.getByTestId("lesson-correction-block")).toBeVisible({timeout: 10_000});
+    const expand = page.getByTestId("lesson-correction-block-expand");
+    if (await expand.count()) await expand.click();
+    const replay = page.getByTestId("lesson-correction-replay");
+    if (!(await replay.count())) return false;
+    await replay.click();
+    await expect(page.getByTestId("error-replay-page")).toBeVisible({timeout: 15_000});
+    await expect(page.getByTestId("error-replay-check")).toBeVisible({timeout: 10_000});
+    return true;
+}
+
+/**
+ * Move every SRS error row of the current learner ``days`` into the past
+ * (#3123). The badge in the header counts OVERDUE elements only, and a
+ * fresh wrong answer is due tomorrow (``intervalDaysForStreak(0)`` = 1
+ * day), so a playthrough alone never shows the badge. Rewriting
+ * ``last_attempt_at`` on the rows the playthrough wrote is the smallest
+ * honest seed: the rows, ids and set are the app's own, only the clock
+ * on them moves. Computed inside the page so a frozen clock
+ * (``freezeClock``) stays consistent.
+ */
+export async function backdateElementErrors(
+    page: Page,
+    days: number,
+): Promise<number> {
+    return page.evaluate(
+        ({days}) =>
+            new Promise<number>((resolve, reject) => {
+                const open = indexedDB.open("adaptive-learner");
+                open.onerror = () => reject(open.error);
+                open.onsuccess = () => {
+                    const db = open.result;
+                    const userId = localStorage.getItem("adaptive-learner.user_id");
+                    const pastIso = new Date(
+                        Date.now() - days * 86_400_000,
+                    ).toISOString();
+                    const tx = db.transaction("elementErrors", "readwrite");
+                    const store = tx.objectStore("elementErrors");
+                    const req = store.getAll();
+                    let moved = 0;
+                    req.onsuccess = () => {
+                        for (const row of req.result as Array<Record<string, unknown>>) {
+                            if (row.user_id !== userId) continue;
+                            row.last_attempt_at = pastIso;
+                            if (row.last_error_at) row.last_error_at = pastIso;
+                            store.put(row);
+                            moved += 1;
+                        }
+                    };
+                    tx.oncomplete = () => {
+                        db.close();
+                        resolve(moved);
+                    };
+                    tx.onerror = () => {
+                        db.close();
+                        reject(tx.error);
+                    };
+                };
+            }),
+        {days},
+    );
+}
+
+/**
+ * Seed a learner whose header carries the due-reviews badge and XP
+ * (#3123): the wrong-pair matching playthrough writes error rows, those
+ * rows are backdated so they count as overdue, and the dashboard is
+ * opened by in-app navigation (the route change re-reads the queue).
+ * Shared by the ``dashboard-badges`` motif and the phone-header fit spec
+ * (``e2e/dexie/nav-header-fit.spec.ts``); returns false when the
+ * playthrough could not reach the matching result.
+ */
+export async function gotoDashboardWithDueReviews(page: Page): Promise<boolean> {
+    await seedLearner(page);
+    if (!(await playBundledLesson(page, "matching-result"))) return false;
+    await waitForSrsQuiescence(page, {expectRows: true});
+    const moved = await backdateElementErrors(page, 3);
+    if (moved === 0) return false;
+    await gotoDashboardInApp(page);
+    await settleDashboard(page, {populated: false});
+    await expect(page.getByTestId("nav-reviews-badge")).toBeVisible({
+        timeout: 20_000,
+    });
+    await expect(page.getByTestId("nav-xp-badge")).toBeVisible();
+    return true;
+}
+
+/**
+ * Build ONE own lesson through the Create-Lesson wizard, then leave the
+ * browser on the Content hub (#3011).
+ *
+ * The "My Lessons" section only renders when at least one user-generated
+ * set exists (``ImportActionsPanel`` filters on ``userSets.length > 0``),
+ * and no motif seeded one — so the section and everything in it sat
+ * outside the whole screenshot set: a change there produced a green
+ * comparison by construction, exactly the #2477/#2486 class.
+ *
+ * Deterministic by construction: a fixed title and a fixed four-card
+ * table (the same synthetic fixture shape ``combine-lessons.spec.ts``
+ * uses), with the clock frozen and randomness pinned by the caller.
+ *
+ * The hand-off back to the hub uses the wizard's OWN "to browser" button
+ * rather than a hard ``goto``: a fresh navigation renders the global
+ * empty state before the IndexedDB sets have loaded, so the section
+ * would be missing at exactly the moment the shot is taken.
+ */
+/** Create an own four-card lesson through the wizard and land on the
+ *  content browser (#3011). Exported for the per-feature capture script
+ *  (#3060). */
+export async function createOwnLesson(page: Page, title: string): Promise<void> {
+    await page.goto("/create-lesson");
+    await expect(page.getByTestId("create-lesson-step-1")).toBeVisible({
+        timeout: 20_000,
+    });
+    await declineDraftPrompt(page);
+    await page.getByTestId("create-lesson-title").fill(title);
+    await page.getByTestId("create-lesson-next").click();
+    for (const card of OWN_LESSON_CARDS) {
+        await page.getByTestId("card-front-input").fill(card.front);
+        await page.getByTestId("card-back-input").fill(card.back);
+        await page.getByTestId("card-add-button").click();
+    }
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-step-3")).toBeVisible({
+        timeout: 15_000,
+    });
+    await page.getByTestId("exercise-generate").click();
+    await page.getByTestId("create-lesson-next").click();
+    await expect(page.getByTestId("create-lesson-step-4")).toBeVisible({
+        timeout: 15_000,
+    });
+    await page.getByTestId("create-lesson-save-local").click();
+    await expect(page.getByTestId("create-lesson-saved")).toBeVisible({
+        timeout: 20_000,
+    });
+    await page.getByTestId("create-lesson-to-browser").click();
+}
+
+/**
+ * Bring ``surface`` into its screenshot state in the DEFAULT theme. The
+ * caller has already set the viewport + frozen the clock. Returns true
+ * when ready, false when the surface can't be reached deterministically
+ * (caller skips). A reached surface must carry the random pin, or this
+ * throws (``assertRandomPinInstalled``, #3214).
+ *
+ * @example
+ * test.skip(!(await gotoSurface(page, "shuffle-session")), "not reachable");
+ */
+export async function gotoSurface(
+    page: Page,
+    surface: SurfaceName,
+): Promise<boolean> {
+    const ready = await reachSurface(page, surface);
+    if (ready) await assertRandomPinInstalled(page);
+    return ready;
+}
+
+/** The per-surface navigation behind {@link gotoSurface}. */
+async function reachSurface(
+    page: Page,
+    surface: SurfaceName,
+): Promise<boolean> {
+    switch (surface) {
+        case "dashboard-empty":
+            await seedLearner(page);
+            await page.goto("/dashboard");
+            await settleDashboard(page, {populated: false});
+            return true;
+        case "dashboard-populated":
+            await seedLearner(page);
+            await playBundledLesson(page, "summary");
+            await waitForSrsQuiescence(page, {expectRows: true});
+            await gotoDashboardInApp(page);
+            await settleDashboard(page, {populated: true});
+            return true;
+        case "dashboard-badges":
+            return gotoDashboardWithDueReviews(page);
+        case "dashboard-activity":
+            return gotoDashboardActivity(page);
+        case "content-browser":
+            await seedLearner(page);
+            await page.goto("/content?tab=my");
+            await expect(page.getByTestId("content-tree")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "content-discover":
+            // #1380 — the Discover tab shares the Content-hub PageContainer;
+            // the desktop viewport is where a missing container shows (rows
+            // spanning the full viewport width).
+            await seedLearner(page);
+            await page.goto("/content?tab=discover");
+            await expect(page.getByTestId("discover-page")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "content-import":
+            // #1380 — same shared container on the Import tab.
+            await seedLearner(page);
+            await page.goto("/content?tab=import");
+            await expect(page.getByTestId("page-import")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "content-my-lessons":
+            // #3011 — the Import tab WITH an own lesson present. The
+            // existing ``content-import`` motif seeds none, so the whole
+            // section (six row actions, the combine selection, the fork
+            // badge and, since #3010, the create button) was in no motif:
+            // any change to it, however wrong, still compared green.
+            // Randomness is pinned before the first navigation because
+            // the generated exercises derive their ids from it.
+            await pinRandomness(page);
+            await seedLearner(page);
+            await createOwnLesson(page, OWN_LESSON_TITLE);
+            await page.getByTestId("content-tab-import").click();
+            await expect(page.getByTestId("content-my-lessons")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "create-lesson":
+            // #2755 - wizard step 1: the required title leads the form and
+            // the template picker sits behind the collapsed disclosure;
+            // this motif IS the visual pin of that order (the checked-state
+            // motifs enter the wizard via the extensions path and never
+            // show step 1, which is why the #2755 rework produced a 0-diff
+            // sync until this surface existed).
+            await seedLearner(page);
+            await page.goto("/create-lesson");
+            await expect(page.getByTestId("create-lesson-step-1")).toBeVisible({
+                timeout: 15_000,
+            });
+            await expect(page.getByTestId("create-lesson-title")).toBeVisible();
+            await expect(
+                page.getByTestId("create-lesson-templates-toggle"),
+            ).toBeVisible();
+            return true;
+        case "set-detail":
+            await seedLearner(page);
+            await page.goto("/content?tab=my");
+            await expect(page.getByTestId("content-tree")).toBeVisible({
+                timeout: 20_000,
+            });
+            await page.getByTestId("content-other-toggle").click();
+            await page.getByTestId(`content-set-${SET_ID}-action`).click();
+            // The downloaded set exposes its Open control once cached — a
+            // stable signal that the set-detail surface has rendered.
+            await expect(page.getByTestId(`content-set-${SET_ID}-open`)).toBeVisible(
+                {timeout: 25_000},
+            );
+            return true;
+        case "lesson-theory":
+            await seedLearner(page);
+            return gotoLessonTheory(page);
+        case "lesson-cloze":
+            await seedLearner(page);
+            return gotoLessonCloze(page);
+        case "lesson-matching":
+            await seedLearner(page);
+            return gotoLessonMatching(page);
+        case "lesson-summary":
+            await seedLearner(page);
+            return playBundledLesson(page, "summary");
+        case "review-session":
+            return gotoReviewSession(page);
+        case "shuffle-session":
+            return gotoShuffleSession(page);
+        case "endless-session":
+            return gotoEndlessSession(page);
+        case "adaptive-lesson":
+            return gotoAdaptiveLesson(page);
+        case "error-replay":
+            return gotoErrorReplay(page);
+        case "statistics":
+            await seedLearner(page);
+            await playBundledLesson(page, "summary");
+            await waitForSrsQuiescence(page, {expectRows: true});
+            await page.goto("/statistics");
+            await expect(page.getByTestId("statistics")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "settings-general":
+            await seedLearner(page);
+            await page.goto("/settings?tab=general");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "settings-data":
+            await seedLearner(page);
+            // #3016 — pin the offline-cache count before the settings
+            // navigation; see pinLessonCacheEmpty for why the live value
+            // cannot be photographed reproducibly.
+            await pinLessonCacheEmpty(page);
+            // #3035 — pin the badge row count of "Deine Sicherung enthält"
+            // the same way; see pinUserBadgesEmpty for the race behind it.
+            await pinUserBadgesEmpty(page);
+            await page.goto("/settings?tab=data");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            // #3016 — the offline-cache line renders a bare "…" until
+            // getCacheInfo resolves, and then reports what the service
+            // worker has cached SO FAR. In CI the sets are fetched over
+            // the network while the page is already open, so the number
+            // keeps moving and its text wraps to a second line at 768px:
+            // a 24px page-height flip (7028 vs 7052) that survived the
+            // plain "no longer …" wait. Sample until two reads agree.
+            await waitForStableText(page, "cache-summary");
+            return true;
+        case "settings-about":
+            await seedLearner(page);
+            await page.goto("/settings?tab=about");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "settings-ai":
+            // #2486 - the AI provider-key tab renders
+            // @astrapi69/ai-key-vault-react (a package-consumed-classNames
+            // surface, see docs/development/package-classname-consumers.md).
+            // Its absence from this matrix is why the #2477 unstyled-ship
+            // stayed invisible to a dispatched 0-diff verify run.
+            await seedLearner(page);
+            await page.goto("/settings?tab=ai");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "settings-learning":
+            // #2953 - the Learning tab had no motif, so every Learning-tab
+            // PR could only ship under the visual-baselines-unaffected
+            // escape label (the #2486 class: a 0-diff verify run proves
+            // nothing about a surface that is not in the matrix).
+            await seedLearner(page);
+            await page.goto("/settings?tab=learning");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "settings-plugins":
+            // #3055 - the Plugins tab had no motif (the #2486 class). In the
+            // Dexie build the installed-plugins card renders its desktop-only
+            // notice above the Learning-Repository card.
+            await seedLearner(page);
+            await page.goto("/settings?tab=plugins");
+            await expect(page.getByTestId("settings")).toBeVisible({
+                timeout: 20_000,
+            });
+            return true;
+        case "shortcut-help":
+            await seedLearner(page);
+            await page.goto("/dashboard");
+            await expect(page.getByTestId("dashboard")).toBeVisible({
+                timeout: 20_000,
+            });
+            await page.keyboard.press("?");
+            await expect(page.getByTestId("shortcut-help")).toBeVisible({
+                timeout: 10_000,
+            });
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * #2703 — fail LOUD, not silent, when a surface's ready-state collapses
+ * between ``gotoSurface`` returning true and the screenshot actually
+ * firing. ``review-session`` is the known case: its anchor
+ * (``review-page`` + ``review-subtitle``) was satisfied at ``gotoSurface``
+ * time, but an unrelated re-render (the review-fetch effect re-running
+ * on a text-only ``title`` change, see ``useReviewLesson``) tore the
+ * session back down to the empty state before ``settleForScreenshot``
+ * finished — so the CI comparison stayed green against a baseline that
+ * never showed what the test name promised. Re-asserting the same anchor
+ * immediately before the shot turns that silent content-swap into a red,
+ * diagnosable test failure instead of a wrong committed baseline.
+ *
+ * A no-op for every surface without a known collapse risk; extend the
+ * switch as new instances of this class turn up rather than asserting
+ * broadly (a stale/renamed testid here would itself become a source of
+ * false failures for surfaces that never had this problem).
+ */
+export async function assertSurfaceStillReady(
+    page: Page,
+    surface: SurfaceName,
+): Promise<void> {
+    switch (surface) {
+        case "review-session":
+            await expect(page.getByTestId("review-page")).toBeVisible({
+                timeout: 2_000,
+            });
+            await expect(page.getByTestId("review-subtitle")).toBeVisible({
+                timeout: 2_000,
+            });
+            return;
+        case "content-my-lessons":
+            // #3011 — the whole point of this motif is the section; an
+            // empty set list (a lost seed, a collapsed reload) must fail
+            // loud instead of baselining the Import tab without it.
+            await expect(page.getByTestId("content-my-lessons")).toBeVisible({
+                timeout: 2_000,
+            });
+            await expect(page.getByTestId("content-my-lessons-list")).toBeVisible(
+                {timeout: 2_000},
+            );
+            return;
+        default:
+            return;
+    }
+}

@@ -1,0 +1,8 @@
+{
+  "default_sources": [
+    {
+      "source": "astrapi69/adaptive-learner-content",
+      "branch": "main"
+    }
+  ]
+}

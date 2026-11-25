@@ -1,0 +1,48 @@
+{
+  "category": "steps",
+  "language": "pt",
+  "entries": [
+    {
+      "key": "step_input",
+      "title": "1. Input",
+      "short": "Recebe material novo — explicação, exemplo ou pergunta da IA.",
+      "long": "## Passo 1: Input\n\nCada ciclo de aprendizagem começa com input. A IA\napresenta o material: uma explicação, um exemplo, uma\npergunta aberta ou uma situação — dependendo do método\nselecionado.\n\n## O que a IA faz\n\n- **No dedutivo**: explica a regra.\n- **No indutivo**: mostra exemplos.\n- **No baseado em erros**: apresenta um problema com\n  uma armadilha.\n- **No dialógico**: abre a conversa com uma pergunta.\n- **No contextual**: esboça o cenário.\n\n## O que você faz\n\nLeia com atenção. Faça perguntas quando algo não estiver\nclaro — a sessão é um diálogo, não uma palestra. Se achar\nque a confiança da IA está demasiado alta, persevere:\nalgumas explicações só fazem sentido na segunda leitura.\n\n## O que o avaliador de duplo prompt faz\n\nEstá a funcionar silenciosamente. Observa a sua reação\n(ou a ausência dela) e avalia se absorveu o material.\nA pontuação ativa começa no passo 2 (tentativa).\n\n## O que acontece se acelerar este passo\n\nO erro mais comum de principiantes: saltar para a\n\"ação\" sem processar o input. O sistema deteta isso\na partir de confiança baixa em tentativas subsequentes\n— e manda-o de volta ao passo 1.\n"
+    },
+    {
+      "key": "step_attempt",
+      "title": "2. Tentativa",
+      "short": "Aplica o que aprendeu a uma tarefa ou pergunta concreta.",
+      "long": "## Passo 2: Tentativa\n\nRecebe uma aplicação do material e tenta resolvê-la.\nPrimeira resposta, primeiro exemplo, primeira aplicação\nconcreta da regra.\n\n## O que a IA faz\n\nA IA dá-lhe uma tarefa claramente delimitada. Para\nlínguas: traduza uma frase. Para código: escreva uma\nfunção. Para música: pratique uma mudança de acorde.\nA dificuldade é deliberadamente baixa — a primeira\ntentativa deve ser realizável.\n\n## O que você faz\n\nTente. Mesmo que não tenha a certeza. Uma resposta\nincompleta ou errada é mais valiosa do que uma recusa\nporque dá ao avaliador material com que trabalhar.\n\n## Avaliador de duplo prompt\n\nAtiva-se aqui. Lê a sua resposta e atribui uma pontuação\nde confiança (0-100%). Com confiança elevada, avança\ndiretamente para o passo 5 (adaptação), ignorando a\nanálise de erros. Com confiança baixa, o caminho passa\npelo passo 3 (erro) e pelo passo 4 (feedback).\n\n## Dica: não se bloqueie\n\nSe não tiver nenhuma abordagem após 30 segundos, diga-o\nà IA (\"Não sei por onde começar\"). A IA dá-lhe uma\ndica em vez da solução completa — e o avaliador não\nconta isso como uma tentativa falhada.\n"
+    },
+    {
+      "key": "step_error",
+      "title": "3. Erro",
+      "short": "Um engano ou equívoco torna-se visível.",
+      "long": "## Passo 3: Erro\n\nSe a sua tentativa no passo 2 não atingiu o objetivo,\no ciclo passa por este passo. O erro é nomeado — não\njulgado, apenas assinalado como uma oportunidade de\naprendizagem.\n\n## O que a IA faz\n\nMostra-lhe onde está o erro, sem o corrigir imediatamente.\nO ponto crucial: deve *ver* o erro, não apenas *ouvir\nque algo estava errado*. Essa distinção determina se\nvai repetir o erro.\n\n## O que você faz\n\nRastreie o erro. Se conseguir corrigi-lo por si próprio,\nfaça-o. Se não, sinalize-o à IA (\"Não percebo onde está\no erro\") — o próximo passo (feedback) existe para\nesclarecer.\n\n## Quando não aparece nenhum erro\n\nCom confiança elevada no passo 2, o ciclo salta este\npasso. O sistema regista-o e aumenta a dificuldade no\npróximo ciclo — deve ser desafiado, não entediado.\n\n## No baseado em erros (método)\n\nSe escolheu este método, o passo 3 é o passo principal\ndo ciclo. A IA conduz-o deliberadamente para armadilhas\ntípicas — consulte o glossário de métodos.\n"
+    },
+    {
+      "key": "step_feedback",
+      "title": "4. Feedback",
+      "short": "A IA explica porquê algo funciona ou não funciona.",
+      "long": "## Passo 4: Feedback\n\nAqui vem a explicação. A IA descreve o princípio por\ntrás do seu erro ou da sua resposta correta —\nidealmente de forma que possa transferir o princípio\npara outros casos.\n\n## O que é um bom feedback\n\n- **O que aconteceu** (descrição da observação).\n- **Porquê aconteceu** (explicação do princípio).\n- **Como fazer de forma diferente da próxima vez**\n  (orientação de ação concreta).\n\nSem (3), o feedback evapora-se. Com (3), uma correção\ntorna-se uma regra transferível.\n\n## O que você faz\n\nLeia, siga, pergunte de volta. Se o feedback ainda não\nficou claro, diga-o. A IA tem paciência — explicará\no princípio noutra variante. Melhor compreendido duas\nvezes do que ecoado uma vez.\n\n## Avaliador de duplo prompt\n\nLê a sua reação ao feedback. Se disser \"Ah, agora\npercebo\" (ou equivalente), a confiança sobe e avança.\nSe ainda parecer confuso, o avaliador puxa o ciclo de\nvolta para o passo 1 (input) com uma nova abordagem de\nexplicação.\n\n## Também em respostas corretas\n\nO feedback não é apenas para erros. Quando resolveu\nalgo corretamente, a IA ainda assim explica o princípio\npor trás disso — para que o sucesso se torne\ntransferível.\n"
+    },
+    {
+      "key": "step_adapt",
+      "title": "5. Adaptação",
+      "short": "Ajusta a sua estratégia ou compreensão com base no feedback.",
+      "long": "## Passo 5: Adaptação\n\nPega no que aprendeu com o feedback e ajusta a sua\nabordagem. Não apenas intelectualmente (\"sim, agora\npercebo\"), mas operacionalmente (\"da próxima vez farei\nde forma diferente\").\n\n## O que acontece aqui concretamente\n\n- **Para línguas**: reformula. Em vez da construção\n  errada, usa a correta.\n- **Para código**: reestrutura a função com o princípio\n  compreendido.\n- **Para matemática**: resolve uma variante usando o\n  caminho de solução corrigido.\n\n## O que a IA faz\n\nDá-lhe uma tarefa *nova* — não a antiga com a solução\nconhecida, mas uma variação que exige o princípio\ncompreendido num novo contexto.\n\n## Porquê este passo é importante\n\nA compreensão sem adaptação evapora-se. Se apenas\n\"ecoa\" o feedback mas não o incorpora na sua abordagem,\nvai repetir o erro da próxima vez. O passo 5 força a\nativação operacional.\n\n## Avaliador de duplo prompt\n\nAqui avalia a transferência de aprendizagem. Uma\nadaptação bem-sucedida numa nova variação é o melhor\nsinal de que a aprendizagem ficou — a confiança\ntipicamente sobe acima de 80%.\n"
+    },
+    {
+      "key": "step_repeat",
+      "title": "6. Repetição",
+      "short": "Pratica com variações até que o que aprendeu fique fluente.",
+      "long": "## Passo 6: Repetição\n\nRecebe mais variações da tarefa. Não repetição idêntica\n(que apenas leva à memorização), mas variação: mesmo\nnúcleo, contexto diferente, dificuldade diferente.\n\n## O que a IA faz\n\nGera tarefas que testam o mesmo princípio em formas\ndiferentes. Para línguas: vocabulário diferente,\nestrutura frásica diferente, mesma gramática. Para\ncódigo: dados diferentes, mesma estrutura algorítmica.\n\n## Porquê variação e não repetição\n\nA investigação sobre **prática intercalada** mostra:\na prática em bloco (todas as tarefas sobre o mesmo\ntópico seguidas) cria ilusão de competência. A prática\nintercalada (tarefas relacionadas com variação) cria\nconhecimento transferível.\n\n## Quando o passo termina\n\nDepois de cada troca, o avaliador de duplo prompt decide\nse está pronto para o passo 7; o sistema aplica a\nproposta dele quando a sua confiança é de pelo menos 70%.\nCaso contrário, o ciclo permanece no passo 6.\n\n## Ligação à repetição espaçada\n\nO que resolve com sucesso no passo 6 entra no sistema\nde repetição espaçada. O sistema agenda revisões em\n1 dia, 3 dias, 7 dias, 14 dias, 30 dias — para que a\naprendizagem fique a longo prazo.\n"
+    },
+    {
+      "key": "step_integrate",
+      "title": "7. Integração",
+      "short": "Liga o que aprendeu a outros conhecimentos ou a uma aplicação real.",
+      "long": "## Passo 7: Integração\n\nO ciclo de aprendizagem termina com a colocação da nova\naprendizagem num contexto mais amplo. Não de forma\nisolada (\"hoje aprendi isto\") mas ligada ao que já sabia.\n\n## O que a IA faz\n\nDesafia-o a ligar o novo conteúdo a outros conceitos ou\na aplicá-lo num cenário real:\n\n- **Línguas**: usar o tempo verbal numa conversa livre.\n- **Código**: aplicar a nova técnica num projeto maior.\n- **Teoria**: combinar o conceito com uma das suas\n  próprias perguntas.\n\n## O que você faz\n\nArticule a ligação exigida. Encontre os seus próprios\nexemplos. Chegue ao ponto onde pode dizer: \"Consigo\nfazer isto agora — não porque memorizei, mas porque\nposso usá-lo.\"\n\n## O que acontece após o passo 7\n\nO ciclo está completo. Três opções:\n\n- **Terminar a sessão** e avaliá-la (compreensão /\n  stress / adequação do método).\n- **Auto-loop** (só na aplicação de desktop): um novo ciclo\n  com um novo tópico começa automaticamente.\n- **Mudança de método**: com baixa adequação do método,\n  o sistema recomenda uma mudança de método para o\n  próximo ciclo.\n\n## Porquê o sistema fecha aqui\n\nA integração é o único teste robusto de que a\naprendizagem funcionou. O conteúdo memorizado falha no\npasso 7; o conhecimento compreendido prospera aqui.\n"
+    }
+  ]
+}

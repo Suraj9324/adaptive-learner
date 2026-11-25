@@ -1,0 +1,676 @@
+/**
+ * Client-side element-error store for Dexie / GitHub Pages
+ * mode (Phase 46B / C7 / P-129).
+ *
+ * Mirrors the backend service
+ * (``app.services.element_errors``) 1:1 — same transition
+ * matrix, same MASTERY_THRESHOLD constant, same lesson-
+ * scoped composite key. GH-Pages users get the same SRS
+ * feedback loop without a backend roundtrip.
+ *
+ * Single Dexie table (``elementErrors``) keyed by the
+ * composite ``{user_id}#{set_id}#{lesson_id}#{exercise_id}#{element_key}``
+ * shape so a user has exactly one row per element —
+ * matching the backend UNIQUE constraint.
+ */
+
+import {getDb} from "../dexie/db";
+import type {ElementErrorRow} from "../dexie/db";
+import type {
+    AttemptRecord,
+    ElementAttempt,
+    ElementError,
+    ElementKeyRemap,
+    ExerciseIdRemap,
+    RetiredReason,
+    ReviewQueueItem,
+    AppRetiredReason,
+} from "../types";
+import {
+    ensureActiveRunDexie,
+    isActiveRunRow,
+    openRunBySetDexie,
+} from "./set-runs-dexie";
+
+/** Phase 46 D4: 3 consecutive correct → mastered. Same
+ *  constant as ``backend/app/services/element_errors.py``;
+ *  intrinsic to the SRS semantics, not a config knob. */
+export const MASTERY_THRESHOLD = 3;
+
+/** EXP-018 / Phase 62: a recorded attempt is always a concrete
+ *  direction. Fall back to receptive (the pre-62 implicit
+ *  behaviour) when the caller omits it. */
+function directionOf(attempt: ElementAttempt): string {
+    return attempt.direction ?? "target_to_source";
+}
+
+/** Build the composite primary key. EXP-051 / #2125 adds ``run_id`` as the
+ *  seventh segment (after ``direction``), keeping a card's rows in run 2
+ *  distinct from its run-1 rows. Mirrors the backend UNIQUE(user, set,
+ *  lesson, exercise, element_key, direction, run_id). */
+export function elementRowKey(
+    userId: string,
+    setId: string,
+    lessonId: string,
+    exerciseId: string,
+    elementKey: string,
+    direction: string,
+    runId: number,
+): string {
+    return [
+        userId,
+        setId,
+        lessonId,
+        exerciseId,
+        elementKey,
+        // EXP-018 / Phase 62: keeps the receptive and productive rows of
+        // one card distinct.
+        direction,
+        // EXP-051 / #2125: the Durchgang (run/pass) generation.
+        String(runId),
+    ].join("#");
+}
+
+function rowKey(userId: string, attempt: ElementAttempt, runId: number): string {
+    return elementRowKey(
+        userId,
+        attempt.set_id,
+        attempt.lesson_id,
+        attempt.exercise_id,
+        attempt.element_key,
+        directionOf(attempt),
+        runId,
+    );
+}
+
+function rowToWire(row: ElementErrorRow): ElementError {
+    return {
+        id: row.id,
+        user_id: row.user_id,
+        run_id: row.run_id ?? 1,
+        set_id: row.set_id,
+        lesson_id: row.lesson_id,
+        exercise_id: row.exercise_id,
+        element_key: row.element_key,
+        direction: row.direction ?? "target_to_source",
+        element_type: row.element_type,
+        user_answer: row.user_answer,
+        correct_answer: row.correct_answer,
+        error_count: row.error_count,
+        correct_streak: row.correct_streak,
+        last_error_at: row.last_error_at,
+        last_attempt_at: row.last_attempt_at,
+        mastered: row.mastered,
+        mastered_at: row.mastered_at,
+        hint_used: row.hint_used ?? false,
+        hint_used_count: row.hint_used_count ?? 0,
+        last_attempt_exam: row.last_attempt_exam ?? false,
+        attempt_count: row.attempt_count ?? 0,
+        attempt_history: row.attempt_history ?? [],
+        retired_at: row.retired_at ?? null,
+        retired_reason: retiredReasonOf(row),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    };
+}
+
+/** #603 Smart Review Queue — keep the last N attempts per element. */
+export const MAX_ATTEMPT_HISTORY = 10;
+
+function appendAttemptHistory(
+    existing: AttemptRecord[] | undefined,
+    attempt: ElementAttempt,
+    nowIso: string,
+): AttemptRecord[] {
+    const next = [...(existing ?? [])];
+    next.push({
+        correct: attempt.correct,
+        hint_used: attempt.hint_used ?? false,
+        at: nowIso,
+    });
+    return next.slice(-MAX_ATTEMPT_HISTORY);
+}
+
+/** First sighting of an element: seed a fresh SRS row from one attempt. */
+function createElementRow(
+    userId: string,
+    attempt: ElementAttempt,
+    nowIso: string,
+    runId: number,
+): ElementErrorRow {
+    return {
+        id: rowKey(userId, attempt, runId),
+        user_id: userId,
+        run_id: runId,
+        set_id: attempt.set_id,
+        lesson_id: attempt.lesson_id,
+        exercise_id: attempt.exercise_id,
+        element_key: attempt.element_key,
+        direction: directionOf(attempt),
+        element_type: attempt.element_type ?? "vocabulary",
+        user_answer: attempt.user_answer ?? "",
+        correct_answer: attempt.correct_answer ?? "",
+        error_count: attempt.correct ? 0 : 1,
+        correct_streak: attempt.correct ? 1 : 0,
+        last_error_at: attempt.correct ? null : nowIso,
+        last_attempt_at: nowIso,
+        mastered: false,
+        mastered_at: null,
+        // #594 Hint Economy — latest hint flag + lifetime count.
+        hint_used: attempt.hint_used ?? false,
+        hint_used_count: attempt.hint_used ? 1 : 0,
+        // #1040 Exam-Mode SRS boost — only a CORRECT exam answer is
+        // stronger evidence; a wrong exam answer must not be delayed.
+        last_attempt_exam: (attempt.exam ?? false) && attempt.correct,
+        // #603 Smart Review Queue — first attempt + history seed.
+        attempt_count: 1,
+        attempt_history: appendAttemptHistory(undefined, attempt, nowIso),
+        created_at: nowIso,
+        updated_at: nowIso,
+    };
+}
+
+/** Fold one correct/wrong attempt into the SRS streak + mastery state. */
+function applyScoreOutcome(
+    next: ElementErrorRow,
+    attempt: ElementAttempt,
+    nowIso: string,
+): void {
+    if (attempt.correct) {
+        next.correct_streak += 1;
+        if (next.correct_streak >= MASTERY_THRESHOLD && !next.mastered) {
+            next.mastered = true;
+            next.mastered_at = nowIso;
+        }
+        return;
+    }
+    // Pedagogical demotion: a wrong answer on a mastered element flips it
+    // back so SRS re-schedules. Mirrors the backend service's contract.
+    if (next.mastered) {
+        next.mastered = false;
+        next.mastered_at = null;
+    }
+    next.correct_streak = 0;
+    next.error_count += 1;
+    next.last_error_at = nowIso;
+}
+
+/** Advance an existing element's SRS row by one attempt (shallow copy so
+ *  callers see the post-state). */
+function advanceElementRow(
+    existing: ElementErrorRow,
+    attempt: ElementAttempt,
+    nowIso: string,
+): ElementErrorRow {
+    const next: ElementErrorRow = {...existing};
+    if (attempt.element_type) next.element_type = attempt.element_type;
+    next.user_answer = attempt.user_answer ?? "";
+    next.correct_answer = attempt.correct_answer ?? "";
+    next.last_attempt_at = nowIso;
+    next.updated_at = nowIso;
+    // #594 Hint Economy — latest attempt's hint flag drives the SRS
+    // interval; the count accumulates for the statistic.
+    next.hint_used = attempt.hint_used ?? false;
+    if (attempt.hint_used) {
+        next.hint_used_count = (next.hint_used_count ?? 0) + 1;
+    }
+    // #1040 Exam-Mode SRS boost — the latest attempt drives the flag; only
+    // a CORRECT exam answer earns the lengthened interval.
+    next.last_attempt_exam = (attempt.exam ?? false) && attempt.correct;
+    // #603 Smart Review Queue — bump the attempt count + ring buffer.
+    next.attempt_count = (next.attempt_count ?? 0) + 1;
+    next.attempt_history = appendAttemptHistory(
+        next.attempt_history,
+        attempt,
+        nowIso,
+    );
+    applyScoreOutcome(next, attempt, nowIso);
+    return next;
+}
+
+function applyTransition(
+    existing: ElementErrorRow | undefined,
+    userId: string,
+    attempt: ElementAttempt,
+    nowIso: string,
+    runId: number,
+): ElementErrorRow {
+    return existing
+        ? advanceElementRow(existing, attempt, nowIso)
+        : createElementRow(userId, attempt, nowIso, runId);
+}
+
+export async function recordElementAttemptsDexie(
+    userId: string,
+    attempts: readonly ElementAttempt[],
+): Promise<ElementError[]> {
+    if (attempts.length === 0) return [];
+    const db = getDb();
+    const result: ElementErrorRow[] = [];
+    // #390 Class A: wrap the whole bulk call in one rw transaction so
+    // the get -> transition -> put for each key is atomic against a
+    // concurrent ``recordElementAttemptsDexie`` touching the same
+    // element (e.g. an error-replay overlapping the main lesson). A
+    // ``table.modify`` would not suffice here: the first-sighting path
+    // INSERTS a new row, which modify can't do. The transaction also
+    // preserves the intra-call compounding (3 corrects on one key in a
+    // single call still flip ``mastered``), because each iteration
+    // reads the post-state of the previous put within the same tx.
+    //
+    // EXP-051 / #2125: the transaction also spans ``setRuns`` so the lazy
+    // run-1 materialisation and the attempt rows commit together. The
+    // active run is resolved once per set (cached) and stamped into the
+    // composite key, so a second run's attempts never overwrite the first.
+    await db.transaction("rw", db.elementErrors, db.setRuns, async () => {
+        const runBySet = new Map<string, number>();
+        for (const attempt of attempts) {
+            const nowIso = new Date().toISOString();
+            let runId = runBySet.get(attempt.set_id);
+            if (runId === undefined) {
+                runId = await ensureActiveRunDexie(userId, attempt.set_id, nowIso);
+                runBySet.set(attempt.set_id, runId);
+            }
+            const key = rowKey(userId, attempt, runId);
+            const existing = await db.elementErrors.get(key);
+            const next = applyTransition(existing, userId, attempt, nowIso, runId);
+            await db.elementErrors.put(next);
+            result.push(next);
+        }
+    });
+    return result.map(rowToWire);
+}
+
+/**
+ * #2161 one-off recovery: rewrite orphaned ``element_key`` old -> new. The
+ * whole call runs in ONE ``rw`` transaction, so a failure mid-batch rolls the
+ * lot back (all-or-nothing). For each remap, both drill directions are moved:
+ * the old-key row is copied to the new-key id and the old row deleted. A row
+ * is SKIPPED (never overwritten) when a new-key row already exists, so no two
+ * rows collapse onto one card (no double-map) and a re-run is a no-op
+ * (idempotent — the old rows are already gone). Returns the counts.
+ */
+export async function remapElementKeysDexie(
+    userId: string,
+    remaps: readonly ElementKeyRemap[],
+): Promise<{applied: number; skipped: number}> {
+    if (remaps.length === 0) return {applied: 0, skipped: 0};
+    const db = getDb();
+    let applied = 0;
+    let skipped = 0;
+    await db.transaction("rw", db.elementErrors, async () => {
+        for (const remap of remaps) {
+            // EXP-051 / #2125: a card can now have a row per run, so match
+            // every affected row (all directions + all runs) by query
+            // instead of reconstructing a single key.
+            const rows = await db.elementErrors
+                .where("[user_id+set_id]")
+                .equals([userId, remap.set_id])
+                .toArray();
+            const affected = rows.filter(
+                (row) =>
+                    row.lesson_id === remap.lesson_id &&
+                    row.exercise_id === remap.exercise_id &&
+                    row.element_key === remap.old,
+            );
+            for (const oldRow of affected) {
+                const direction = oldRow.direction ?? "target_to_source";
+                const newId = elementRowKey(
+                    userId,
+                    remap.set_id,
+                    remap.lesson_id,
+                    remap.exercise_id,
+                    remap.new,
+                    direction,
+                    oldRow.run_id ?? 1,
+                );
+                if (oldRow.id === newId) continue; // no-op mapping
+                const existingNew = await db.elementErrors.get(newId);
+                if (existingNew) {
+                    skipped += 1; // target already present -> never collapse
+                    continue;
+                }
+                await db.elementErrors.put({...oldRow, id: newId, element_key: remap.new});
+                await db.elementErrors.delete(oldRow.id);
+                applied += 1;
+            }
+        }
+    });
+    return {applied, skipped};
+}
+
+/**
+ * #2130 stable_id key switch: rewrite ``exercise_id`` old -> new for EVERY
+ * row of the exercise (all element_keys + both drill directions) in one
+ * ``rw`` transaction (all-or-nothing). A row is SKIPPED (never overwritten)
+ * when a row already exists under the new exercise id with the same
+ * element_key + direction, so no two histories collapse (no double-map) and
+ * a re-run is a no-op (idempotent). Returns the counts.
+ */
+export async function remapExerciseIdsDexie(
+    userId: string,
+    remaps: readonly ExerciseIdRemap[],
+): Promise<{applied: number; skipped: number}> {
+    if (remaps.length === 0) return {applied: 0, skipped: 0};
+    const db = getDb();
+    let applied = 0;
+    let skipped = 0;
+    await db.transaction("rw", db.elementErrors, async () => {
+        for (const remap of remaps) {
+            const rows = await db.elementErrors
+                .where("[user_id+set_id]")
+                .equals([userId, remap.set_id])
+                .toArray();
+            const affected = rows.filter(
+                (row) =>
+                    row.lesson_id === remap.lesson_id &&
+                    row.exercise_id === remap.old,
+            );
+            for (const row of affected) {
+                const direction = row.direction ?? "target_to_source";
+                const newId = elementRowKey(
+                    userId,
+                    remap.set_id,
+                    remap.lesson_id,
+                    remap.new,
+                    row.element_key,
+                    direction,
+                    row.run_id ?? 1,
+                );
+                if (row.id === newId) continue; // no-op mapping, nothing to do
+                const existingNew = await db.elementErrors.get(newId);
+                if (existingNew) {
+                    skipped += 1; // target already present -> never collapse
+                    continue;
+                }
+                await db.elementErrors.put({...row, id: newId, exercise_id: remap.new});
+                await db.elementErrors.delete(row.id);
+                applied += 1;
+            }
+        }
+    });
+    return {applied, skipped};
+}
+
+export interface ListElementErrorsOpts {
+    setId?: string;
+    /** Default true — pass false to exclude mastered elements
+     *  (the C11 review-queue path). */
+    includeMastered?: boolean;
+    /** #2188 — default false: archived (author-retired) rows leave every
+     *  default read. Pass true for archive views. */
+    includeRetired?: boolean;
+    /** EXP-051 / #2125 — the Durchgang to read. Omit for each set's ACTIVE
+     *  run (current state); pass a run number for a specific past run (the
+     *  Fehlerhistorie). */
+    runId?: number;
+}
+
+export async function listElementErrorsDexie(
+    userId: string,
+    opts: ListElementErrorsOpts = {},
+): Promise<ElementError[]> {
+    const db = getDb();
+    let rows: ElementErrorRow[];
+    if (opts.setId !== undefined) {
+        rows = await db.elementErrors
+            .where("[user_id+set_id]")
+            .equals([userId, opts.setId])
+            .toArray();
+    } else {
+        rows = await db.elementErrors
+            .where("user_id")
+            .equals(userId)
+            .toArray();
+    }
+    if (opts.runId !== undefined) {
+        // Fehlerhistorie: exactly one run (incl. a closed one).
+        rows = rows.filter((r) => (r.run_id ?? 1) === opts.runId);
+    } else {
+        // Default: each set's active run only. A closed run's rows never
+        // appear in the current-state view / review queue.
+        const openBySet = await openRunBySetDexie(userId, opts.setId);
+        rows = rows.filter((r) => isActiveRunRow(r, openBySet));
+    }
+    if (opts.includeMastered === false) {
+        rows = rows.filter((r) => !r.mastered);
+    }
+    if (opts.includeRetired !== true) {
+        rows = rows.filter((r) => !r.retired_at);
+    }
+    rows.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+    return rows.map(rowToWire);
+}
+
+/**
+ * #2188 — archive the learner's rows for identities the author retired via
+ * the set manifest's ``retired_ids``. Stamps ``retired_at`` in ONE ``rw``
+ * transaction; already-archived rows are untouched (idempotent). Archived
+ * rows keep their history but leave the default list + the review queue.
+ * Returns the count of rows newly archived.
+ */
+export async function archiveRetiredDexie(
+    userId: string,
+    setId: string,
+    retiredIds: readonly string[],
+): Promise<{archived: number}> {
+    if (retiredIds.length === 0) return {archived: 0};
+    const db = getDb();
+    const retired = new Set(retiredIds);
+    let archived = 0;
+    await db.transaction("rw", db.elementErrors, async () => {
+        const rows = await db.elementErrors
+            .where("[user_id+set_id]")
+            .equals([userId, setId])
+            .toArray();
+        const nowIso = new Date().toISOString();
+        for (const row of rows) {
+            if (!retired.has(row.exercise_id) || row.retired_at) continue;
+            await db.elementErrors.put({...row, retired_at: nowIso, retired_reason: "author"});
+            archived += 1;
+        }
+    });
+    return {archived};
+}
+
+/** The reason of a stored row: a row retired before #3952 carries none and
+ *  was retired by its author, the only cause there was. */
+function retiredReasonOf(row: {
+    retired_at?: string | null;
+    retired_reason?: string | null;
+}): RetiredReason | null {
+    if (!row.retired_at) return null;
+    return (row.retired_reason as RetiredReason | null | undefined) ?? "author";
+}
+
+/**
+ * #3952 — retire rows the installed set can no longer serve a question for,
+ * recording why. ONE ``rw`` transaction; a row already retired keeps its
+ * first reason, an unknown id or another learner's row is ignored. A closed
+ * run's rows are frozen history and stay untouched, like the backend.
+ * Returns the count of rows newly retired.
+ */
+export async function retireUnservableDexie(
+    userId: string,
+    rowIds: readonly string[],
+    reason: AppRetiredReason,
+): Promise<{retired: number}> {
+    if (rowIds.length === 0) return {retired: 0};
+    const db = getDb();
+    const openBySet = await openRunBySetDexie(userId);
+    let retired = 0;
+    await db.transaction("rw", db.elementErrors, async () => {
+        const rows = (await db.elementErrors.bulkGet([...rowIds])).filter(
+            (row): row is NonNullable<typeof row> => row !== undefined,
+        );
+        const nowIso = new Date().toISOString();
+        for (const row of rows) {
+            if (row.user_id !== userId || row.retired_at) continue;
+            if (!isActiveRunRow(row, openBySet)) continue;
+            await db.elementErrors.put({...row, retired_at: nowIso, retired_reason: reason});
+            retired += 1;
+        }
+    });
+    return {retired};
+}
+
+// --- Phase 46C / C12: SRS review-queue computation ---------------------
+
+/** Map a correct-streak count to the next-review interval
+ *  in days. Mirrors ``app.services.element_srs.
+ *  interval_days_for_streak``: streak 0 → 1d, 1 → 3d, 2 →
+ *  7d, 3+ (mastered) → 7d as safe fallback. */
+export function intervalDaysForStreak(correctStreak: number): number {
+    if (correctStreak <= 0) return 1;
+    if (correctStreak === 1) return 3;
+    return 7;
+}
+
+/** #594 Hint Economy — a hint-assisted answer is weaker, so the next
+ *  review comes sooner. The base interval is multiplied by this factor
+ *  when the element's last attempt used a hint. Mirrors the backend
+ *  ``element_srs.HINT_INTERVAL_FACTOR``. */
+export const HINT_INTERVAL_FACTOR = 0.5;
+
+/** #1040 Exam-Mode SRS boost (Phase 2 of #1007) — a card answered
+ *  CORRECTLY under exam pressure is stronger retention evidence, so the
+ *  next review comes LATER. The base interval is multiplied by this factor
+ *  when the element's most recent attempt was a correct exam answer
+ *  (``last_attempt_exam``). The mathematical inverse of
+ *  {@link HINT_INTERVAL_FACTOR} (0.5 -> 2.0), as the issue specifies.
+ *  Naturally bounded: the flag is only ever set on a correct answer
+ *  (streak >= 1), so the longest band it stretches is 7d (streak 2) -> 14d;
+ *  a mastered element (streak 3) leaves the queue, so there is no runaway.
+ *  Mirrors the backend ``element_srs.EXAM_INTERVAL_FACTOR``. */
+export const EXAM_INTERVAL_FACTOR = 2.0;
+
+function _addDays(iso: string, days: number): string {
+    // Millisecond arithmetic so fractional days (the #594 hint factor
+    // shortens an interval to e.g. 0.5d) are honoured exactly.
+    const d = new Date(new Date(iso).getTime() + days * 86_400_000);
+    return d.toISOString();
+}
+
+function _projectReviewItem(
+    row: ElementErrorRow,
+    nowIso: string,
+): ReviewQueueItem {
+    // #594 hint factor shortens; #1040 exam factor lengthens. They compose
+    // multiplicatively (in practice never both apply — exam disables hints).
+    const interval =
+        intervalDaysForStreak(row.correct_streak) *
+        (row.hint_used ? HINT_INTERVAL_FACTOR : 1.0) *
+        (row.last_attempt_exam ? EXAM_INTERVAL_FACTOR : 1.0);
+    const suggested = _addDays(row.last_attempt_at, interval);
+    return {
+        id: row.id,
+        user_id: row.user_id,
+        set_id: row.set_id,
+        lesson_id: row.lesson_id,
+        exercise_id: row.exercise_id,
+        element_key: row.element_key,
+        direction: row.direction ?? "target_to_source",
+        element_type: row.element_type,
+        user_answer: row.user_answer,
+        correct_answer: row.correct_answer,
+        error_count: row.error_count,
+        correct_streak: row.correct_streak,
+        last_error_at: row.last_error_at,
+        last_attempt_at: row.last_attempt_at,
+        suggested_review_at: suggested,
+        overdue: suggested <= nowIso,
+        attempt_count: row.attempt_count ?? 0,
+        attempt_history: row.attempt_history ?? [],
+    };
+}
+
+export interface ComputeReviewQueueOpts {
+    setId?: string;
+    /** Injectable clock for deterministic tests. Defaults
+     *  to ``new Date().toISOString()``. */
+    nowIso?: string;
+    /** #603 — cap the returned list (a review session passes 20). */
+    limit?: number;
+    /** #3170 — also schedule rows that were never answered wrong
+     *  (``error_count 0``). Default false: the queue holds errors only.
+     *  The Settings > Learning toggle "Auch fehlerfreie Elemente
+     *  wiederholen" passes true. Mirrors the backend
+     *  ``compute_review_queue(include_never_wrong=...)``. */
+    includeNeverWrong?: boolean;
+}
+
+export async function computeReviewQueueDexie(
+    userId: string,
+    opts: ComputeReviewQueueOpts = {},
+): Promise<ReviewQueueItem[]> {
+    const nowIso = opts.nowIso ?? new Date().toISOString();
+    const db = getDb();
+    let rows: ElementErrorRow[];
+    if (opts.setId !== undefined) {
+        rows = await db.elementErrors
+            .where("[user_id+set_id]")
+            .equals([userId, opts.setId])
+            .toArray();
+    } else {
+        rows = await db.elementErrors
+            .where("user_id")
+            .equals(userId)
+            .toArray();
+    }
+    // EXP-051 / #2125 — only the ACTIVE run of each set fills the queue;
+    // closed runs are a frozen archive.
+    const openBySet = await openRunBySetDexie(userId, opts.setId);
+    rows = rows.filter((r) => isActiveRunRow(r, openBySet));
+    // #2188 — archived (author-retired) rows never schedule.
+    rows = rows.filter((r) => !r.mastered && !r.retired_at);
+    // #3170 — error training is error training: a row seeded by a correct
+    // first attempt (error_count 0) is not scheduled unless the learner
+    // opted into spaced repetition of never-wrong elements.
+    if (!opts.includeNeverWrong) {
+        rows = rows.filter((r) => r.error_count > 0);
+    }
+    const items = rows.map((r) => _projectReviewItem(r, nowIso));
+    // Sort (mirrors the backend ``element_srs._sort_key``, #603):
+    // overdue first → weakness tier (wrong > almost-right > correct) →
+    // weighted error frequency desc → OLDEST error first. EXP-018:
+    // productive errors are weighted 1.2x (harder, needs more practice).
+    items.sort((a, b) => {
+        if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+        const ta = weaknessTier(a);
+        const tb = weaknessTier(b);
+        if (ta !== tb) return tb - ta;
+        const pa = _priorityScore(a);
+        const pb = _priorityScore(b);
+        if (pa !== pb) return pb - pa;
+        // Oldest error first: ascending last_error_at (no error → last).
+        const lhs = a.last_error_at ?? "￿";
+        const rhs = b.last_error_at ?? "￿";
+        if (lhs === rhs) return 0;
+        return lhs < rhs ? -1 : 1;
+    });
+    if (opts.limit !== undefined && opts.limit >= 0) {
+        return items.slice(0, opts.limit);
+    }
+    return items;
+}
+
+/** EXP-018 / Phase 62: productive (source_to_target) drills are
+ *  harder, so their error count is weighted up. Mirrors the backend
+ *  ``element_srs._PRODUCTIVE_WEIGHT``. */
+export const PRODUCTIVE_WEIGHT = 1.2;
+
+function _priorityScore(item: ReviewQueueItem): number {
+    const weight =
+        item.direction === "source_to_target" ? PRODUCTIVE_WEIGHT : 1.0;
+    return item.error_count * weight;
+}
+
+/** #603 Smart Review Queue — weakness tier so the queue orders
+ *  ``wrong > almost-right > correct``. Mirrors the backend
+ *  ``element_srs.weakness_tier``:
+ *  2 = wrong (streak 0), 1 = almost-right (recovered after errors),
+ *  0 = clean. */
+export function weaknessTier(item: ReviewQueueItem): number {
+    if (item.correct_streak === 0) return 2;
+    if (item.error_count > 0) return 1;
+    return 0;
+}

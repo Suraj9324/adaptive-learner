@@ -1,0 +1,205 @@
+/**
+ * ReviewStep — the wizard's step-4 review + quality checklist (#1929).
+ *
+ * Pins that the "language pair is valid" checklist row (i18n key
+ * ``create_lesson.review.check_languagePair``) is rendered again after it
+ * went missing when the underlying ``languagePair`` check was removed in
+ * #1715/#1730. The row must show pass/fail state from ``draftChecks``.
+ */
+
+import {render, screen} from "@testing-library/react";
+import {describe, expect, it} from "vitest";
+
+import ReviewStep from "./ReviewStep";
+import type {DraftValidationChecks} from "../../lib/content/lesson/draft-to-lesson";
+import type {DraftShareChecks} from "../../lib/content/lesson/edit/draft-share-check";
+import type {LessonCardDraft, LessonMeta} from "../../lib/content/lesson/lesson-draft";
+import type {ContentLessonExercise} from "../../storage/types";
+
+const t = (_key: string, fallback?: string) => fallback ?? _key;
+
+const META: LessonMeta = {
+    title: "My Lesson",
+    titleNative: "",
+    sourceLanguage: "de",
+    targetLanguage: "fr",
+    level: "A1",
+    description: "",
+    author: "",
+    domain: "language",
+};
+
+const CARDS: LessonCardDraft[] = [];
+const EXERCISES: ContentLessonExercise[] = [];
+
+function checks(over: Partial<DraftValidationChecks> = {}): DraftValidationChecks {
+    return {
+        hasTitle: true,
+        languagePair: true,
+        enoughCards: true,
+        schemaValid: true,
+        schemaError: null,
+        schemaErrorIsInternal: false,
+        ...over,
+    };
+}
+
+const SHAREABLE: DraftShareChecks = {minExercises: true, minTypes: true, exerciseMinimums: true};
+
+function renderStep(
+    over: Partial<DraftValidationChecks> = {},
+    share: DraftShareChecks = SHAREABLE,
+    editMode = false,
+) {
+    render(
+        <ReviewStep
+            meta={META}
+            cards={CARDS}
+            exercises={EXERCISES}
+            draftChecks={checks(over)}
+            shareChecks={editMode ? undefined : share}
+            editMode={editMode}
+            saving={false}
+            onSaveLocal={() => {}}
+            onSaveShare={() => {}}
+            t={t}
+        />,
+    );
+}
+
+describe("ReviewStep language-pair check (#1929)", () => {
+    it("renders the language-pair checklist row", () => {
+        renderStep();
+        expect(screen.getByTestId("check-languagePair")).toBeInTheDocument();
+    });
+
+    it("shows the row as passing for a valid pair", () => {
+        renderStep({languagePair: true});
+        expect(screen.getByTestId("check-languagePair")).toHaveAttribute(
+            "data-pass",
+            "true",
+        );
+    });
+
+    it("shows the row as failing for an invalid pair", () => {
+        renderStep({languagePair: false});
+        expect(screen.getByTestId("check-languagePair")).toHaveAttribute(
+            "data-pass",
+            "false",
+        );
+    });
+
+    it("renders four local checklist rows (the language-pair row restored)", () => {
+        renderStep();
+        const checklist = screen.getByTestId("create-lesson-checklist");
+        expect(checklist.querySelectorAll("li")).toHaveLength(4);
+    });
+});
+
+describe("ReviewStep share rows (#3389)", () => {
+    it("lists the engine's quality minimums apart from the local rows", () => {
+        renderStep();
+        const share = screen.getByTestId("create-lesson-share-checklist");
+        expect(share.querySelectorAll("li")).toHaveLength(3);
+        expect(screen.getByTestId("check-minExercises")).toHaveTextContent("At least 5 exercises");
+    });
+
+    it.each([
+        ["too few exercises", {minExercises: false}],
+        ["too few types", {minTypes: false}],
+        ["an exercise below its minimum", {exerciseMinimums: false}],
+    ])("keeps local save open but blocks sharing on %s", (_name, failing) => {
+        renderStep({}, {...SHAREABLE, ...failing});
+        expect(screen.getByTestId("create-lesson-save-local")).toBeEnabled();
+        expect(screen.getByTestId("create-lesson-save-share")).toBeDisabled();
+    });
+
+    it("enables sharing when every local and share row passes", () => {
+        renderStep();
+        expect(screen.getByTestId("create-lesson-save-share")).toBeEnabled();
+    });
+
+    it("blocks sharing too when a local row fails", () => {
+        renderStep({schemaValid: false});
+        expect(screen.getByTestId("create-lesson-save-share")).toBeDisabled();
+    });
+
+    it("shows no share rows in edit mode", () => {
+        renderStep({}, SHAREABLE, true);
+        expect(screen.queryByTestId("create-lesson-share-checklist")).not.toBeInTheDocument();
+    });
+});
+
+describe("ReviewStep structure-error message (#2384)", () => {
+    it("shows the concrete reason for a genuine validation failure", () => {
+        renderStep({
+            schemaValid: false,
+            schemaError: "/cards/0/back must NOT have fewer than 1 characters",
+            schemaErrorIsInternal: false,
+        });
+        const detail = screen.getByTestId("check-schemaValid-detail");
+        expect(detail).toHaveTextContent("/cards/0/back");
+        // No "app bug / report" block for a real content problem.
+        expect(screen.queryByTestId("check-schemaValid-internal")).toBeNull();
+        expect(screen.queryByTestId("check-schemaValid-report")).toBeNull();
+    });
+
+    it("explains an internal error as an app bug, not bad user content", () => {
+        renderStep({
+            schemaValid: false,
+            schemaError: "(0 , T.default) is not a function",
+            schemaErrorIsInternal: true,
+        });
+        const block = screen.getByTestId("check-schemaValid-internal");
+        // The message states it is the app's problem and how to proceed.
+        expect(block).toHaveTextContent(/not in your lesson/i);
+        expect(block).toHaveTextContent(/reload/i);
+        // The raw technical string is kept as diagnostic, not as the headline.
+        expect(block).toHaveTextContent("(0 , T.default) is not a function");
+        // The plain content-detail variant is NOT used for an internal error.
+        expect(screen.queryByTestId("check-schemaValid-detail")).toBeNull();
+    });
+
+    it("offers a report link carrying the technical detail", () => {
+        renderStep({
+            schemaValid: false,
+            schemaError: "(0 , T.default) is not a function",
+            schemaErrorIsInternal: true,
+        });
+        const link = screen.getByTestId("check-schemaValid-report");
+        const href = link.getAttribute("href") ?? "";
+        expect(href).toContain("github.com/astrapi69/adaptive-learner/issues/new");
+        expect(decodeURIComponent(href)).toContain(
+            "(0 , T.default) is not a function",
+        );
+    });
+});
+
+describe("ReviewStep copy-progress note (#2201)", () => {
+    it("states the copy's learning-progress consequence in edit mode", () => {
+        render(
+            <ReviewStep
+                meta={META}
+                cards={CARDS}
+                exercises={EXERCISES}
+                draftChecks={checks()}
+                saving={false}
+                editMode
+                onSaveLocal={() => {}}
+                onSaveShare={() => {}}
+                onSaveCopy={() => {}}
+                t={t}
+            />,
+        );
+        expect(
+            screen.getByTestId("create-lesson-copy-progress-note"),
+        ).toHaveTextContent(/progress/i);
+    });
+
+    it("omits the copy-progress note when not editing", () => {
+        renderStep();
+        expect(
+            screen.queryByTestId("create-lesson-copy-progress-note"),
+        ).toBeNull();
+    });
+});

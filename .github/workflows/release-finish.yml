@@ -1,0 +1,114 @@
+name: Release — finish (merge + tag + publish)
+
+# The MUTATING half of the two-step release flow, run from the Actions tab
+# AFTER `release-prepare.yml` is green and the release has been reviewed.
+#
+# It CALLS the existing Make targets — `make release-finish` (merge
+# release/<version> → main no-ff, tag, push main + tag, open the develop
+# back-merge PR, #2182) and `make release-publish` (create the DRAFT GitHub
+# Release from changelog/releases/v<version>.md, #3159). No release logic is
+# re-implemented in YAML, so it cannot drift from the Makefile.
+#
+# The release stays a draft. release-workflow.md Step 8 dispatches
+# publish-image.yml, attaches the launcher binaries from the green main-push
+# builds (the launcher workflows have no release trigger since v2.8.0), runs
+# the completeness checkpoint, and only then publishes.
+#
+# Run this FROM the `release/<version>` branch (the same branch the prepare
+# gate validated). NOT used for v1.97.0 (finalized manually); effective from
+# the next release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 1.98.0 (no leading v). The release/<version> branch must exist and be green."
+        required: true
+        type: string
+
+# Needs write: pushes main + develop, creates the tag, and publishes the
+# GitHub Release.
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # gh (used by `make release-finish` for the back-merge PR and by `make
+  # release-publish`) authenticates via this token. Use a PAT (not
+  # GITHUB_TOKEN) so the back-merge PR runs its required checks: GitHub does
+  # NOT fire workflows from GITHUB_TOKEN events (recursion guard, #1265). The
+  # PAT needs "Pull requests: Read and write" on this repo; without it the
+  # back-merge PR fails, and release-finish now stops there (#3159).
+  GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+  # Bound here so shell steps read it from the environment instead of
+  # interpolating the dispatch input directly (avoids shell-injection).
+  VERSION: ${{ inputs.version }}
+  # Surface "is the PAT configured?" as a boolean for the notice steps;
+  # secrets cannot be referenced directly in `if:` / shell conditionals.
+  HAS_RELEASE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+
+jobs:
+  finish:
+    name: Finish release (merge + tag + publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: PAT availability notice
+        # The release ALWAYS completes; this only documents whether the
+        # downstream GH-Pages deploy + launcher-binary attach fire on their
+        # own (PAT) or need a manual trigger (GITHUB_TOKEN fallback).
+        run: |
+          if [ "$HAS_RELEASE_PAT" = "true" ]; then
+            echo "RELEASE_PAT is set: the main push fires deploy-gh-pages.yml. The release is created as a DRAFT; Step 8 of release-workflow.md publishes it."
+          else
+            echo "::warning::RELEASE_PAT secret is NOT set. The release will still complete, but GitHub will not fire downstream workflows from GITHUB_TOKEN events (#1265). After this run you must MANUALLY: (1) dispatch deploy-gh-pages.yml on main, and (2) open the develop back-merge PR if release-finish could not."
+          fi
+
+      # fetch-depth 0 + a persisted PAT (not GITHUB_TOKEN) so the Make
+      # target's git push to main fires deploy-gh-pages.yml (#1265). Falls
+      # back to GITHUB_TOKEN when RELEASE_PAT is unset (release completes, the
+      # deploy then needs a manual trigger).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Materialize local branches for the merge
+        # `make release-finish` checks out main/develop and merges
+        # release/<version> by NAME. Create the local tracking branches first
+        # so those refs resolve in the CI checkout (which starts detached).
+        run: |
+          git fetch origin --prune
+          git checkout main
+          git checkout develop
+          git checkout "release/$VERSION"
+
+      - name: Finish release (make release-finish)
+        # Merge release/<version> → main (no-ff) + tag + push main + tag +
+        # open the develop back-merge PR. Fails if that PR does not exist
+        # afterwards (#3159), so the draft below is not created either.
+        run: make release-finish VERSION="$VERSION"
+
+      - name: Publish GitHub Release (make release-publish)
+        # `gh release create --draft` from changelog/releases/v<version>.md.
+        # Nothing fires on a draft; Step 8 of release-workflow.md takes over.
+        run: make release-publish VERSION="$VERSION"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "release-finish for v$VERSION done."
+          if [ "$HAS_RELEASE_PAT" = "true" ]; then
+            echo "PAT push to main fired deploy-gh-pages.yml. The release is a DRAFT: continue with release-workflow.md Step 8 (publish-image.yml, launcher binaries, completeness checkpoint, then gh release edit --draft=false)."
+          else
+            echo "::warning::Ran with GITHUB_TOKEN (no RELEASE_PAT). Now MANUALLY: dispatch deploy-gh-pages.yml on main, then continue with release-workflow.md Step 8 on the DRAFT release."
+          fi

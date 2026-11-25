@@ -1,0 +1,228 @@
+/**
+ * Tests for the Dexie-mode lesson-listing read path (#2835).
+ *
+ * ``listLessonsDexie`` must return lessons in the set's canonical
+ * order even for a set that was cached WITHOUT the #2367
+ * lesson-order overlay ever being seeded - the overlay is written
+ * only by ``downloadSetDexie``'s "seed on download" step
+ * (content-loader-download.ts), so a set cached before that step
+ * existed, or via any path that bypasses it, has no overlay entry
+ * and previously fell back to plain lexicographic filename sort
+ * (breaking mixed 2-/3-digit prefixes: "100-..." before "11-...").
+ *
+ * These tests seed ``contentSets`` / ``contentSetFiles`` directly
+ * (bypassing ``downloadSetDexie``) to reproduce exactly that
+ * "legacy cached set, no overlay" state.
+ */
+
+import "fake-indexeddb/auto";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { listLessonsDexie } from "./content-loader-dexie";
+import { getLessonDexie } from "./content-loader-read";
+import { _resetDbForTests, getDb } from "../dexie/db";
+import { fileKey } from "./content-loader-sources";
+import { ApiError } from "../../api/client";
+
+const SOURCE = "astrapi69/adaptive-learner-content";
+const SET_ID = "psych-intro";
+const SET_PK = `${SOURCE}/${SET_ID}/1.0.0`;
+
+const SET_MANIFEST_WITH_ORDER = `
+schema_version: '1.0'
+name: Psych Intro
+sets:
+  - id: psych-intro
+    title: Psych Intro
+    language: de
+    level: A1
+    version: '1.0.0'
+    lesson_count: 3
+metadata:
+  lessons:
+    - 10-a.json
+    - 11-b.json
+    - 100-c.json
+`.trim();
+
+async function seedCachedSet(manifestYaml: string, filenames: string[]) {
+  const db = getDb();
+  await db.contentSets.put({
+    id: SET_PK,
+    source: SOURCE,
+    branch: "main",
+    set_id: SET_ID,
+    version: "1.0.0",
+    title: "Psych Intro",
+    language: "de",
+    target_language: "de",
+    source_language: "en",
+    level: "A1",
+    domain: "psychology",
+    lesson_count: filenames.length,
+    description: null,
+    tags: "[]",
+    cover_image: null,
+    downloaded_at: "2026-05-26T00:00:00Z",
+    manifest_yaml: manifestYaml,
+  });
+  for (const filename of filenames) {
+    await db.contentSetFiles.put({
+      id: fileKey(SET_PK, `lessons/${filename}`),
+      set_pk: SET_PK,
+      filename: `lessons/${filename}`,
+      body: "{}",
+      encoding: "text",
+    });
+  }
+}
+
+beforeEach(async () => {
+  // Drop the Dexie database explicitly so every test starts from an
+  // empty IndexedDB. ``_resetDbForTests`` only closes the connection —
+  // it does not wipe the data, and the fake-indexeddb engine persists
+  // across resets (see content-loader-dexie.test.ts for the same note).
+  const db = getDb();
+  try {
+    await db.contentSets.clear();
+    await db.contentSetFiles.clear();
+  } catch {
+    /* fresh DB — nothing to clear */
+  }
+  await _resetDbForTests();
+});
+
+describe("listLessonsDexie honours manifest-declared order without the overlay (#2835)", () => {
+  it("orders by metadata.lessons even for a legacy-cached set with no order overlay", async () => {
+    // Filenames land in the DB in plain lexicographic order (as a
+    // pre-#2367 cached set would have them), NOT in declared order.
+    await seedCachedSet(SET_MANIFEST_WITH_ORDER, [
+      "100-c.json",
+      "10-a.json",
+      "11-b.json",
+    ]);
+    const listing = await listLessonsDexie(SOURCE, SET_ID);
+    expect(listing.lessons).toEqual([
+      "10-a.json",
+      "11-b.json",
+      "100-c.json",
+    ]);
+  });
+
+  it("appends files the manifest doesn't declare, sorted, after the declared ones", async () => {
+    await seedCachedSet(SET_MANIFEST_WITH_ORDER, [
+      "100-c.json",
+      "10-a.json",
+      "11-b.json",
+      "99-extra.json",
+    ]);
+    const listing = await listLessonsDexie(SOURCE, SET_ID);
+    expect(listing.lessons).toEqual([
+      "10-a.json",
+      "11-b.json",
+      "100-c.json",
+      "99-extra.json",
+    ]);
+  });
+
+  it("falls back to lexicographic order when the manifest declares no lessons field", async () => {
+    const manifestWithoutOrder = `
+schema_version: '1.0'
+name: Psych Intro
+sets:
+  - id: psych-intro
+    title: Psych Intro
+    language: de
+    level: A1
+    version: '1.0.0'
+    lesson_count: 3
+`.trim();
+    await seedCachedSet(manifestWithoutOrder, [
+      "100-c.json",
+      "10-a.json",
+      "11-b.json",
+    ]);
+    const listing = await listLessonsDexie(SOURCE, SET_ID);
+    expect(listing.lessons).toEqual([
+      "10-a.json",
+      "100-c.json",
+      "11-b.json",
+    ]);
+  });
+});
+
+// #3393 - the same lesson the API-mode test serves
+// (api-storage-lesson-parse.test.ts), here as the raw cached file: no own
+// language pair, one from_cards matching. Both modes must return the same
+// pairs and the same inherited context.
+const FROM_CARDS_LESSON = JSON.stringify({
+  id: "01-ethos-pathos-logos",
+  title: "Ethos, Pathos, Logos",
+  cards: [
+    { id: "card-ethos", front: "Ethos", back: "Glaubwürdigkeit" },
+    { id: "card-pathos", front: "Pathos", back: "Emotion" },
+    { id: "card-logos", front: "Logos", back: "Argument" },
+  ],
+  steps: [
+    { id: "theory-1", type: "theory", body: "Drei Überzeugungsmittel." },
+    {
+      id: "ex-match",
+      type: "exercise",
+      exercise: {
+        id: "ex-match",
+        type: "matching",
+        prompt: "Ordne zu.",
+        card_ids: ["card-ethos", "card-pathos", "card-logos"],
+        from_cards: true,
+      },
+    },
+  ],
+});
+
+describe("getLessonDexie parses like API mode (#3393)", () => {
+  it("resolves from_cards and inherits the set's pair and domain", async () => {
+    await seedCachedSet(SET_MANIFEST_WITH_ORDER, []);
+    await getDb().contentSetFiles.put({
+      id: fileKey(SET_PK, "lessons/01.json"),
+      set_pk: SET_PK,
+      filename: "lessons/01.json",
+      body: FROM_CARDS_LESSON,
+      encoding: "text",
+    });
+    const lesson = await getLessonDexie(SOURCE, SET_ID, "01.json");
+    expect(lesson.steps[1].exercise?.pairs).toEqual([
+      { left: "Ethos", right: "Glaubwürdigkeit" },
+      { left: "Pathos", right: "Emotion" },
+      { left: "Logos", right: "Argument" },
+    ]);
+    expect([lesson.target_language, lesson.source_language, lesson.domain]).toEqual([
+      "de",
+      "en",
+      "psychology",
+    ]);
+  });
+});
+
+describe("Dexie read paths reject with ApiError 404, like ApiStorage (#3443)", () => {
+  it.each([
+    ["listLessons on an uncached set", () => listLessonsDexie(SOURCE, SET_ID)],
+    ["getLesson on an uncached set", () => getLessonDexie(SOURCE, SET_ID, "10-a.json")],
+  ])("%s", async (_label, call) => {
+    const rejection = await call().then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(rejection).toBeInstanceOf(ApiError);
+    expect((rejection as ApiError).status).toBe(404);
+  });
+
+  it("getLesson on a cached set without the file", async () => {
+    await seedCachedSet(SET_MANIFEST_WITH_ORDER, ["10-a.json"]);
+    const rejection = await getLessonDexie(SOURCE, SET_ID, "99-missing.json").then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(rejection).toBeInstanceOf(ApiError);
+    expect((rejection as ApiError).status).toBe(404);
+  });
+});

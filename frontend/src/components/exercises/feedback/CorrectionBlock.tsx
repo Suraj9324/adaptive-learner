@@ -1,0 +1,857 @@
+/**
+ * CorrectionBlock — generated cloze drills at lesson end
+ * (Phase 52F / v1.35.0 / P-128, F-113).
+ *
+ * Walks the just-finished lesson's ``ElementError`` records, synthesises
+ * a Cloze exercise for each non-mastered failure via the Phase 52E
+ * generator, and runs the user through up to ``maxClozes`` of them
+ * before they advance to the next lesson. Each completed cloze writes
+ * fresh ``ElementAttempt`` rows so SRS streak + mastery tracking
+ * advances against the SAME element_key the original failure was
+ * recorded against.
+ *
+ * #2496 — this is now the SINGLE "your mistakes" section on the
+ * summary. It lands COLLAPSED (a "Fix your mistakes (N)" card with a
+ * "Fix now" button); expanding is the user's explicit opt-in and only
+ * THEN does the cloze mount and take focus — so the mobile keyboard no
+ * longer pops the moment the summary appears. The full-replay path
+ * (redo the exact failed exercises, any type) is folded in as a
+ * secondary "Redo all exercises" CTA, retiring the standalone
+ * ``NextStepSuggestions`` error-replay card so the two no longer
+ * duplicate each other.
+ *
+ * Surface contract (Decision 5 / handover § 4, revised #2496):
+ *   - Renders when the just-finished lesson has open failures — either
+ *     a generated cloze drill OR a replayable set (``replayHref`` +
+ *     ``errorCount``). Perfect-score runs skip the section entirely.
+ *   - When every originally-failed exercise is already corrected it
+ *     shows a short success note instead (folded #1372 all-corrected).
+ *   - Sits BETWEEN the score display and the action-button row in
+ *     the LessonSummary surface.
+ *   - The "Next lesson" button at the parent level stays visible
+ *     throughout; users can ignore or skip the section at any time and
+ *     lose nothing (the original attempts are already persisted by the
+ *     lesson; this is the OPT-IN improvement pass).
+ *
+ * Best-effort: if any IO fails (loading errors, recording bulk),
+ * the user keeps their position and the block degrades to "skip
+ * available" — never a hard error toast at the celebration moment.
+ *
+ * #3125 — a checked drill HOLDS on its result instead of jumping to the
+ * next one: the cloze stays mounted in its checked state (per-blank
+ * colours, "All correct!" / "N of M"), a correct answer shows the lesson's
+ * success badge + "Continue" (auto-advance follows the same Settings
+ * toggle and delay as in the lesson), a wrong answer keeps the
+ * my-answer / solution reveal in view behind a plain "Continue". Enter
+ * advances a checked drill, exactly as in the lesson runner.
+ */
+
+import {ArrowRight, CheckCircle2, ChevronDown, ChevronRight, X} from "lucide-react";
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+    type RefObject,
+} from "react";
+import {Link} from "react-router";
+
+import {Button} from "@/components/ui/button";
+import {useI18n} from "../../../hooks/ui/useI18n";
+import {useLessonShortcuts} from "../../../hooks/lesson/interaction/useLessonShortcuts";
+import {
+    useLessonEnterKey,
+    type LessonEnterNav,
+} from "../../../hooks/lesson/interaction/useLessonEnterKey";
+import {generateClozeFromError} from "../../../lib/exercises/grading/cloze-generator";
+import type {ErrorReplayPayload} from "../../../lib/lesson/error-replay";
+import {notifyReviewsChanged} from "../../../lib/review/reviewsChanged";
+import {matchesExerciseIdentity} from "../../../lib/srs/exercise-identity";
+import {resolveCorrectionSourceCard} from "./correction-source-card";
+import {getStorage} from "../../../storage";
+import type {
+    ContentLesson,
+    ContentLessonExercise,
+    ElementAttempt,
+    ElementError,
+    LessonProgress,
+} from "../../../storage/types";
+import type {
+    ExerciseHandle,
+    ExerciseScored,
+} from "../shell/exercise-control";
+import ClozeExercise from "../renderers/cloze/ClozeExercise";
+import ExerciseSuccessAdvance from "./ExerciseSuccessAdvance";
+
+/** i18n lookup shape used by the presentational sub-components:
+ *  ``(key, fallback) -> string``. */
+type CorrectionT = (key: string, fallback: string) => string;
+
+export interface CorrectionBlockProps {
+    lesson: ContentLesson;
+    progress: LessonProgress;
+    userId: string;
+    setId: string;
+    lessonFilename: string;
+    /** Max number of clozes to surface. Defaults to 5; the cap keeps
+     *  the celebration moment from devolving into a slog when the
+     *  user got a lot wrong. */
+    maxClozes?: number;
+    /** Called when the user finishes all generated clozes. ``improved``
+     *  is the count of clozes the user got right (= the count of
+     *  elements whose mastery streak advanced). */
+    onComplete: (improved: number) => void;
+    /** Called when the user skips. The parent re-shows the action
+     *  row so the user can still advance to the next lesson. */
+    onSkip: () => void;
+    /** #2496 — the full-replay ("redo the exact exercises") folded into
+     *  this single mistakes section. ``replayHref`` is the ErrorReplay
+     *  route; ``replayState`` its router-state payload. Null when there
+     *  is nothing left to replay (clean run or every error corrected). */
+    replayHref?: string | null;
+    replayState?: ErrorReplayPayload | null;
+    /** #2496 — exercises the learner FAILED and still has open, mirrored
+     *  from ``useNextStepSuggestions``. Drives the collapsed count and
+     *  whether the full replay is offered. */
+    errorCount?: number;
+    /** #1372 — of the originally-failed exercises, how many are already
+     *  corrected (live SRS). Drives the "{corrected} von {total}" note. */
+    correctedCount?: number;
+    /** #1372 — every originally-failed exercise is now corrected: show a
+     *  short success note instead of a drill or a replay CTA. */
+    allCorrected?: boolean;
+    /** #3575 - open straight into the drill. Set when the learner asked
+     *  for the correction explicitly (the compact summary's "Fix mistakes"
+     *  button), so the collapsed opt-in card would be a second click for
+     *  the same intent. Default false keeps the #2496 collapsed landing. */
+    initiallyExpanded?: boolean;
+}
+
+interface PreparedCloze {
+    exercise: ContentLessonExercise;
+    sourceError: ElementError;
+}
+
+type Status = "loading" | "ready" | "active" | "complete" | "empty";
+
+export default function CorrectionBlock({
+    lesson,
+    progress,
+    userId,
+    setId,
+    lessonFilename,
+    maxClozes = 5,
+    onComplete,
+    onSkip,
+    replayHref = null,
+    replayState = null,
+    errorCount = 0,
+    correctedCount = 0,
+    allCorrected = false,
+    initiallyExpanded = false,
+}: CorrectionBlockProps) {
+    const {t} = useI18n();
+    const [status, setStatus] = useState<Status>("loading");
+    const [clozes, setClozes] = useState<PreparedCloze[]>([]);
+    const [currentIndex, setCurrentIndex] = useState(0);
+    const [correctCount, setCorrectCount] = useState(0);
+    // #2496 — the section lands COLLAPSED on the summary. Mounting the cloze
+    // eagerly auto-focuses its first blank (ClozeExercise #692) and pops the
+    // mobile keyboard, covering the score the moment the user arrives.
+    // Collapsed, no input exists to grab focus; expanding is the user's
+    // explicit opt-in and only THEN does the cloze mount and take focus.
+    const [expanded, setExpanded] = useState(initiallyExpanded);
+
+    // #187 — Enter-key shortcut, identical to the lesson + error-replay
+    // runners. The cloze runs CONTROLLED (ref + onInteraction) so an
+    // external "Check answers" button drives it and Enter checks the
+    // answered cloze via the shared hook. ``answerable`` mirrors the
+    // cloze's "all blanks filled" state; ``enterLockRef`` blocks a double
+    // check between submit() and the advance, reset on each cloze.
+    const exerciseRef = useRef<ExerciseHandle>(null);
+    const lessonShortcutsEnabled = useLessonShortcuts();
+    const enterStateRef = useRef<LessonEnterNav | null>(null);
+    const enterLockRef = useRef(false);
+    const [answerable, setAnswerable] = useState(false);
+    // #3125 — the checked drill's outcome while it holds for "Continue";
+    // null while the current cloze is still unanswered. ``advanceLockRef``
+    // keeps the Continue click, the Enter shortcut and the auto-advance
+    // timer from advancing the same drill twice.
+    const [lastResult, setLastResult] = useState<"correct" | "wrong" | null>(
+        null,
+    );
+    const advanceLockRef = useRef(false);
+    useEffect(() => {
+        setAnswerable(false);
+        setLastResult(null);
+        enterLockRef.current = false;
+        advanceLockRef.current = false;
+    }, [currentIndex]);
+
+    // Filter step_results for wrong attempts. Used to short-circuit
+    // the IO call when the lesson was a perfect score.
+    const hasWrongAttempts = useMemo(() => {
+        const stepResults = progress.step_results ?? {};
+        return Object.values(stepResults).some(
+            (sr) => sr.total > 0 && sr.correct < sr.total,
+        );
+    }, [progress.step_results]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!hasWrongAttempts || !userId) {
+            setStatus("empty");
+            return;
+        }
+        (async () => {
+            try {
+                const errors = await getStorage().elementErrors.list(
+                    userId,
+                    {setId},
+                );
+                if (cancelled) return;
+                // Restrict to this lesson + non-mastered + recently-erred.
+                const lessonErrors = errors.filter(
+                    (e) =>
+                        e.lesson_id === lessonFilename &&
+                        !e.mastered,
+                );
+                // Synthesise a cloze per error; null results fall
+                // through silently (generator's documented graceful-
+                // degradation contract). Cap at maxClozes.
+                const prepared: PreparedCloze[] = [];
+                for (const err of lessonErrors) {
+                    if (prepared.length >= maxClozes) break;
+                    const sourceExercise = _findSourceExercise(
+                        lesson,
+                        err.exercise_id,
+                    );
+                    if (!sourceExercise) continue;
+                    const sourceCard = resolveCorrectionSourceCard(
+                        lesson,
+                        sourceExercise,
+                        err.element_key,
+                    );
+                    const cloze = generateClozeFromError({
+                        error: err,
+                        sourceExercise,
+                        sourceCard,
+                    });
+                    if (!cloze) continue;
+                    prepared.push({exercise: cloze, sourceError: err});
+                }
+                if (cancelled) return;
+                setClozes(prepared);
+                setStatus(prepared.length === 0 ? "empty" : "ready");
+            } catch {
+                if (cancelled) return;
+                // Best-effort: any IO failure hides the block. The
+                // user still gets Next-Lesson at the parent level.
+                setStatus("empty");
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        userId,
+        setId,
+        lessonFilename,
+        lesson,
+        maxClozes,
+        hasWrongAttempts,
+    ]);
+
+    const persistAttempts = useCallback(
+        async (attempts: ElementAttempt[]) => {
+            if (attempts.length === 0) return;
+            try {
+                await getStorage().elementErrors.recordBulk(
+                    userId,
+                    attempts,
+                );
+                // #2479 — the SRS state changed, so the lesson summary's live
+                // ElementError read (useLessonSessionErrors) must refresh: the
+                // correction-adjusted score bar + the "Fehler wiederholen"
+                // open-count both depend on it. Mirrors the notify the
+                // error-replay / review runners already fire.
+                notifyReviewsChanged();
+            } catch {
+                // Non-blocking — the user sees their result locally,
+                // SRS just doesn't advance on the failure case.
+            }
+        },
+        [userId],
+    );
+
+    // #3125 — checking records the attempt and HOLDS on the result; the
+    // move to the next drill (or the completion note) is ``advance`` below,
+    // driven by Continue / Enter / the lesson's auto-advance.
+    const handleClozeComplete = useCallback(
+        async (scored: {
+            correct: number;
+            total: number;
+            attempts: ElementAttempt[];
+        }) => {
+            const allCorrect =
+                scored.correct === scored.total && scored.total > 0;
+            setLastResult(allCorrect ? "correct" : "wrong");
+            if (allCorrect) setCorrectCount((c) => c + 1);
+            await persistAttempts(scored.attempts);
+        },
+        [persistAttempts],
+    );
+
+    const advance = useCallback(() => {
+        if (advanceLockRef.current || lastResult === null) return;
+        advanceLockRef.current = true;
+        const next = currentIndex + 1;
+        if (next >= clozes.length) {
+            setStatus("complete");
+            onComplete(correctCount);
+        } else {
+            setCurrentIndex(next);
+        }
+    }, [lastResult, currentIndex, clozes.length, correctCount, onComplete]);
+
+    const handleSkip = useCallback(() => {
+        setStatus("complete");
+        onSkip();
+    }, [onSkip]);
+
+    // Refresh the Enter-decision state every render (no re-subscribe);
+    // the listener reads it through the ref. A cloze is "active" only
+    // when the section is EXPANDED and in the ready/active status;
+    // otherwise the state reads as a summary so Enter is a no-op (and
+    // never fires while the section is collapsed). #3125 — once checked,
+    // Enter advances (``goNext``), the same two-step rhythm as the lesson.
+    const clozeActive =
+        expanded && (status === "ready" || status === "active");
+    enterStateRef.current = {
+        isSummary: !clozeActive,
+        isExerciseStep: clozeActive,
+        checked: lastResult !== null,
+        enteredReviewed: false,
+        answerable,
+        goNext: advance,
+    };
+    useLessonEnterKey({
+        enabled: lessonShortcutsEnabled,
+        exerciseRef,
+        enterStateRef,
+        enterLockRef,
+    });
+
+    // Which view to render — the branch decision lives in a pure helper so
+    // this component stays flat (#2496). "hidden" covers both the still-
+    // loading and the nothing-to-do states.
+    const {kind, drillsDone, drillsAvailable, hasReplay} = correctionView({
+        status,
+        expanded,
+        clozeCount: clozes.length,
+        errorCount,
+        hasReplayHref: Boolean(replayHref),
+        allCorrected,
+    });
+    if (kind === "hidden") {
+        return null;
+    }
+
+    // #2496 — the full-replay CTA, folded in from the retired standalone
+    // next-step card (redo the EXACT failed exercises, all types).
+    const replay =
+        hasReplay && replayHref ? (
+            <CorrectionReplayCta
+                t={t}
+                replayHref={replayHref}
+                replayState={replayState}
+                errorCount={errorCount}
+            />
+        ) : null;
+
+    if (kind === "complete") {
+        return (
+            <CorrectionComplete
+                t={t}
+                allCorrected={!drillsDone}
+                improved={correctCount}
+                replay={drillsDone ? replay : null}
+            />
+        );
+    }
+
+    if (kind === "collapsed") {
+        return (
+            <CorrectionCollapsed
+                t={t}
+                status={status}
+                mistakeCount={errorCount > 0 ? errorCount : clozes.length}
+                errorCount={errorCount}
+                correctedCount={correctedCount}
+                onExpand={() => setExpanded(true)}
+            />
+        );
+    }
+
+    // #2570 — no cloze exists to fix in place; the replay link is the only
+    // real option in EITHER the collapsed or expanded state, so it renders
+    // directly instead of behind an "expand" step that would reveal nothing.
+    if (kind === "replay_only") {
+        return (
+            <CorrectionReplayOnly
+                t={t}
+                errorCount={errorCount}
+                correctedCount={correctedCount}
+                replay={replay}
+            />
+        );
+    }
+
+    // EXPANDED drill — the cloze mounts HERE, so its #692 auto-focus (and the
+    // mobile keyboard) fire only now, on the user's explicit opt-in.
+    return (
+        <CorrectionDrill
+            t={t}
+            status={status}
+            current={drillsAvailable ? clozes[currentIndex] : null}
+            drillsAvailable={drillsAvailable}
+            currentIndex={currentIndex}
+            total={clozes.length}
+            setId={setId}
+            lessonFilename={lessonFilename}
+            answerable={answerable}
+            lastResult={lastResult}
+            exerciseRef={exerciseRef}
+            onInteraction={setAnswerable}
+            onClozeComplete={handleClozeComplete}
+            onAdvance={advance}
+            onSkip={handleSkip}
+            replay={replay}
+        />
+    );
+}
+
+type CorrectionView = "hidden" | "complete" | "collapsed" | "drill" | "replay_only";
+
+/**
+ * Pure view decision for the mistakes section (#2496), extracted so the
+ * component body stays flat. Returns the view kind plus the derived flags
+ * the render needs. "hidden" folds the still-loading and nothing-to-do
+ * cases.
+ *
+ * #2570 — "replay_only": when cloze generation produced no drill for this
+ * run's errors (the generator's documented graceful-degradation contract -
+ * not every exercise type maps to a fill-in-the-blank), the OLD "collapsed"
+ * -> "Fix now" -> drill flow expanded into an empty cloze area with only the
+ * replay link inside it - a "Fix your mistakes" heading offering nothing to
+ * fix in place. Named separately so the render can be honest about it
+ * up front (no pointless expand click that reveals nothing), instead of
+ * silently degrading the drill view. Exported for a direct unit test - the
+ * decision matrix is worth pinning without mounting the component.
+ */
+export function correctionView(args: {
+    status: Status;
+    expanded: boolean;
+    clozeCount: number;
+    errorCount: number;
+    hasReplayHref: boolean;
+    allCorrected: boolean;
+}): {
+    kind: CorrectionView;
+    drillsDone: boolean;
+    drillsAvailable: boolean;
+    hasReplay: boolean;
+} {
+    const hasReplay = args.hasReplayHref && args.errorCount > 0;
+    const drillsAvailable =
+        (args.status === "ready" || args.status === "active") &&
+        args.clozeCount > 0;
+    const drillsDone = args.status === "complete";
+    const nothingActionable = !drillsAvailable && !hasReplay;
+    const flags = {drillsDone, drillsAvailable, hasReplay};
+    if (args.status === "loading") {
+        return {kind: "hidden", ...flags};
+    }
+    if (drillsDone || (args.allCorrected && nothingActionable)) {
+        return {kind: "complete", ...flags};
+    }
+    if (nothingActionable) {
+        return {kind: "hidden", ...flags};
+    }
+    if (!drillsAvailable && hasReplay) {
+        return {kind: "replay_only", ...flags};
+    }
+    return {kind: args.expanded ? "drill" : "collapsed", ...flags};
+}
+
+/** The full-replay CTA — redo the exact failed exercises (any type). */
+function CorrectionReplayCta({
+    t,
+    replayHref,
+    replayState,
+    errorCount,
+}: {
+    t: CorrectionT;
+    replayHref: string;
+    replayState: ErrorReplayPayload | null;
+    errorCount: number;
+}) {
+    return (
+        <Button asChild variant="secondary">
+            <Link
+                to={replayHref}
+                state={replayState ?? undefined}
+                data-testid="lesson-correction-replay"
+            >
+                {t(
+                    "lesson.correction.replay_all",
+                    "Redo all exercises ({count})",
+                ).replace("{count}", String(errorCount))}
+                <ArrowRight size={16} aria-hidden="true" />
+            </Link>
+        </Button>
+    );
+}
+
+/** Completed state: the finished-drill improvement note, or the
+ *  all-corrected success note. */
+function CorrectionComplete({
+    t,
+    allCorrected,
+    improved,
+    replay,
+}: {
+    t: CorrectionT;
+    allCorrected: boolean;
+    improved: number;
+    replay: ReactNode;
+}) {
+    const heading = allCorrected
+        ? t("lesson.next_step.all_corrected", "All errors corrected!")
+        : t("lesson.correction.complete_heading", "Correction round complete");
+    const message = allCorrected
+        ? t("lesson.next_step.all_corrected_detail", "Nice - no open errors left.")
+        : (improved === 1
+              ? t("lesson.correction.improvement_singular", "{n} element improved.")
+              : t("lesson.correction.improvement", "{n} elements improved.")
+          ).replace("{n}", String(improved));
+    return (
+        <section
+            className="lesson-correction-block lesson-correction-block-complete"
+            data-testid="lesson-correction-block"
+            data-status="complete"
+            data-expanded="true"
+            aria-label={heading}
+        >
+            <h3>
+                {allCorrected && (
+                    <>
+                        <CheckCircle2 size={18} aria-hidden="true" />{" "}
+                    </>
+                )}
+                {heading}
+            </h3>
+            <p data-testid="lesson-correction-improvement">{message}</p>
+            {replay && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {replay}
+                </div>
+            )}
+        </section>
+    );
+}
+
+/** Collapsed default: the "Fix your mistakes (N)" opt-in card. No cloze is
+ *  mounted here, so nothing grabs focus and the mobile keyboard stays down. */
+function CorrectionCollapsed({
+    t,
+    status,
+    mistakeCount,
+    errorCount,
+    correctedCount,
+    onExpand,
+}: {
+    t: CorrectionT;
+    status: Status;
+    mistakeCount: number;
+    errorCount: number;
+    correctedCount: number;
+    onExpand: () => void;
+}) {
+    const correctedNote =
+        correctedCount > 0
+            ? t(
+                  "lesson.next_step.error_replay_corrected",
+                  "{corrected} of {total} corrected",
+              )
+                  .replace("{corrected}", String(correctedCount))
+                  .replace("{total}", String(correctedCount + errorCount))
+            : null;
+    return (
+        <section
+            className="lesson-correction-block"
+            data-testid="lesson-correction-block"
+            data-status={status}
+            data-expanded="false"
+            aria-label={t("lesson.correction.mistakes_heading", "Fix your mistakes")}
+        >
+            <header className="lesson-correction-block-header">
+                <h3>
+                    {t("lesson.correction.mistakes_heading", "Fix your mistakes")}{" "}
+                    <span className="lesson-correction-block-progress">
+                        ({mistakeCount})
+                    </span>
+                </h3>
+                <p className="lesson-correction-block-subtitle">
+                    {t(
+                        "lesson.correction.subtitle",
+                        "A few quick drills on the words you missed.",
+                    )}
+                </p>
+                {correctedNote && (
+                    <p
+                        className="lesson-correction-block-subtitle"
+                        data-testid="lesson-correction-corrected"
+                    >
+                        {correctedNote}
+                    </p>
+                )}
+            </header>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+                <Button
+                    type="button"
+                    onClick={onExpand}
+                    data-testid="lesson-correction-block-expand"
+                >
+                    {t("lesson.correction.expand", "Fix now")}
+                    <ChevronDown size={16} aria-hidden="true" />
+                </Button>
+            </div>
+        </section>
+    );
+}
+
+/** #2570 — no in-place drill exists for this run's errors (cloze generation's
+ *  documented graceful-degradation contract: not every exercise type maps to
+ *  a fill-in-the-blank); the full-exercise replay is the only real option, so
+ *  it renders directly, honestly labelled, with no "Fix now" step that would
+ *  expand into nothing. */
+function CorrectionReplayOnly({
+    t,
+    errorCount,
+    correctedCount,
+    replay,
+}: {
+    t: CorrectionT;
+    errorCount: number;
+    correctedCount: number;
+    replay: ReactNode;
+}) {
+    const correctedNote =
+        correctedCount > 0
+            ? t(
+                  "lesson.next_step.error_replay_corrected",
+                  "{corrected} of {total} corrected",
+              )
+                  .replace("{corrected}", String(correctedCount))
+                  .replace("{total}", String(correctedCount + errorCount))
+            : null;
+    return (
+        <section
+            className="lesson-correction-block"
+            data-testid="lesson-correction-block"
+            data-status="ready"
+            data-expanded="false"
+            aria-label={t("lesson.correction.replay_only_heading", "Repeat your mistakes")}
+        >
+            <header className="lesson-correction-block-header">
+                <h3>
+                    {t("lesson.correction.replay_only_heading", "Repeat your mistakes")}{" "}
+                    <span className="lesson-correction-block-progress">
+                        ({errorCount})
+                    </span>
+                </h3>
+                <p className="lesson-correction-block-subtitle">
+                    {t(
+                        "lesson.correction.replay_only_subtitle",
+                        "These can't be practiced as a quick drill - redo the exercises instead.",
+                    )}
+                </p>
+                {correctedNote && (
+                    <p
+                        className="lesson-correction-block-subtitle"
+                        data-testid="lesson-correction-corrected"
+                    >
+                        {correctedNote}
+                    </p>
+                )}
+            </header>
+            <div className="mt-3 flex flex-wrap items-center gap-2">{replay}</div>
+        </section>
+    );
+}
+
+/** Expanded drill: the current cloze + Check, plus the full-replay CTA. */
+function CorrectionDrill({
+    t,
+    status,
+    current,
+    drillsAvailable,
+    currentIndex,
+    total,
+    setId,
+    lessonFilename,
+    answerable,
+    lastResult,
+    exerciseRef,
+    onInteraction,
+    onClozeComplete,
+    onAdvance,
+    onSkip,
+    replay,
+}: {
+    t: CorrectionT;
+    status: Status;
+    current: PreparedCloze | null;
+    drillsAvailable: boolean;
+    currentIndex: number;
+    total: number;
+    setId: string;
+    lessonFilename: string;
+    answerable: boolean;
+    /** #3125 — the checked drill's outcome, null while unanswered. */
+    lastResult: "correct" | "wrong" | null;
+    exerciseRef: RefObject<ExerciseHandle | null>;
+    onInteraction: (answerable: boolean) => void;
+    onClozeComplete: (scored: ExerciseScored) => void;
+    /** #3125 — move on from a checked drill. */
+    onAdvance: () => void;
+    onSkip: () => void;
+    replay: ReactNode;
+}) {
+    return (
+        <section
+            className="lesson-correction-block"
+            data-testid="lesson-correction-block"
+            data-status={status}
+            data-expanded="true"
+            data-cloze-index={String(currentIndex)}
+            data-cloze-total={String(total)}
+            data-cloze-result={lastResult ?? "pending"}
+            aria-label={t("lesson.correction.mistakes_heading", "Fix your mistakes")}
+        >
+            <header className="lesson-correction-block-header">
+                <h3>
+                    {t("lesson.correction.mistakes_heading", "Fix your mistakes")}{" "}
+                    {drillsAvailable && (
+                        <span className="lesson-correction-block-progress">
+                            ({currentIndex + 1} / {total})
+                        </span>
+                    )}
+                </h3>
+                <p className="lesson-correction-block-subtitle">
+                    {t(
+                        "lesson.correction.subtitle",
+                        "A few quick drills on the words you missed.",
+                    )}
+                </p>
+                {drillsAvailable && (
+                    <button
+                        type="button"
+                        className="lesson-correction-block-skip font-medium max-[769px]:min-h-11"
+                        onClick={onSkip}
+                        data-testid="lesson-correction-block-skip"
+                    >
+                        <X size={14} aria-hidden="true" />
+                        {t("lesson.correction.skip", "Skip")}
+                        <ChevronRight size={14} aria-hidden="true" />
+                    </button>
+                )}
+            </header>
+            {current && (
+                <>
+                    <ClozeExercise
+                        key={current.exercise.id}
+                        ref={exerciseRef}
+                        controlled
+                        onInteraction={onInteraction}
+                        exercise={current.exercise}
+                        setId={setId}
+                        lessonId={lessonFilename}
+                        onComplete={(scored) => {
+                            void onClozeComplete(scored);
+                        }}
+                    />
+                    {/* #3125 — the checked drill holds on its result: the
+                        cloze above stays in its checked state and the row
+                        below turns from "Check answers" into the way on.
+                        Correct: the lesson's success badge + Continue (with
+                        the lesson's auto-advance rule). Wrong: a plain
+                        Continue, so the reveal stays in view as long as the
+                        learner wants. */}
+                    {lastResult === null ? (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <Button
+                                type="button"
+                                disabled={!answerable}
+                                onClick={() => exerciseRef.current?.submit()}
+                                data-testid="lesson-correction-block-check"
+                            >
+                                {t("lesson.exercise.cloze.submit", "Check answers")}
+                            </Button>
+                        </div>
+                    ) : lastResult === "correct" ? (
+                        <div className="mt-3">
+                            <ExerciseSuccessAdvance
+                                onAdvance={onAdvance}
+                                label={t("lesson.button.next", "Continue")}
+                                testIdPrefix="lesson-correction-block"
+                            />
+                        </div>
+                    ) : (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <Button
+                                type="button"
+                                onClick={onAdvance}
+                                data-testid="lesson-correction-block-next"
+                            >
+                                {t("lesson.button.next", "Continue")}
+                                <ChevronRight size={16} aria-hidden="true" />
+                            </Button>
+                        </div>
+                    )}
+                </>
+            )}
+            {replay && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {replay}
+                </div>
+            )}
+        </section>
+    );
+}
+
+/**
+ * Locate the exercise an ``ElementError`` was recorded against. Rows are
+ * keyed by ``exerciseIdentityOf`` (the version-stable ``stable_id`` when the
+ * content ships one, else the authored ``id`` — #2130), so the lookup must
+ * accept EITHER id via {@link matchesExerciseIdentity}, not a bare ``===``
+ * on ``.id`` — a bare comparison never matches once content is stable-id
+ * minted, silently degrading every correction round to "replay only" for
+ * ALL current content (#2665). The sibling cloze-generator callers
+ * (``lib/review/review-lesson.ts``, ``lib/adaptive/exercise-pool.ts``)
+ * already do this correctly; this one had drifted.
+ */
+function _findSourceExercise(
+    lesson: ContentLesson,
+    exerciseId: string,
+): ContentLessonExercise | null {
+    for (const step of lesson.steps) {
+        if (step.exercise && matchesExerciseIdentity(step.exercise, exerciseId)) {
+            return step.exercise;
+        }
+    }
+    return null;
+}

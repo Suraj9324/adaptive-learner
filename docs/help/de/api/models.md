@@ -1,0 +1,259 @@
+# Datenmodelle
+
+Die **SQLAlchemy-Models** in
+`backend/app/models/__init__.py`, mit ihren Wire-Shape-
+Pydantic-Schemas. Die Sync-Oberfläche umfasst jede Tabelle in
+`sync_service.ALL_SYNC_TABLES`.
+
+Die ursprünglichen 14 Models von v0.7.0 sind unten im Detail
+dokumentiert; die seitdem hinzugekommenen werden am Ende nach
+Name + Tabelle gelistet. Die OpenAPI-Spec unter
+`/openapi.json` ist die kanonische Referenz für jedes
+Feld jedes Models.
+
+## User
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| name | string | Pflicht |
+| email | string \| null | Unique, wenn gesetzt; optional |
+| language | string | Standard `"de"` |
+| created_at | datetime (ISO 8601) | Auto-gesetzt |
+| updated_at | datetime (ISO 8601) | Auto-aktualisiert |
+
+Beziehungen: `projects`, `curriculums`, `profiles`,
+`settings` (1:1).
+
+## UserSettings
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| user_id | string (UUID) | FK → User, unique |
+| language | string | Standard `"de"` |
+| active_provider | enum `AIProvider` | `anthropic` / `openai` / `gemini`, Standard `anthropic` |
+| api_key_anthropic | string \| null | Fernet-verschlüsselt; nur Backend |
+| api_key_openai | string \| null | Fernet-verschlüsselt; nur Backend |
+| api_key_gemini | string \| null | Fernet-verschlüsselt; nur Backend |
+| model_override_anthropic | string \| null | Standard `null` (Plugin-Default) |
+| model_override_openai | string \| null | Standard `null` |
+| model_override_gemini | string \| null | Standard `null` |
+
+Das Wire-Schema (`UserSettingsOut`) ersetzt die drei
+`api_key_*`-Felder mit `has_<provider>_key: bool`-Booleans -
+Klartext fließt nie zurück zum Client.
+
+## LearningProject
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| user_id | string (UUID) | FK → User |
+| topic | string | max 500 Zeichen |
+| goal | string | Text, unbegrenzt |
+| timeframe | string | max 100 Zeichen |
+| daily_minutes | integer | Pflicht |
+| current_problem | string \| null | Text, optional |
+| active | boolean | Standard `true` |
+| created_at | datetime | |
+| updated_at | datetime | |
+
+## LearningProfile
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| user_id | string (UUID) | FK → User |
+| project_id | string (UUID) | FK → LearningProject |
+| deductive | float | 0.0-1.0 |
+| inductive | float | 0.0-1.0 |
+| error_based | float | 0.0-1.0 |
+| dialogic | float | 0.0-1.0 |
+| contextual | float | 0.0-1.0 |
+| ai_adaptive | float | 0.0-1.0 |
+| assessed_at | datetime | |
+| version | integer | Bumpt bei Neuauswertung |
+
+Wire-Schema ergänzt `dominant_method` (berechnete Property,
+argmax über die 6 Gewichte, alphabetischer Tie-Break).
+
+## LearningSession
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| project_id | string (UUID) | FK → LearningProject |
+| method | enum `LearningMethod` | Eine der sechs |
+| started_at | datetime | Auto-gesetzt bei Create |
+| ended_at | datetime \| null | Bei `/end` gesetzt |
+| cycle_step | integer | 1-7, Standard 1 |
+| status | enum `SessionStatus` | `active` / `completed` / `abandoned` |
+
+## SessionMessage
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| session_id | string (UUID) | FK → LearningSession |
+| role | enum `MessageRole` | `user` / `assistant` / `system` |
+| content | string | Text, unbegrenzt |
+| created_at | datetime | |
+
+## SessionRating
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| session_id | string (UUID) | FK → LearningSession |
+| understanding | integer | 1-5 |
+| stress | integer | 1-5 |
+| method_fit | integer | 1-5 |
+| notes | string \| null | Optional |
+| created_at | datetime | |
+
+## SessionNote
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| session_id | string (UUID) | FK → LearningSession |
+| content | string | Pflicht |
+| created_at | datetime | |
+
+Wird von der v0.7.0-UI noch nicht genutzt; reserviert für ein
+Inline-Notizblock-Feature in einer späteren Phase.
+
+## ProgressCommit
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| project_id | string (UUID) | FK → LearningProject |
+| session_id | string (UUID) | FK → LearningSession |
+| method | enum `LearningMethod` | |
+| understanding | float | 0.0-1.0 (skaliert aus 1-5) |
+| stress | float | 0.0-1.0 |
+| error_rate | float | 0.0-1.0, derzeit immer 0.0 |
+| duration_minutes | integer | aus ended_at - started_at berechnet |
+| committed_at | datetime | |
+
+Geschrieben vom `on_session_complete`-Hookimpl des Tracking-
+Plugins, wenn eine Session mit Bewertung beendet wird.
+
+## StepEvaluation
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| session_id | string (UUID) | FK → LearningSession |
+| from_step | integer | Zyklus-Schritt VOR Auswertung |
+| to_step | integer | Schritt NACH (= from_step wenn nicht angewendet) |
+| advance | boolean | Die KI sagte advance? |
+| confidence | float | 0.0-1.0 |
+| applied | boolean | Wurde der Vorschlag tatsächlich angewendet? |
+| fallback_used | boolean | True genau dann, wenn JSON-Parse fehlschlug |
+| reason | string | Menschenlesbare Begründung der KI |
+| evaluated_at | datetime | |
+
+## MethodSwitch
+
+| Feld | Typ | Hinweise |
+|---|---|---|
+| id | string (UUID) | Primary Key |
+| project_id | string (UUID) | FK → LearningProject |
+| from_method | enum `LearningMethod` | |
+| to_method | enum `LearningMethod` | |
+| reason | string | Warum der User den Wechsel akzeptierte |
+| switched_at | datetime | |
+
+## Curriculum, LearningTopic, Lesson
+
+| Curriculum | Typ | Hinweise |
+|---|---|---|
+| id | UUID | |
+| user_id | UUID | FK |
+| title, description, language | string, string\|null, string | |
+
+| LearningTopic | Typ | Hinweise |
+|---|---|---|
+| id | UUID | |
+| curriculum_id | UUID | FK |
+| parent_id | UUID \| null | Self-FK für Baum |
+| title, description, order_index | | |
+
+| Lesson | Typ | Hinweise |
+|---|---|---|
+| id | UUID | |
+| curriculum_id | UUID | FK |
+| title, content, order_index | | |
+
+## Enums
+
+```python
+class LearningMethod(str, Enum):
+    DEDUCTIVE = "deductive"
+    INDUCTIVE = "inductive"
+    ERROR_BASED = "error_based"
+    DIALOGIC = "dialogic"
+    CONTEXTUAL = "contextual"
+    AI_ADAPTIVE = "ai_adaptive"
+
+class SessionStatus(str, Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+class AIProvider(str, Enum):
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    GEMINI = "gemini"
+    PERPLEXITY = "perplexity"
+
+# Seit v1.20.0 / Phase 34
+class ApiKeySource(str, Enum):
+    ENV = "env"
+    SECRETS_YAML = "secrets_yaml"
+    SETTINGS = "settings"
+    NONE = "none"
+
+# Seit v0.9.0 / Phase 12
+class ImportedConversationSource(str, Enum):
+    CHATGPT = "chatgpt"
+    CLAUDE = "claude"
+    GEMINI = "gemini"
+    MANUAL = "manual"
+    UNKNOWN = "unknown"
+```
+
+Die Wire-Form ist der lowercase-String-Value (z.B.
+`"deductive"`, nicht `"DEDUCTIVE"`).
+
+## Seit der v0.7.0-Basis hinzugekommene Models
+
+| Model | Tabelle | Seit | Zweck |
+|---|---|---|---|
+| ImportedConversation | imported_conversations | v0.9.0 | Ein importierter Chat (Quelle, Titel, analysis_result-JSON) |
+| ImportedMessage | imported_messages | v0.9.0 | Ein Beitrag in einem importierten Chat |
+| Subject | subjects | v1.9.0 | Globaler hierarchischer Taxonomie-Knoten |
+| Tag | tags | v1.9.0 | Freitext-Label pro Nutzer |
+| ProjectSubject | project_subjects | v1.9.0 | M:N (LearningProject, Subject) |
+| ProjectTag | project_tags | v1.9.0 | M:N (LearningProject, Tag) |
+| UserXP | user_xp | v1.16.0 | XP + Level, ein Datensatz pro Nutzer |
+| XpPurchase | xp_purchases | v2.17.0 | Ein Kauf mit XP (Avatar-Rahmen, Maskottchen-Variante, Arcade-Spiel); der Besitz ergibt sich daraus |
+| Badge | badges | v1.16.0 | Badge-Katalog (aus YAML befüllt) |
+| UserBadge | user_badges | v1.16.0 | Verdientes Badge (nur anhängend) |
+| UserStreak | user_streaks | v1.16.0 | Serienstand + Freezes + Wochenend-Modus |
+| AnkiCardSuggestion | anki_card_suggestions | v1.17.0 | Von der KI extrahierter Karteikarten-Vorschlag |
+| StudyQuestion | study_questions | v1.19.0 | KI-erzeugte Active-Recall-Frage |
+| ApiKeyBackup | api_key_backups | v1.49.0 | Rollback-Speicher für ersetzte KI-Schlüssel |
+| LessonProgress | lesson_progress | v1.28.0 | Schrittstand pro Lektion (in_progress / paused / completed) |
+| ElementError | element_errors | v1.30.0 | SRS-Fehler + Beherrschung pro Element |
+| SetRun | set_runs | v2.12.0 | Ein Durchgang eines Content-Sets; die offene Zeile ist der aktive Durchgang |
+| UserMission | user_missions | v1.39.0 | Tägliche Mission: Zuteilung + Fortschritt |
+| SpeechRecording | speech_recordings | v2.14.0 | Die aktuelle Aufnahme des Lernenden für eine Sprechen-und-Aufnehmen-Übung |

@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Cross-repo content validation for the app repo (issue #47).
+
+Bug #44 was a stale-content drift: the ``adaptive-learner-content``
+repo had 16 sets / 330 lessons, but the app's bundled copy + the
+content README ("285") were stale. This script makes the content-repo
+manifest the single authority and keeps an auto-generated stats block
+in the app README in lock-step with it.
+
+**The content repo is the authority, NOT the gitignored bundle.** This
+script reads the content-repo manifests DIRECTLY (the same source
+``copy-bundled-content.mjs`` bundles), resolved as:
+
+  1. ``ADAPTIVE_LEARNER_CONTENT_DIR`` env var (CI + the bundler use it);
+  2. otherwise the sibling checkout ``../adaptive-learner-content``.
+
+It never walks the ephemeral ``frontend/public/content/`` bundle, never
+runs the bundler, never mutates the content repo, and does not collide
+with the content repo's own ``scripts/validate_content.py`` (which
+validates lesson SCHEMA inside the content repo).
+
+Modes::
+
+    validate_bundled_content.py --write-readme   # pre-commit: regenerate
+    validate_bundled_content.py --check-readme   # CI: exit 1 on drift
+
+Both modes also validate orphans + manifest-vs-filesystem consistency
+and exit 1 on any mismatch. When the sibling checkout is not present
+locally (a contributor without it), both modes SKIP with a warning and
+exit 0 — the real guard is the CI job, which checks the content repo out
+fresh. When ADAPTIVE_LEARNER_CONTENT_DIR is set (as CI does) and names a
+directory without a root manifest, both modes FAIL (#3452).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+# ``VALIDATE_BUNDLED_CONTENT_README`` overrides the README path; used by
+# the regression test to point at a temp file. Defaults to the app README.
+README_PATH = Path(os.environ.get("VALIDATE_BUNDLED_CONTENT_README", str(REPO_ROOT / "README.md")))
+
+MARKER_START = "<!-- CONTENT-STATS:START -->"
+MARKER_END = "<!-- CONTENT-STATS:END -->"
+# The auto-generated block is a subsection under "## What you get".
+SUBSECTION_HEADING = "### Bundled Content"
+# Where to insert the subsection on first run (before this heading).
+INSERT_BEFORE_HEADING = "## Install"
+
+
+class ContentDirUnreadableError(Exception):
+    """``ADAPTIVE_LEARNER_CONTENT_DIR`` names a checkout that cannot be read."""
+
+
+def resolve_content_dir() -> Path | None:
+    """Resolve the content-repo checkout.
+
+    Returns ``None`` when the implicit sibling checkout is absent: a
+    contributor without it gets a SKIP.
+
+    Raises:
+        ContentDirUnreadableError: when ``ADAPTIVE_LEARNER_CONTENT_DIR``
+            names a directory that is missing or has no root
+            ``manifest.yaml``. CI sets the variable explicitly, so a content
+            repo that moved or renamed its manifest must fail the run, not
+            read as "nothing to check" (#3452).
+    """
+    env = os.environ.get("ADAPTIVE_LEARNER_CONTENT_DIR")
+    candidate = (
+        Path(env).resolve() if env else (REPO_ROOT.parent / "adaptive-learner-content").resolve()
+    )
+    if candidate.is_dir() and (candidate / "manifest.yaml").is_file():
+        return candidate
+    if env:
+        raise ContentDirUnreadableError(candidate)
+    return None
+
+
+REVIEW_STATUSES = frozenset({"authored", "generated", "reviewed"})
+
+
+def set_review_status(entry: dict, set_dir: Path) -> str:
+    """The set's ``review_status`` (#2273).
+
+    Primary source is the ROOT manifest's set entry (where the content
+    repo stamps it); fallback is the per-set manifest's own ``sets[0]``
+    entry (the nested shape the per-set files carry). Absent, empty,
+    unknown or unreadable normalizes to ``"authored"`` - advertisable -
+    as the engine's ``asContentSetEntry`` reads it, so this gate and the
+    app agree on the same manifest (#3395). Only ``"generated"`` marks a
+    set as not yet advertisable (AI-generated, pending native-speaker
+    review).
+    """
+    value = entry.get("review_status")
+    if value in REVIEW_STATUSES:
+        return str(value)
+    try:
+        parsed = yaml.safe_load((set_dir / "manifest.yaml").read_text("utf-8"))
+    except (OSError, yaml.YAMLError):
+        return "authored"
+    nested = (parsed or {}).get("sets")
+    if isinstance(nested, list) and nested and isinstance(nested[0], dict):
+        value = nested[0].get("review_status")
+        if value in REVIEW_STATUSES:
+            return str(value)
+    return "authored"
+
+
+def count_lessons(set_dir: Path) -> int:
+    """Count lesson JSON files in ``<set_dir>/lessons`` (the canonical
+    filesystem truth). Manifest sidecars are excluded."""
+    lessons_dir = set_dir / "lessons"
+    if not lessons_dir.is_dir():
+        return 0
+    return sum(
+        1 for f in lessons_dir.glob("*.json") if not f.name.startswith(("manifest", "_meta"))
+    )
+
+
+def collect_stats(content_dir: Path) -> tuple[dict, list[str]]:
+    """Read the root manifest + filesystem-walk the sets. Returns
+    ``(stats, errors)`` where ``stats`` drives the README block and
+    ``errors`` is non-empty on any orphan / manifest mismatch."""
+    errors: list[str] = []
+    manifest = yaml.safe_load((content_dir / "manifest.yaml").read_text("utf-8"))
+    sets = manifest.get("sets") or []
+    if not sets:
+        errors.append("root manifest.yaml lists no sets")
+
+    rows: list[dict] = []
+    manifest_paths: set[str] = set()
+    total_lessons = 0
+    for entry in sets:
+        path = entry.get("path")
+        if not path:
+            errors.append(f"set {entry.get('id')!r}: missing 'path'")
+            continue
+        manifest_paths.add(path)
+        set_dir = content_dir / path
+        actual = count_lessons(set_dir)
+        declared = entry.get("lesson_count")
+        if declared is not None and declared != actual:
+            errors.append(
+                f"set {entry.get('id')!r}: manifest lesson_count "
+                f"{declared} != {actual} lesson files on disk"
+            )
+        total_lessons += actual
+        rows.append(
+            {
+                "title": entry.get("title") or entry.get("id") or path,
+                "source": entry.get("source_language", "?"),
+                "target": entry.get("target_language", "?"),
+                "level": entry.get("level", "-"),
+                "domain": entry.get("domain", "language"),
+                "lessons": actual,
+                "status": set_review_status(entry, set_dir),
+            }
+        )
+
+    # Orphan detection: a set dir on disk (has a manifest.yaml) that the
+    # root manifest does not list -> invisible to the loader (this is
+    # exactly the Bug #44 failure mode).
+    sets_dir = content_dir / "sets"
+    if sets_dir.is_dir():
+        for set_manifest in sets_dir.rglob("manifest.yaml"):
+            rel = set_manifest.parent.relative_to(content_dir).as_posix()
+            if rel not in manifest_paths:
+                errors.append(f"orphan set dir not in root manifest: {rel}")
+
+    domains = sorted({r["domain"] for r in rows})
+    # #2273 - the badge advertises ONLY reviewed content: everything
+    # whose review_status is not "generated" (authored = advertisable,
+    # absent normalizes to authored in set_review_status).
+    reviewed = [r for r in rows if r["status"] != "generated"]
+    stats = {
+        "total_lessons": total_lessons,
+        "total_sets": len(rows),
+        "domains": domains,
+        "rows": rows,
+        "reviewed_sets": len(reviewed),
+        "reviewed_pairs": len({f"{r['source']}-{r['target']}" for r in reviewed}),
+        "generated_sets": len(rows) - len(reviewed),
+    }
+    return stats, errors
+
+
+def _plural(count: int, word: str) -> str:
+    """``1 set`` / ``2 sets`` - shared by the badge and the note."""
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def render_block(stats: dict) -> str:
+    """Render the markdown between the CONTENT-STATS markers.
+
+    The content badge (#2273, decision #2259 Teil 3 Option A) counts
+    ONLY advertisable sets/language pairs (``review_status !=
+    "generated"``); AI-generated sets stay listed in the table with
+    their raw status and are named in the exclusion note, so the badge
+    never advertises unreviewed content as reviewed.
+    """
+    domains = ", ".join(stats["domains"]) or "language"
+    badge_message = (
+        f"{_plural(stats['reviewed_sets'], 'set')}"
+        "%2C%20"
+        f"{_plural(stats['reviewed_pairs'], 'language pair')}"
+    ).replace(" ", "%20")
+    lines = [
+        MARKER_START,
+        "[![Content](https://img.shields.io/badge/content-"
+        f"{badge_message}-brightgreen)](#bundled-content)",
+        "",
+        f"**{stats['total_lessons']} lessons · {stats['total_sets']} sets · "
+        f"{len(stats['domains'])} domain(s)** ({domains}) — bundled offline "
+        "into the GitHub Pages build from "
+        "[astrapi69/adaptive-learner-content]"
+        "(https://github.com/astrapi69/adaptive-learner-content).",
+        "",
+        "| Set | Source | Target | Level | Lessons | Review |",
+        "|-----|--------|--------|-------|--------:|--------|",
+    ]
+    for row in stats["rows"]:
+        lines.append(
+            f"| {row['title']} | {row['source']} | {row['target']} | "
+            f"{row['level']} | {row['lessons']} | {row['status']} |"
+        )
+    if stats["generated_sets"] > 0:
+        lines.append("")
+        lines.append(
+            f"_{_plural(stats['generated_sets'], 'AI-generated set')} "
+            "excluded from the badge pending native-speaker review._"
+        )
+    lines.append(MARKER_END)
+    return "\n".join(lines)
+
+
+def _replace_or_insert(readme: str, block: str) -> str:
+    """Replace the existing marker block, or insert the subsection
+    before the Install section on first run."""
+    if MARKER_START in readme and MARKER_END in readme:
+        head = readme[: readme.index(MARKER_START)]
+        tail = readme[readme.index(MARKER_END) + len(MARKER_END) :]
+        return head + block + tail
+    subsection = f"{SUBSECTION_HEADING}\n\n{block}\n\n"
+    anchor = f"\n{INSERT_BEFORE_HEADING}"
+    if anchor in readme:
+        idx = readme.index(anchor)
+        return readme[:idx] + "\n" + subsection + readme[idx + 1 :]
+    return readme.rstrip() + "\n\n" + subsection
+
+
+def current_block(readme: str) -> str | None:
+    if MARKER_START not in readme or MARKER_END not in readme:
+        return None
+    start = readme.index(MARKER_START)
+    end = readme.index(MARKER_END) + len(MARKER_END)
+    return readme[start:end]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--write-readme",
+        action="store_true",
+        help="Regenerate the README CONTENT-STATS block in place.",
+    )
+    group.add_argument(
+        "--check-readme",
+        action="store_true",
+        help="Read-only; exit 1 if the README block is out of date.",
+    )
+    args = parser.parse_args()
+
+    try:
+        content_dir = resolve_content_dir()
+    except ContentDirUnreadableError as unreadable:
+        print(
+            "[validate-bundled-content] FAIL: ADAPTIVE_LEARNER_CONTENT_DIR "
+            f"names {unreadable.args[0]}, which is missing or has no root "
+            "manifest.yaml - refusing to report success without checking.",
+            file=sys.stderr,
+        )
+        return 1
+    if content_dir is None:
+        print(
+            "[validate-bundled-content] SKIP: no content checkout "
+            "(set ADAPTIVE_LEARNER_CONTENT_DIR or check out "
+            "adaptive-learner-content next to this repo). The CI job "
+            "checks it out fresh and is the authoritative gate.",
+            file=sys.stderr,
+        )
+        return 0
+
+    stats, errors = collect_stats(content_dir)
+    if errors:
+        print(
+            "[validate-bundled-content] FAIL: content integrity errors:",
+            file=sys.stderr,
+        )
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    block = render_block(stats)
+    readme = README_PATH.read_text("utf-8")
+
+    if args.write_readme:
+        updated = _replace_or_insert(readme, block)
+        if updated != readme:
+            README_PATH.write_text(updated, "utf-8")
+            print(
+                "[validate-bundled-content] README CONTENT-STATS block "
+                f"updated ({stats['total_lessons']} lessons / "
+                f"{stats['total_sets']} sets).",
+            )
+        else:
+            print("[validate-bundled-content] README already up to date.")
+        return 0
+
+    # --check-readme
+    existing = current_block(readme)
+    if existing is None:
+        print(
+            "[validate-bundled-content] FAIL: README is missing the "
+            "CONTENT-STATS markers. Run "
+            "`python scripts/validate_bundled_content.py --write-readme`.",
+            file=sys.stderr,
+        )
+        return 1
+    if existing != block:
+        print(
+            "[validate-bundled-content] FAIL: README CONTENT-STATS block "
+            f"is stale. Content repo has {stats['total_lessons']} lessons "
+            f"/ {stats['total_sets']} sets. Run "
+            "`python scripts/validate_bundled_content.py --write-readme` "
+            "and commit.",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "[validate-bundled-content] OK: README matches the content repo "
+        f"({stats['total_lessons']} lessons / {stats['total_sets']} sets)."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

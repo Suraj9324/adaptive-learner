@@ -1,0 +1,52 @@
+/**
+ * Pure per-step state helpers for the lesson viewer (extracted from
+ * LessonPage for the complexity burn-down #417).
+ */
+
+import {
+  SUPPORTED_EXERCISE_TYPES,
+  SUPPORTED_EXT_EXERCISE_TYPES,
+} from "../../components/exercises";
+import type {
+  ContentLesson,
+  ContentLessonStep,
+  LessonProgress,
+  LessonStepResultStored,
+} from "../../storage/types";
+
+/**
+ * The persisted result for the step at ``currentStepIndex``, or
+ * ``undefined`` when the lesson/step isn't loaded or has no result yet.
+ * Reads only ``step_results``, so an ephemeral runner's run-local
+ * results (EXP-052) qualify as well as a persisted progress row.
+ */
+export function storedStepResult(
+  lesson: ContentLesson | null,
+  currentStepIndex: number,
+  progress: Pick<LessonProgress, "step_results"> | null,
+): LessonStepResultStored | undefined {
+  const steps = lesson?.steps;
+  if (!steps || currentStepIndex >= steps.length) return undefined;
+  return progress?.step_results?.[steps[currentStepIndex].id];
+}
+
+/**
+ * True when ``step`` is a playable exercise step — i.e. it gates the
+ * two-phase Check/Next button. Theory steps and unsupported/placeholder
+ * exercise types keep the plain always-enabled "Next" button.
+ *
+ * Must accept exactly what ``ExerciseDispatcher`` renders: core types
+ * plus the adopted ``ext:al-*`` extensions (#2600) — a renderable
+ * exercise the footer treats as theory is playable but never graded.
+ */
+export function isPlayableExerciseStep(
+  step: ContentLessonStep | null,
+): boolean {
+  return (
+    step !== null &&
+    step.type !== "theory" &&
+    step.exercise != null &&
+    (SUPPORTED_EXERCISE_TYPES.has(step.exercise.type) ||
+      SUPPORTED_EXT_EXERCISE_TYPES.has(step.exercise.type))
+  );
+}

@@ -1,0 +1,58 @@
+{
+  "category": "concepts",
+  "language": "pt",
+  "entries": [
+    {
+      "key": "curriculum",
+      "title": "Currículo",
+      "short": "Um plano de aprendizagem estruturado que interliga objetivos, conteúdos, métodos e avaliação.",
+      "long": "## O que é um currículo?\n\nNa educação, um currículo (plural: currículos) é um plano\nestruturado e um conceito sistemático que define como a\naprendizagem e o ensino acontecem.\n\n## Quatro perguntas centrais\n\nTodo currículo responde a quatro perguntas fundamentais:\n\n- **Objetivos de aprendizagem (porquê?)** — Quais competências\n  devem ser adquiridas?\n- **Conteúdo de aprendizagem (o quê?)** — Quais tópicos serão\n  abordados?\n- **Metodologia e didática (como?)** — Quais formas de ensino e\n  aprendizagem serão utilizadas?\n- **Avaliação (quão bem?)** — Como será medido o sucesso da\n  aprendizagem?\n\n## Diferença de um programa de estudos\n\nUm currículo coloca o aprendente e a sua aquisição de\ncompetências no centro (orientação para resultados), não\napenas uma lista rígida de áreas temáticas. Um programa de\nestudos documenta **o quê** deve ser ensinado; um currículo\ntambém descreve o **porquê** e o **como** — e mede **o que\nfoi realmente aprendido**.\n\n## Quatro dimensões\n\nA investigação sobre currículos distingue quatro manifestações:\n\n- **Currículo pretendido** — o objetivo documentado.\n- **Currículo implementado** — o que é realmente ensinado.\n- **Currículo realizado** — o que os aprendentes realmente\n  compreendem.\n- **Currículo oculto** — a aprendizagem implícita que acontece\n  paralelamente (hábitos de estudo, atitudes, normas sociais).\n\n## No Adaptive Learner\n\nNo Adaptive Learner, um currículo é o seu plano de\naprendizagem pessoal para um tópico. Ele organiza os tópicos\nde forma hierárquica e liga-os a lições. Você define os\nobjetivos, o conteúdo e os métodos — o sistema apoia a\navaliação através do rastreamento, do perfil de aprendizagem\ne do feedback da IA após cada passo.\n\nAo contrário de um currículo impresso, este adapta-se\ncontinuamente: quando surge uma recomendação de mudança de\nmétodo, é o currículo implementado a reagir ao currículo\nrealizado.\n"
+    },
+    {
+      "key": "learning_project",
+      "title": "Projeto de Aprendizagem",
+      "short": "O seu esforço de aprendizagem concreto com tópico, objetivo, prazo e tempo diário de estudo.",
+      "long": "## O que é um projeto de aprendizagem?\n\nUm projeto de aprendizagem agrupa tudo o que pertence a um\nesforço de aprendizagem: o tópico, o seu objetivo, o prazo\ne o seu tempo diário de estudo. É o enquadramento das suas\nsessões, do seu currículo e do seu perfil de aprendizagem.\n\n## Porquê estes quatro campos?\n\n- **Tópico** — o que quer aprender (ex.: \"Espanhol para\n  viagens\", \"Noções básicas de Python\", \"Escala de dó maior\n  no piano\"). Concreto e delimitado, não demasiado abrangente.\n- **Objetivo** — o que quer ser capaz de fazer no final.\n  Objetivos concretos (\"pedir comida num restaurante\") produzem\n  prompts de IA melhores do que objetivos vagos (\"aprender\n  espanhol\").\n- **Prazo** — até quando. Afeta a agressividade com que o\n  sistema agenda repetições e quando surge a recomendação de\n  mudança de método.\n- **Tempo diário de estudo** — quantos minutos por dia pode\n  investir. Orienta as recomendações de repetição espaçada e a\n  duração da sessão.\n\n## Porque é que objetivos concretos são importantes\n\nA investigação em aprendizagem é clara: objetivos SMART\n(específicos, mensuráveis, atraentes, realistas,\ntemporalmente definidos) duplicam o sucesso da aprendizagem\nem comparação com intenções vagas. O Adaptive Learner\ntraduz o seu objetivo para o prompt do sistema da IA; quanto\nmais concreto for, mais precisos serão os exercícios gerados.\n\n## No Adaptive Learner\n\nPode ter vários projetos de aprendizagem em paralelo. Cada\nsessão pertence exatamente a um projeto; o seu progresso\n(XP, emblemas, sequência) é registado por projeto. Quando\naltera o prazo, o sistema ajusta automaticamente a cadência\nde repetição — um prazo curto escalona as repetições de\nforma mais densa.\n"
+    },
+    {
+      "key": "learning_profile",
+      "title": "Perfil de Aprendizagem",
+      "short": "O seu perfil pessoal de pontos fortes nos seis métodos de aprendizagem, derivado do teste de avaliação.",
+      "long": "## O que é o perfil de aprendizagem?\n\nO perfil de aprendizagem mostra quão bem cada um dos seis\nmétodos do Adaptive Learner se adequa a si. Provém das suas\nrespostas no teste de avaliação (12 perguntas) e é\nvisualizado como um gráfico de radar.\n\n## Os seis eixos\n\nCada eixo é um método com um peso entre 0 e 100:\n\n- **Dedutivo** — aprender a regra e depois aplicá-la.\n- **Indutivo** — ver exemplos e derivar a regra por si próprio.\n- **Baseado em erros** — cometer erros deliberadamente e depois\n  compreender porquê.\n- **Dialógico** — aprender através da conversa.\n- **Contextual** — aprender em situações quotidianas\n  simuladas.\n- **Adaptativo por IA** — o sistema escolhe automaticamente.\n\n## É um perfil, não um rótulo\n\nNinguém é \"um aprendente dedutivo\". Cada aprendente tem um\npadrão ponderado ao longo dos seis métodos. Um perfil com\npesos elevados em indutivo e dialógico não significa que o\ndedutivo não funcionará para si — significa que os outros\ndois tipicamente o levam ao sucesso de aprendizagem mais\nrapidamente.\n\n## Evolução ao longo do tempo\n\nO perfil de aprendizagem não está gravado em pedra. Com\ncada ciclo de aprendizagem concluído e cada mudança de\nmétodo, o sistema ajusta as suas recomendações. Pode\nrepetir o teste de avaliação a qualquer momento —\ntipicamente útil a cada 3-6 meses, ou após uma grande\nmudança de tópico.\n\n## No Adaptive Learner\n\nO perfil orienta a vista do painel e as recomendações de\nsessão. Se iniciar uma sessão sem especificar um método, o\nsistema escolhe o método com o peso mais elevado no seu\nperfil.\n"
+    },
+    {
+      "key": "learning_session",
+      "title": "Sessão de Aprendizagem",
+      "short": "Uma unidade de aprendizagem guiada por IA que segue o ciclo de 7 passos.",
+      "long": "## O que é uma sessão de aprendizagem?\n\nUma sessão de aprendizagem é uma unidade de aprendizagem\ncontínua sobre um tópico, conduzida pelo ciclo de 7 passos\n(input, tentativa, erro, feedback, adaptação, repetição,\nintegração). A IA desempenha o papel de professor; você\nconduz o diálogo.\n\n## O que distingue uma sessão de uma conversa?\n\nNuma sessão, o **avaliador de duplo prompt** funciona em\nparalelo: após cada resposta, uma segunda instância da IA\navalia a sua compreensão (confiança de 0-100%) e decide\nse está pronto para o próximo passo. Uma conversa normal\nnão tem esse mecanismo corretivo.\n\n## Streaming\n\nAs respostas da IA aparecem palavra a palavra\n(Server-Sent Events) para que não espere pela resposta\ncompleta. Pode interromper a qualquer momento e fazer\nperguntas adicionais — a sessão decorre até que a encerre\nou o ciclo se complete.\n\n## Quando devo encerrar uma sessão?\n\n- Após o passo 7 (integração), quando o ciclo de\n  aprendizagem está completo.\n- Quando o sistema recomenda uma mudança de método e\n  você aceita a recomendação.\n- Quando a sua avaliação de **stress** esteve acima de 4\n  nas últimas avaliações — uma pausa é mais produtiva do\n  que continuar a forçar.\n\n## As avaliações têm impacto futuro\n\nCada sessão termina com três barras deslizantes\n(compreensão, stress, adequação do método, cada uma de\n1-5). Estes valores alimentam o seu perfil de\naprendizagem e moldam recomendações futuras: stress\nelevado sustentado mais baixa adequação do método\ndesencadeia a recomendação de mudança de método.\n\n## No Adaptive Learner\n\nUma sessão pertence exatamente a um projeto de\naprendizagem. Só pode ter uma sessão ativa de cada vez;\nisto impede a mistura de tópicos e protege a lógica de\nmudança de método de ruído.\n"
+    },
+    {
+      "key": "content_repository",
+      "title": "Repositório de conteúdos",
+      "short": "Um repositório público no GitHub com conjuntos de lições estruturados que o Adaptive Learner pode carregar como fonte de conteúdo.",
+      "docs_slug": "features/content-repos",
+      "long": "## O que é um repositório de conteúdos?\n\nAs lições vêm de repositórios de conteúdos — repositórios\npúblicos no GitHub que agrupam conjuntos de lições. O\nrepositório oficial está sempre carregado; além dele, pode\nligar o seu próprio.\n\n## Múltiplas fontes\n\nEm Definições > Dados, gere qualquer número de repositórios\n(adicionar, remover, ordem = prioridade). Cada conjunto\napresenta um selo de origem para que possa ver de onde veio\numa lição.\n"
+    },
+    {
+      "key": "trust_level",
+      "title": "Nível de confiança",
+      "short": "A classificação automática de confiança de um repositório de conteúdos ligado, derivada da sua validação técnica.",
+      "docs_slug": "features/content-repos",
+      "long": "## O que é um nível de confiança?\n\nCada repositório ligado executa uma validação técnica\nautomática a cada sincronização. Isso produz um nível de\nconfiança: 0 (não validado ou falhado), 1 (tecnicamente\nválido: pelo menos uma lição, sem conteúdo executável) e 3\n(oficialmente recomendado).\n\n## O que NÃO é\n\nO nível é puramente técnico. Uma classificação baseada em\nconteúdo/comunidade (confiança 2) precisa de um serviço de\nbackend partilhado e está adiada.\n"
+    },
+    {
+      "key": "streak",
+      "title": "Sequência",
+      "short": "O número de dias consecutivos em que aprendeu — combustível para o multiplicador de XP.",
+      "docs_slug": "user-guide/dashboard",
+      "long": "## O que é uma sequência?\n\nUma sequência conta os dias de aprendizagem consecutivos.\nCada sessão ou lição concluída preenche o mapa de calor e\nmantém a sequência viva.\n\n## Efeito\n\nA sequência alimenta um multiplicador de XP (+25% por dia\nconsecutivo, limitado a 7 dias). É um espelho da sua\nconsistência, não um castigo — falhar uma missão diária não\ntem penalização.\n"
+    },
+    {
+      "key": "assessment",
+      "title": "Avaliação",
+      "short": "Um teste curto que determina quais dos seis métodos de aprendizagem lhe convêm.",
+      "docs_slug": "user-guide/assessment",
+      "long": "## O que é a avaliação?\n\nA avaliação faz doze perguntas e, a partir delas, calcula o\nseu perfil de aprendizagem — a ponderação dos seis métodos\nem que a aplicação se apoia.\n\n## Opcional e retomável\n\nDesde a reformulação do onboarding, a avaliação é opcional e\nacessível apenas através do assistente de perfil. Se a\nabandonar, a aplicação lembra-se do seu progresso para que\npossa mais tarde retomar onde parou.\n"
+    }
+  ]
+}

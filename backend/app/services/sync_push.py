@@ -1,0 +1,234 @@
+"""Sync push + conflict-resolution.
+
+The write side of the sync surface: apply a client's incoming records for
+one table (``push_records``), and apply user-decided conflict resolutions
+(``apply_resolutions``). Extracted from ``sync_service`` so that module is
+the table registry + serialization + the shared per-user scoping primitive
+(``_scoped_query`` / ``row_belongs_to_user``, also consumed by backup).
+
+Runtime dependency is one-way: this module imports the registry +
+serialization helpers from ``sync_service``; ``sync_service`` never imports
+back.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from app.exceptions import ValidationError
+
+from .sync_service import (
+    SYNC_SECRET_TABLES,
+    TABLES,
+    _apply_record,
+    _from_iso,
+    row_belongs_to_user,
+    serialize_row,
+    strip_sync_secrets,
+)
+
+if TYPE_CHECKING:
+    from app.repositories.sync_repo import SyncRepository
+
+
+@dataclass
+class ConflictBundle:
+    table: str
+    record_id: str
+    local: dict[str, Any]
+    remote: dict[str, Any]
+
+
+@dataclass
+class PushResult:
+    accepted: list[str] = field(default_factory=list)
+    conflicts: list[ConflictBundle] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+
+def _push_append_only_record(
+    repo: SyncRepository,
+    user_id: str,
+    table: str,
+    record: dict[str, Any],
+    record_id: str,
+    existing: Any | None,
+    result: PushResult,
+) -> None:
+    """Apply one record to an append-only table: insert if unknown, else skip.
+
+    A known id is treated as an idempotent re-send (skipped); a row that does
+    not scope to ``user_id`` is skipped defensively.
+    """
+    if existing is not None:
+        result.skipped.append(record_id)
+        return
+    row = _apply_record(table, record, None)
+    if not row_belongs_to_user(table, row, user_id):
+        result.skipped.append(record_id)
+        return
+    repo.add(row)
+    result.accepted.append(record_id)
+
+
+def _push_mutable_record(
+    repo: SyncRepository,
+    user_id: str,
+    table: str,
+    spec: Any,
+    record: dict[str, Any],
+    record_id: str,
+    existing: Any | None,
+    since: datetime | None,
+    result: PushResult,
+) -> None:
+    """Apply one record to a mutable table (insert / last-write update / conflict).
+
+    Insert when unknown; accept the remote write when the local row was
+    untouched since ``since`` (or on an idempotent same-timestamp re-send);
+    otherwise record a conflict for both-sides-changed. Rows that do not scope
+    to ``user_id`` are skipped defensively.
+    """
+    remote_ts = _from_iso(record.get(spec.timestamp_field))
+    if existing is None:
+        row = _apply_record(table, record, None)
+        if not row_belongs_to_user(table, row, user_id):
+            result.skipped.append(record_id)
+            return
+        repo.add(row)
+        result.accepted.append(record_id)
+        return
+    if not row_belongs_to_user(table, existing, user_id):
+        # Same id but wrong user -- defensive skip. Should never happen in
+        # practice because UUIDs collide at 1 in 2**128.
+        result.skipped.append(record_id)
+        return
+    local_ts: datetime | None = getattr(existing, spec.timestamp_field, None)
+    if local_ts is None:
+        local_ts = datetime.min.replace(tzinfo=UTC)
+    if local_ts.tzinfo is None:
+        local_ts = local_ts.replace(tzinfo=UTC)
+    # Local untouched since the client's last sync? Accept the remote write.
+    if since is None or local_ts <= since:
+        _apply_record(table, record, existing)
+        result.accepted.append(record_id)
+        return
+    # Both sides changed.
+    if remote_ts is not None and local_ts == remote_ts:
+        # Same timestamp -- idempotent re-send of the same write.
+        result.accepted.append(record_id)
+        return
+    result.conflicts.append(
+        ConflictBundle(
+            table=table,
+            record_id=record_id,
+            local=strip_sync_secrets(table, serialize_row(table, existing)),
+            remote=record,
+        )
+    )
+
+
+def push_records(
+    repo: SyncRepository,
+    user_id: str,
+    table: str,
+    records: list[dict[str, Any]],
+    since: datetime | None,
+) -> PushResult:
+    """Apply incoming records for one table.
+
+    For an append-only table: insert if id unknown, skip if
+    known. For a mutable table: insert if unknown, update if
+    local was untouched since ``since``, raise as a conflict if
+    BOTH sides changed.
+
+    No API key is written (#3854): every record of a
+    ``SYNC_SECRET_TABLES`` table is skipped, and key fields are
+    stripped before a record is applied, so an older client's
+    cleartext keys never land in the ciphertext columns.
+    """
+    if table not in TABLES:
+        raise ValidationError(f"Unknown sync table: {table!r}")
+    spec = TABLES[table]
+    model = spec.model
+    result = PushResult()
+
+    for raw_record in records:
+        record_id = raw_record.get("id")
+        if not isinstance(record_id, str) or not record_id:
+            result.skipped.append("<no-id>")
+            continue
+        if table in SYNC_SECRET_TABLES:
+            result.skipped.append(record_id)
+            continue
+        record = strip_sync_secrets(table, raw_record)
+        existing = repo.get_by_pk(model, record_id)
+        if spec.append_only:
+            _push_append_only_record(repo, user_id, table, record, record_id, existing, result)
+        else:
+            _push_mutable_record(
+                repo, user_id, table, spec, record, record_id, existing, since, result
+            )
+
+    if result.accepted or result.conflicts == [] and result.accepted == []:
+        # Always commit even on empty acceptance so subsequent
+        # cascading reads see a clean transaction.
+        repo.commit()
+    else:
+        repo.flush()
+    return result
+
+
+@dataclass
+class Resolution:
+    table: str
+    record_id: str
+    chosen: str  # "local" | "remote" | "merged"
+    merged_data: dict[str, Any] | None = None
+
+
+def apply_resolutions(
+    repo: SyncRepository, user_id: str, resolutions: list[Resolution]
+) -> dict[str, list[str]]:
+    """Apply user-decided conflict resolutions.
+
+    "local" → keep the row as-is (no-op on the server).
+    "remote" → overwrite with the remote payload (client must
+       have re-sent the data so we keep the API symmetric).
+    "merged" → overwrite with the merged payload.
+
+    The client's choice of ``local`` on a server-side row that
+    was already overwritten is a true no-op; we still record it
+    in ``applied`` so the client can confirm the decision landed.
+    """
+    applied: list[str] = []
+    skipped: list[str] = []
+    for resolution in resolutions:
+        spec = TABLES.get(resolution.table)
+        if spec is None or resolution.table in SYNC_SECRET_TABLES:
+            # #3854: the key rollback cache is never written over sync.
+            skipped.append(resolution.record_id)
+            continue
+        existing = repo.get_by_pk(spec.model, resolution.record_id)
+        if resolution.chosen == "local":
+            if existing is None:
+                skipped.append(resolution.record_id)
+                continue
+            applied.append(resolution.record_id)
+            continue
+        payload = strip_sync_secrets(resolution.table, resolution.merged_data or {})
+        if resolution.chosen in {"remote", "merged"}:
+            if not payload:
+                skipped.append(resolution.record_id)
+                continue
+            _apply_record(resolution.table, payload, existing)
+            if existing is None and payload.get("id"):
+                row = _apply_record(resolution.table, payload, None)
+                repo.add(row)
+            applied.append(resolution.record_id)
+        else:
+            skipped.append(resolution.record_id)
+    repo.commit()
+    return {"applied": applied, "skipped": skipped}

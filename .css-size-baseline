@@ -1,0 +1,388 @@
+# Zufluss-Stopp fuer frontend/src/styles/global.css (#1467).
+#
+# Eingefrorene Zeilen-Obergrenze. global.css darf nur SCHRUMPFEN.
+# Nach einer Reduktions-Tranche
+# (docs/audits/global-css-analysis-2026-07-08.md) diese Zahl senken.
+# Legitime Token-/Fundament-Erweiterung: mit begruendetem Kommentar
+# minimal anheben (Escape-Hatch wie .filesize-baseline).
+#
+# Erste nicht-Kommentar-Zeile = die Baseline-Zahl.
+#
+# 7591 -> 7506 (EXP-044 Tranche 1, #1485): 8 tote Selektoren aus dem
+# #1467-Audit geloescht (Layer 5), jeder vorab per git grep gegen
+# frontend/src als ungenutzt bestaetigt.
+#
+# 7506 -> 7497 (#1512): body.has-bottom-nav-Reservierung entfernt mit der
+# mobilen BottomTabBar.
+#
+# 7497 -> 7509 (EXP-044 Tranche 2a, #1485): +12 reine Wrapper-Zeilen
+# (6x "@layer legacy {" + 6x "}") um die Bloecke Buttons/Landing/
+# Onboarding/Assessment/Dashboard/Session - Kaskaden-Reparatur, kein
+# neues CSS. Tranche 4+ loescht diese Regeln samt Wrappern wieder.
+# 7509 -> 7531 (EXP-044 Tranche 2b Re-Cut, #1485): +22 reine Wrapper-
+# Zeilen (11x "@layer legacy {" + 11x "}") um die vom Konflikt-Audit
+# (scripts/check-legacy-wrap-conflicts.py, PR #1576) als CLEAN bestaetigten
+# Bloecke Rating-Group/Storage-Toggle/Progress-Table/EXP-008-Celebration/
+# EXP-008-Milestone/Curriculum/RecentSessions/MethodBadges/VisualDiff/
+# AnswerAnims/PWA-Banner - Kaskaden-Reparatur, kein neues CSS. Tranche 4+
+# loescht diese Regeln samt Wrappern wieder.
+# 7531 -> 7557 (EXP-044 Tranche 2c, #1485): +26 reine Wrapper-Zeilen
+# (13x "@layer legacy {" + 13x "}") um die vom Konflikt-Audit
+# (scripts/check-legacy-wrap-conflicts.py) als CLEAN bestaetigten Bloecke
+# Export/AutoLoop/MultiCycle/ModelPicker/BackupCompare/Gamification/
+# Badges/Streaks/Anki/Voice/Pronunciation/NotebookLM/ApiKeyValidation -
+# Kaskaden-Reparatur, kein neues CSS. Tranche 4+ loescht diese Regeln
+# samt Wrappern wieder.
+# NICHT gewrappt (Konflikt-Audit als Utility-Konflikt): MobilePolish-9A
+# (#1583), ReadAloudTTS (#1584), ChatAnalysisLoading (#1585).
+# 7557 -> 7556 (#1592): die tragende Regel
+# `.app-nav .nav-group-label { display: none }` (3 Zeilen) entfernt +
+# 2-Zeilen-Kommentar - die Label-Sichtbarkeit steuert jetzt die NavGroup
+# `hideLabel`-Prop statt eines ungelayerten CSS-Kontext-Overrides, damit die
+# Region kaskaden-schuldenfrei wird. Netto -1.
+# 7556 -> 7569 (EXP-044 Tranche 2c-nav, #1597): +4 reine Wrapper-Zeilen
+# (2x "@layer legacy {" + 2x "}") um Navigation + Nav-Rest, plus ein
+# 9-Zeilen-Begruendungskommentar fuer die neue UNGELAYERTE Sektion
+# "Lesson header / summary + content-set heading". Die 4 vom
+# Konflikt-Audit als Utility-KONFLIKT gemeldeten Regeln (.content-set-meta
+# h2/h4, .lesson-header-set, .lesson-summary-stats, .lesson-summary-actions)
+# wurden aus der Navigation-Region herausgeloest, damit Navigation +
+# Nav-Rest CLEAN wrapbar werden; sie bleiben absichtlich ungelayert
+# (Reconciliation = sichtbare Aenderung, spaetere Tranche). Kein neues CSS.
+# NICHT gewrappt (Utility-Konflikt, ungelayert): nur noch die neue
+# Lesson-header/summary-Sektion (#1597). MobilePolish-9A (#1583),
+# ChatAnalysisLoading (#1585) + ReadAloudTTS (#1584) sind jetzt gewrappt (s.u.).
+# NICHT gewrappt (Legacy-vs-unlayered-Legacy-Praezedenz, #1592):
+# LessonMode-LandscapeNav - jetzt NICHT mehr durch Navigation/Nav-Rest
+# noch durch .nav-hamburger blockiert (alle gewrappt), sondern nur noch
+# durch die ungelayerten .nav-links + .app-nav (mobile @media). Erst
+# wrapbar wenn auch diese gelayert sind (naechster Schritt nach #1583).
+# 7569 -> 7573 (#1540): +line-height pin on .lesson-header h1.
+# 7573 -> 7575 (EXP-044 Tranche 2c, #1583): +2 netto um den Block
+# MobilePolish-9A (2x Wrapper-Zeile "@layer legacy {" / "}" minus die tote
+# `.nav-hamburger { margin-left: auto }`, +1 Kommentarzeile). Die
+# margin-left-Regel war tot: Navigation.tsx rendert den Hamburger immer mit
+# dem wichtigen `ml-0!`-Utility, das gewinnt - Loeschen raeumt den einzigen
+# Wrap-Konflikt weg (Konflikt-Audit: CLEAN). Kein neues CSS.
+# 7575 -> 7572 (EXP-044 Tranche 2c, #1585): -3 netto um den Block
+# ChatAnalysisLoading. Die einzige Konflikt-Regel `.analysis-error-inline p
+# { margin:0; color:var(--error) }` geloescht und als token-Utilities
+# (`m-0 text-[var(--error)]`) an den (vorher nackten) Consumer-<p> in
+# ImportDetail.tsx verschoben - gleiches Rendering; danach Block CLEAN und
+# gewrappt (+2 Wrapper - 4 Regel-Zeilen - 1 Leerzeile = -3). Kein neues CSS.
+# 7572 -> 7571 (EXP-044 Tranche 2c, #1584): -1 netto um den Block
+# ReadAloudTTS. Die einzige Konflikt-Regel `.exercise-prompt-row > p
+# { flex:1 1 auto; margin:0 }` geloescht und als Utilities (`flex-auto m-0`)
+# an die 5 Prompt-<p>-Consumer verschoben (matching/picture-choice/cloze/
+# cloze-multiselect + shared ExercisePromptRow; alle hatten schon `m-0`,
+# `flex-auto` == `flex:1 1 auto` -> gleiches Rendering); danach Block CLEAN
+# und gewrappt (+2 Wrapper - 4 Regel-Zeilen +1 Kommentarzeile = -1). Kein
+# neues CSS.
+# 7571 -> 7565 (EXP-044 Tranche 2c-lesson, #1632): -6 netto. Die neue
+# Sektion "Lesson header / summary + content-set heading" gewrappt - der
+# 9-Zeilen-Begruendungskommentar (warum ungelayert) durch eine 1-Zeilen-
+# Header-Zeile ersetzt + 2 Wrapper-Zeilen (@layer legacy { / }) = -6. Die 4
+# vom Konflikt-Audit gemeldeten Hits sind reconciled/allowlisted: mt-3
+# (ReviewSummary.tsx:87) als wertgleiches No-op entfernt (mt-3 ==
+# var(--space-3) exakt, Single-Property); text-sm (LessonHeader.tsx:142)
+# BEHALTEN + allowlisted - das kompilierte Utility deklariert font-size UND
+# line-height, die line-height (fix 1.25rem) war unangefochten live, Entfernen
+# reflowte jede Lesson-Oberflaeche (Messung: run 29340479250); post-Wrap
+# gewinnt text-sm die font-size (14px statt 14.4px bei gleicher line-height);
+# .content-set-meta h4 = FoldedUserLessons.tsx:56 Tag-Heuristik-False-
+# Positives (das <h4> ist ein Geschwister der <ul>, kein .content-set-meta-
+# Nachkomme); die Timed-Stats m-0 (LessonSummarySections.tsx:314) ist die
+# EINE gewollte Aktivierung (12px->0 nur im Timed-Modus) - alle vier in
+# .legacy-wrap-accepted.json mit Begruendung. Damit sind keine ungelayerten
+# Utility-Konflikt-Bloecke mehr offen; es bleibt nur die #1592 Legacy-vs-
+# unlayered-Legacy-Verwobenheit (LessonMode / .nav-links / .app-nav mobile
+# @media). Kein neues CSS.
+# 7565 -> 7566 (Concern-Split Peel 1, #1655): +1 reine Manifest-Zeile netto
+# (@import "./legacy/00-head.css"; + Leerzeile, minus eine wc-l-Zaehldifferenz
+# durch die end-of-file-Newline der ausgelagerten Datei). Der erste Top-down-Peel
+# verschiebt Zeilen 1-140 (Header-Kommentar + :root-Token-Bloecke) nach
+# styles/legacy/00-head.css; der Ratchet zaehlt seit diesem PR die SUMME
+# global.css + styles/legacy/*.css, das Verschieben selbst ist
+# zahlneutral. Byte-identitaets-Beweis im PR. Kein neues CSS.
+# 7566 -> 7566 (Concern-Split Peel 2, #1655): zahlneutral. Zeilen 3-345
+# (Base-Resets: *, html/body/#root, img/svg/pre/code, .code-block*,
+# a:not(), [hidden], :focus-visible, .sr-only/.skip-to-content, button-
+# und input-Basis inkl. der zwei @layer-base-Bloecke) verbatim nach
+# styles/legacy/01-base.css; in global.css ersetzt die @import-Zeile den
+# Block exakt zeilenneutral (-344 +2 in global.css, +342 in der Datei).
+# Byte-identitaets-Beweis im PR. Kein neues CSS.
+# 7566 -> 7567 (Concern-Split Peel 3, #1655): +1 reine Manifest-Zeile.
+# Der erste gewrappte @layer-legacy-Block (Buttons, Zeilen 4-53) verbatim
+# nach styles/legacy/02-buttons.css (-50 +2 in global.css, +50 in der
+# Datei = netto +1 fuer die @import-Zeile). Byte-identitaets-Beweis im
+# PR. Kein neues CSS.
+# 7567 -> 7568 (Concern-Split Peel 4, #1655): +1 reine Manifest-Zeile.
+# Der Landing-page-Block (Zeilen 5-127, der zweite gewrappte
+# @layer-legacy-Block) verbatim nach styles/legacy/03-landing.css
+# (-123 +1 in global.css, +123 in der Datei = netto +1 fuer die
+# @import-Zeile). Byte-identitaets-Beweis im PR (212319 Bytes,
+# byte-identisch vor/nach). Kein neues CSS.
+# 7568 -> 7569 (Concern-Split Peel 5, #1655): +1 reine Manifest-Zeile.
+# Der Onboarding-page-Block (Zeilen 6-89, dritter gewrappter
+# @layer-legacy-Block) verbatim nach styles/legacy/04-onboarding.css
+# (-84 +1 in global.css, +84 in der Datei). Byte-identitaets-Beweis
+# im PR. Kein neues CSS.
+# 7569 -> 7572 (Concern-Split Batch A / Peel 6, #1655): +3 reine
+# Manifest-Zeilen. Drei gewrappte Bloecke verbatim ausgelagert:
+# Assessment (Z. 6-214) -> 05-assessment.css, Dashboard (inkl.
+# Chart-Alternativen + Step-Eval-Insights, Z. 215-495) ->
+# 06-dashboard.css, Session (Z. 496-697) -> 07-session.css.
+# Byte-identitaets-Beweis im PR. Kein neues CSS.
+# 7572 -> 7576 (Concern-Split Batch B / Peel 7, #1655): +4 reine
+# Manifest-Zeilen. Vier Regionen verbatim: QR-Scanner-Overlay
+# (ungewrappt) -> 08-qr-scanner.css, Rating-Buttons -> 09-rating.css,
+# Settings-Seite + Storage-Mode-Toggle -> 10-settings.css,
+# Progress-Table -> 11-progress.css. Byte-identitaets-Beweis im PR.
+# Kein neues CSS.
+# 2026-07-15: 7576 -> 7584 (Concern-Split Batch C / Peel 8, #1655):
+# +8 reine Manifest-Zeilen (@import). Navigation -> 12-navigation.css,
+# Lesson-Header -> 13-lesson-header.css, Celebration (55C) ->
+# 14-celebration.css, Milestone (55D) -> 15-milestone.css,
+# Feedback-Intensity (55E) -> 16-feedback-intensity.css,
+# Curriculum -> 17-curriculum.css, Recent-Sessions ->
+# 18-recent-sessions.css, Method-Badges -> 19-method-badges.css.
+# Byte-identitaets-Beweis im PR. Kein neues CSS.
+# 2026-07-15: 7584 -> 7595 (Concern-Split Batch D / Peel 9, #1655):
+# +11 reine Manifest-Zeilen (@import). Diff-Highlight (52B) ->
+# 20-diff-highlight.css, Answer-Animations (55B) ->
+# 21-answer-animations.css, PWA-Install-Prompt (9B) ->
+# 22-install-prompt.css, Mobile-Polish (9A) -> 23-mobile-polish.css,
+# Lesson-Mode + Landscape-Compact-Nav (#1592-Zone, bleibt unlayered)
+# -> 24-lesson-mode-nav.css, Export (16D) -> 25-export-section.css,
+# Auto-Loop (17C) -> 26-auto-loop.css, Multi-Cycle-Summary (17D) ->
+# 27-multi-cycle-summary.css, ModelPicker (24C) -> 28-model-picker.css,
+# BackupCompare (25B) -> 29-backup-compare.css, Rich-Text-Editor
+# (Phase 27 inkl. Toolbar + Code-Block) -> 30-editor.css.
+# Byte-identitaets-Beweis im PR. Kein neues CSS.
+# 2026-07-15: 7595 -> 7606 (Concern-Split Batch E / Peel 10, #1655):
+# +12 Manifest-Zeilen (@import), -1 Leerzeile am Dateiende. Gamification (29A) ->
+# 31-gamification.css, Badges (29B) -> 32-badges.css, Streaks (29C)
+# -> 33-streaks.css, Anki (30C) -> 34-anki.css, Voice (31) ->
+# 35-voice.css, Lesson-Read-Aloud/TTS -> 36-read-aloud.css,
+# Pronunciation (31C) -> 37-pronunciation.css, NotebookLM (32) ->
+# 38-notebooklm.css, WCAG-Motion-Catch-All (39 C7, reduced-motion)
+# -> 39-motion-catchall.css, API-Key-Validation ->
+# 40-api-key-validation.css, Chat-Analysis-Loading ->
+# 41-analysis-loading.css, Visual Learning Path (66/EXP-022) ->
+# 42-learning-path.css. Damit ist global.css ein reines
+# @import-Manifest (43 Zeilen, Dateien 00-42) - der Split #1655 ist
+# strukturell abgeschlossen. Byte-identitaets-Beweis im PR.
+# Kein neues CSS.
+# 2026-07-15: 7606 -> 7633 (#1592 Co-Wrap): +27 reine Wrapper- und
+# Doku-Zeilen, kein neues CSS. 08-qr-scanner.css (QR/CycleSteps/
+# SessionChat-Basis) + 24-lesson-mode-nav.css (LessonMode/Landscape/
+# Mobile-Polish) in @layer legacy gewrappt; der iOS-Focus-Zoom-Guard
+# (#1353) und der Mobile-Input-Floor bleiben BEWUSST unlayered
+# (muessen Tailwind-Utilities schlagen, z.B. text-sm auf Selects)
+# und tragen jetzt erklaerende Kommentare. Eine dokumentierte
+# Aktivierung: .lesson-header h1 landscape font-size verliert an
+# text-sm (.legacy-wrap-accepted.json, konsistent mit #1628).
+# 2026-07-16: 7633 -> 7639 (#1723 Skip-Link-Fix): +6 reine
+# Doku-Kommentar-Zeilen in 01-base.css - die #146/#194-Carve-out-
+# Historie und die :where()-Begruendung am Content-Link-Selektor.
+# Kein neues CSS; der Selektor-Umbau selbst ist zeilenneutral.
+# 2026-07-18: 7639 -> 7654 (#1817 Toggle-Checkbox-Fix): +15 Zeilen in
+# 04-onboarding.css - eine Fundament-Regel, die die geteilte
+# .form-row-toggle-Primitive ihre Checkbox constrainen laesst
+# (.form-row-toggle input[type="checkbox"] { flex:none; 1rem-Quadrat;
+# padding:0 }), plus 7-Zeilen-Begruendungskommentar. Behebt die
+# uneinheitliche Checkbox-Groesse aller Settings-Toggle-Rows an der
+# Wurzel (statt einer Size-Utility 13x dupliziert). Kein neuer
+# Komponenten-Style; Escape-Hatch fuer eine geteilte Primitive-Reparatur.
+# 2026-07-23: 7654 -> 7639 (EXP-044 Option C, #1629 Half B): -15 Zeilen.
+# Die god-classes `.form-hint` (04-onboarding.css, -5 inkl. Leerzeile) und
+# `.tile` (06-dashboard.css, -10 inkl. Leerzeile) geloescht - ihre Defaults
+# leben jetzt in den shared-Components FormHint.tsx / Tile.tsx als
+# token-backed Tailwind-Utilities (`text-fg-muted text-[0.85rem]` bzw.
+# `flex min-h-[120px] items-center justify-center rounded-[var(--radius-md)]
+# bg-[var(--surface-2)] p-[var(--space-4)]`). 0-diff: die Utilities rendern
+# identisch zur geloeschten Regel. Kein neues CSS.
+#
+# Punkt-5-Pruefung (#2135, 2026-07-29): `wc -l` auf eine versionierte
+# Datei. Werkzeugunabhaengig, zeilenendungs-neutral, zwei Laeufe identisch.
+# Keine Toleranz noetig. GEPRUEFT - nicht erneut pruefen.
+# 2026-07-30: 7639 -> 7648 (develop-Nachzug, commit ffa81660
+# "fix(a11y): layer the base anchor color so class-styled anchors win
+# again"): +9 Zeilen in 01-base.css - der Base-Anker-Farb-Layer, damit
+# klassen-gestylte Anker wieder gewinnen. Legitime Fundament-Erweiterung
+# (Base-Reset-Ebene), aber der a11y-Fix hob die Baseline nicht mit an, so
+# dass develop rot blieb. Hier nachgetragen; nicht aus dieser Recovery-PR.
+# 2026-08-06: 7648 -> 7335 (Dead-CSS-Tranche #2476, Karte aus #2452,
+# Refs #1485): -313 Zeilen bestaetigt toter Legacy-Regeln, Rueckstand der
+# Tailwind-Migration der AI-Key-Settings-UI (nach 2026-07-08).
+# 26-auto-loop.css (36) + 40-api-key-validation.css (66) komplett samt
+# @import-Zeilen; 10-settings.css Block api-key/configured-provider
+# (-163); Einzelregeln .metric-grid (06, .metric-grid-5 bleibt LIVE),
+# .onboarding-skip-top (04 + 24), .api-key-row-input/
+# .model-override-row-input mobile (24), .chat-message-cursor (08).
+# Jeder Selektor per grep gegen frontend/src verifiziert (inkl.
+# Template-Literal-Staemme + testids); Grep-Pin in
+# dead-selectors-removed.test.ts. NICHT entfernt (Karten-Korrektur):
+# nav-mode-badge-content/-ai-augmented sind LIVE via
+# `nav-mode-badge-${mode}` (NavIndicators.tsx:25).
+# 2026-08-07: 7335 -> 7581 (Wiederherstellung #2484): +246 Zeilen. Die
+# #2476-Tranche entfernte die api-key-/configured-provider-/
+# model-override-Regeln FAELSCHLICH - ihre Konsumenten liegen nicht in
+# frontend/src, sondern im externen Paket @astrapi69/ai-key-vault-react
+# (dist emittiert die Klassennamen); die KI-Settings renderten unstyled
+# auf den Deployments. Zurueck: 40-api-key-validation.css komplett samt
+# @import (67), der 10-settings-Block (163, byte-identisch zum
+# Vor-Tranche-Stand), die mobilen api-key-row-input/
+# model-override-row-input-Regeln in 24 (16). Wirklich tot bleiben
+# chat-transition-*, .metric-grid, .onboarding-skip-top,
+# .chat-message-cursor (gegen node_modules/@astrapi69/*/dist
+# nachverifiziert, 0 Treffer). Ein src-Grep allein ist kein
+# Tot-Urteil - Laufzeitpakete emittieren Klassennamen.
+# 2026-08-07: 7581 -> 7645 (#2479 Korrektur-zaehlender Zusammenfassungs-
+# Balken, Merge-Rebase der +64 auf die #2484-Wiederherstellung): +64 Zeilen
+# in 12-navigation.css - der zweigeteilte Punktzahl-Balken erweitert die
+# bestehende Score-Bar-Primitive um einen zweiten ("nach Korrektur")
+# Abschnitt: ein solider + ein schraffierter Fill (repeating-linear-gradient
+# ueber color-mix, damit die Segmente auch ohne Farbe unterscheidbar sind -
+# Barrierefreiheit) plus die zweizeilige Legende mit Swatches. Legitime
+# Fundament-Erweiterung einer bereits ungelayerten Legacy-Regel (kein
+# Tailwind-Utility-Aequivalent fuer den Hatch-Verlauf); neue Farben laufen
+# ueber die vorhandenen Tokens --accent / --exercise-correct / --surface.
+# Kein neues global.css.
+# 2026-08-07: 7645 -> 7676 (#2498 Dropdown-Redesign): +31 Zeilen in
+# 01-base.css - eine Fundament-Regel fuer die native <select>-Basis: der
+# OS-Caret wird per `appearance: none` durch den App-eigenen Chevron
+# ersetzt (zwei token-gefaerbte linear-gradient-Dreiecke, kein Bild-Asset,
+# kein Farb-Literal), plus Platz fuer den Caret, Pointer-Cursor und ein
+# Hover-Affordance. Element-weite Regel fuer ALLE ~40 Settings-Dropdowns -
+# kein Tailwind-Utility-Aequivalent fuer eine globale `select`-Element-Regel.
+# Neue Farben laufen ueber die vorhandenen Tokens --fg-muted / --surface /
+# --bg-elevated / --accent. Kein neues global.css.
+# 2026-08-11: 7676 -> 7699 (#2556, @astrapi69/ai-key-vault-react 0.3.2):
+# +23 Zeilen in 01-base.css - `.akv-file-input::file-selector-button` (+
+# `::-webkit-file-upload-button`) fuer den nativen File-Input-Button des
+# Kits. Kein Tailwind-Utility-Aequivalent: ein Utility-Klassenname aus
+# einem npm-Paket wird vom Host-JIT-Scanner nie gesehen (der scannt nur
+# den eigenen Quellbaum, nie node_modules - astrapi69/ai-key-vault#15).
+# Das Kit selbst liefert bewusst KEIN eigenes Aussehen mehr (0.3.2, nach
+# Diskussion: nur eine stabile `.akv-file-input`-Klasse als Anker, kein
+# CSS-Export, keine `--akv-*`-Variablen, kein hartcodierter Default) -
+# der Host stylt das Element komplett selbst. Neue Farben laufen ueber
+# die vorhandenen Tokens --accent / --accent-fg / --accent-hover / \
+# --radius-sm / --space-2 / --space-4. Unlayered (nicht @layer base wie
+# der button-Fundament-Reset direkt darueber): eine spezifische, benannte
+# Selektor-Regel fuer EIN Kit-Element, kein generischer Rohelement-
+# Fallback, der von Utilities ueberschrieben werden soll. Kein neues
+# global.css.
+# 2026-08-13: 7699 -> 7674 (EXP-044 Option C, #1485): -25 Zeilen. Die
+# god-class .method-badge/.method-dot (19-method-badges.css, 24 Zeilen +
+# 1 @import-Zeile in global.css) geloescht - vier handkopierte
+# Konsumenten (Assessment.tsx, MethodSwitchBanner.tsx,
+# ToolRecommendations.tsx, QuickStartButton.tsx) auf die bereits
+# bestehende MethodBadge.tsx-Komponente umgestellt (die selbst von
+# CSS-Klassen auf token-backed Tailwind-Utilities umgezogen ist:
+# bg-bg-elevated/text-fg-primary statt var(--surface-2)/var(--fg)
+# Legacy-Alias-Klassen, bg-accent statt var(--accent)). Neuer dot-Prop
+# (default true) fasst die bisher uneinheitliche Dot-Anwesenheit (nur
+# QuickStartButton hatte einen Dot) explizit statt sie stillschweigend
+# anzugleichen; testId-Prop erhaelt die bestehenden testids
+# (method-switch-suggested, quick-start-method). Assessment.tsx
+# wechselt von var(--method-${x}) auf METHOD_COLORS[x] als Farbquelle -
+# beide Werte sind pro Methode identisch (verifiziert). Kein neues CSS.
+#
+# 7674 -> 7691 (#2587): +17 Zeilen fuer .akv-secret-toggle (Hover) in
+# styles/legacy/01-base.css, davon 10 Kommentar. Legitimer Ausnahmefall
+# nach der Regel oben, und zwar der einzige, den der Standardweg nicht
+# bedienen kann: der Gate verweist auf "neue Styles als Tailwind-Utility
+# an die Komponente" - hier gibt es keine Komponente. Das Element wird
+# von @astrapi69/ai-key-vault-react gerendert (Settings > KI), das
+# bewusst app-agnostisch bleibt und kein eigenes CSS mitliefert; der
+# einzige Ort fuer die Regel ist der Host. Direkt neben dem gleich
+# gelagerten .akv-file-input-Praezedenzfall (#2556) einsortiert.
+# Faellt weg, sobald das Paket den Hover selbst mitbringt.
+#
+# 2026-08-21: 7691 -> 7658 (EXP-044 Option C, #1485): -33 Zeilen. Die
+# .speech-button-Klassenfamilie (35-voice.css, 32 Zeilen + 1 @import-
+# Zeile in global.css) geloescht - einziger Konsument SpeechButton.tsx
+# direkt auf token-backed Tailwind-Utilities umgestellt (border-border/
+# bg-bg-elevated/text-fg-primary/text-fg-muted statt der Legacy-Alias-
+# Klassen var(--border)/var(--bg-elevated)/var(--text)/var(--text-muted);
+# border-radius 6px als rounded-[6px] exakt erhalten, kein Token trifft
+# den Wert). Der .speech-button__label-Eintrag in beiden Baselines
+# (dead + unstyled) ebenfalls entfernt: die Klasse hatte nie eine
+# eigene Regel (Vererbung vom Button rettete das Aussehen bislang
+# unbemerkt) - der neue Code traegt gar keinen Klassennamen mehr auf
+# dem Label-Span, dieselbe Vererbung greift weiterhin. Kein neues CSS.
+# 7658 -> 7624 (#2729, Option C): Modal-Extraktion. .modal-overlay/
+# .modal-card/.modal-title (08-qr-scanner.css) + die 9C-Mobile-Override
+# (24-lesson-mode-nav.css) geloescht - die Werte leben als token-backed
+# Utilities in src/shared/modal/Modal.tsx weiter.
+# 7624 -> 7520 (#2731, Option C Slice 2): btn-Familie auf shadcn Button
+# migriert. 02-buttons.css geloescht (btn/btn-primary/btn-secondary),
+# dazu alle 8 .X .btn-Kontextregeln (7 davon tot: die Container nutzen
+# laengst shadcn Buttons bzw. das Vault-Paket emittiert keine
+# btn-Klassen) sowie btn-spinner + Keyframes (jetzt Loader2 mit
+# animate-spin an den Konsumenten).
+# 7520 -> 7486 (Option C Slice 3, refs #1485): dashboard-card-Familie in
+# die geteilten DashboardCard-Komponenten extrahiert
+# (src/shared/layout/DashboardCard); Regeln card/wide/title plus die
+# mobilen Overrides geloescht (das mobile title-font-size-Override war
+# ein No-op gegen die 1rem-Basis).
+# 7486 -> 7439 (Option C Slice 4, #2735): form-Familie auf Inline-
+# Utilities konvertiert (~285 Stellen); Regeln toggle/fieldset/stack/
+# label-stack/required/actions + Mobile-Block geloescht. form-row +
+# form-label BLEIBEN als Paket-Klassennamen-Vertrag
+# (@astrapi69/ai-key-vault-react rendert beide, #2477-Klasse) - vom
+# paket-bewussten Dead-Gate gefangen, nicht loeschbar bis das Paket
+# eigene Styles traegt.
+# 2026-08-29: 7439 -> 7449 (#2786 BottomTabBar-Restore): +10 Zeilen in
+# global.css - die in #1512 entfernte body.has-bottom-nav-#root-
+# Reservierung kehrt mit der wiederhergestellten, jetzt opt-in
+# Bottom-Tab-Bar zurueck (siehe Eintrag "7506 -> 7497 (#1512)" oben -
+# exakt dieselbe Regel). Fundament-Layout (Spacing auf #root, das keine
+# Komponente per Utility erreichen kann), kein Farb-/Theme-Stoff.
+# 2026-09-01: 7449 -> 7479 (#2849 Lernfunke-Maskottchen): +30 Zeilen -
+# neue styles/legacy/43-mascot.css (drei Pose-Keyframes lernfunke-hop/
+# -wiggle/-pop, 28 Zeilen inkl. 5 Kommentar) + die @import-Zeile in
+# global.css. Legitime Fundament-Erweiterung: @keyframes haben kein
+# Tailwind-Utility-Aequivalent (die Komponente konsumiert sie via
+# motion-safe:animate-[...] Arbitrary-Animations, Konvention aus
+# 16-feedback-intensity.css); alle sonstigen Styles des Maskottchens
+# sind token-backed Utilities an der Komponente. Keine Farben, kein
+# Selektor - reine Transform-Keyframes. Auf das Minimum kompaktiert
+# (Identitaets-Frames weggelassen, Blasen-Animation gestrichen).
+# 2026-09-01: 7479 -> 7486 (#2850 Avatar-Rahmen): +7 Zeilen in
+# 00-head.css - drei neue theme-agnostische Tokens --frame-bronze/
+# -silver/-gold (Identitaetsfarben der Progressions-Ringe, wie
+# --method-*) plus Kommentar. Exakt der Ausnahmefall der Regel oben:
+# "neue Farben als Token nach ... global.css :root". Die Ring-Styles
+# selbst sind inline box-shadows aus var()-Tokens an der Komponente,
+# kein weiteres CSS.
+# 2026-09-02 (#2874): +13 Zeilen fuer den juice-float-up-Keyframe in
+# 16-feedback-intensity.css (das "+1", das im Spielmodus von einer
+# richtigen Antwort aufsteigt). Fundament-Animation der Juice-Schicht;
+# alle uebrigen Juice-Animationen re-usen bestehende Keyframes
+# (lernfunke-hop/-pop, matching-shake) - bewusst KEIN neues CSS sonst.
+# 2026-09-30 (#3371): +6 Zeilen in 01-base.css - Base-Layer-Reset fuer
+# flex/grid-Listen (<ul>/<ol> ohne Preflight behielten UA-Punkt, 40 px
+# Einzug und Raender). Fundament-Reset wie der Button-Reset (#2631), mit
+# null Spezifitaet; der Guard styles/list-reset.test.ts deckt die
+# uebrigen Listen ueber Utilities an der Komponente ab, kein weiteres CSS.
+# 2026-09-30 (#3373): +3 Zeilen in 01-base.css - Base-Layer-Regel
+# svg.lucide { flex-shrink: 0 }: ein SVG als Flex-Item darf auf 0
+# schrumpfen, ein umbrechendes Label quetschte die Icons. Eine Regel
+# statt shrink-0 an 427 Icon-Stellen; Utilities gewinnen weiter.
+# 2026-09-30 (#3404): -11 Zeilen in 24-lesson-mode-nav.css - die mobilen
+# .spaced-rec-card/-actions-Regeln geloescht, die Karten tragen ihr Layout
+# jetzt als token-backed Utilities an der Komponente. Kein neues CSS.
+# 2026-10-01 (#3355): +3 Zeilen in 24-lesson-mode-nav.css - die
+# Drawer-Regeln (Hamburger, Ausklapp-Links) stehen jetzt in einem eigenen
+# @media (max-width: 1279px)-Block statt im 768px-Block, weil die einzeilige
+# Kopfleiste unter xl nicht passt. Oeffner, Schliesser und ein Verweis-
+# kommentar; keine neue Regel, nur der Breakpoint wandert.
+# 2026-10-03 (#3406): +4 Zeilen in 01-base.css - Base-Layer-Regel
+# :where(h1) { overflow-wrap: anywhere; hyphens: auto }: ein langes Wort im
+# Seitentitel ("Wiederholungssitzung") machte die Seite bei 360/375 px breiter,
+# iOS schnitt dann den Weiter-Knopf ab (#1834). Eine Regel fuer alle h1
+# statt wrap-anywhere je Titel; Silbentrennung zuerst, Utilities gewinnen weiter.
+7504

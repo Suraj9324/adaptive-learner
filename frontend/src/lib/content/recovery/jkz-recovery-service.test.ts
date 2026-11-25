@@ -1,0 +1,186 @@
+/**
+ * #2161 orchestration: assess (content-verified), restore, restart. Mocks the
+ * mode-agnostic getStorage facade + learner state, so it covers both modes.
+ */
+
+import {beforeEach, describe, expect, it, vi} from "vitest";
+
+import {
+    assessJkzRecovery,
+    restartRecoverySet,
+    restoreRecoverySet,
+} from "./jkz-recovery-service";
+
+const readLearnerState = vi.fn();
+const listErrors = vi.fn();
+const remapKeys = vi.fn();
+const getLesson = vi.fn();
+const listProgress = vi.fn();
+const deleteLearningData = vi.fn();
+
+vi.mock("../../learning/learnerState", () => ({
+    readLearnerState: () => readLearnerState(),
+}));
+vi.mock("../../../storage", () => ({
+    getStorage: () => ({
+        elementErrors: {list: listErrors, remapKeys},
+        contentLoader: {getLesson},
+        lessonProgress: {list: listProgress},
+        learningData: {deleteLearningData},
+    }),
+}));
+
+// A real incident entry (present in the shipped mapping table).
+const SET = "ja-a1-from-de";
+const LESSON = "01-begruessungen.json";
+const EX = "ex-match-begruessung";
+const OLD = "こんにちは";
+const NEW = "こんにちは (konnichiwa)";
+
+const orphanRow = {set_id: SET, lesson_id: LESSON, exercise_id: EX, element_key: OLD};
+
+/** A cached lesson whose exercise currently carries `key` as its answer. */
+const lessonWith = (key: string) => ({
+    steps: [{exercise: {id: EX, type: "matching", pairs: [{left: key}]}}],
+});
+
+beforeEach(() => {
+    vi.clearAllMocks();
+    readLearnerState.mockReturnValue({userId: "u1"});
+    listErrors.mockResolvedValue([]);
+    listProgress.mockResolvedValue([]);
+    remapKeys.mockResolvedValue({applied: 1, skipped: 0});
+    getLesson.mockResolvedValue(lessonWith(NEW));
+});
+
+describe("assessJkzRecovery (#2161)", () => {
+    it("returns null when there is no user", async () => {
+        readLearnerState.mockReturnValue({userId: null});
+        expect(await assessJkzRecovery()).toBeNull();
+    });
+
+    it("returns null when the learner has no affected rows", async () => {
+        listErrors.mockResolvedValue([{...orphanRow, element_key: "unrelated"}]);
+        expect(await assessJkzRecovery()).toBeNull();
+    });
+
+    it("reports applicable remaps when the new key exists in current content", async () => {
+        listErrors.mockResolvedValue([orphanRow]);
+        const a = await assessJkzRecovery();
+        expect(a?.applicableCount).toBe(1);
+        expect(a?.unmappableCount).toBe(0);
+        expect(a?.affectedSets).toEqual([SET]);
+    });
+
+    it("reports UNMAPPABLE (not applicable) when the set changed again since the snapshot", async () => {
+        listErrors.mockResolvedValue([orphanRow]);
+        getLesson.mockResolvedValue(lessonWith("something else")); // new key gone
+        const a = await assessJkzRecovery();
+        expect(a?.applicableCount).toBe(0);
+        expect(a?.unmappableCount).toBe(1);
+        expect(a?.affectedSets).toEqual([]);
+    });
+});
+
+describe("restoreRecoverySet / restartRecoverySet (#2161)", () => {
+    it("restore applies the set's content-verified remaps and returns counts", async () => {
+        listErrors.mockResolvedValue([orphanRow]);
+        const outcome = await restoreRecoverySet(SET);
+        expect(remapKeys).toHaveBeenCalledWith("u1", [
+            {set_id: SET, lesson_id: LESSON, exercise_id: EX, old: OLD, new: NEW},
+        ]);
+        expect(outcome).toEqual({applied: 1, skipped: 0, unmapped: 0});
+    });
+
+    it("restore is a no-op when nothing is applicable (idempotent flow)", async () => {
+        listErrors.mockResolvedValue([]); // already restored
+        const outcome = await restoreRecoverySet(SET);
+        expect(remapKeys).not.toHaveBeenCalled();
+        expect(outcome.applied).toBe(0);
+    });
+
+    it("restart deletes the set's progress + review cards", async () => {
+        listProgress.mockResolvedValue([
+            {id: "p1", source: "astrapi69/adaptive-learner-content", set_id: SET},
+            {id: "other", source: "astrapi69/adaptive-learner-content", set_id: "en-a1"},
+        ]);
+        deleteLearningData.mockResolvedValue({lessonsDeleted: 1, cardsDeleted: 3});
+        await restartRecoverySet(SET);
+        expect(deleteLearningData).toHaveBeenCalledWith("u1", {
+            lessonProgressIds: ["p1"],
+            setIds: [SET],
+        });
+    });
+});
+
+// --- #2467: Zeilen nach dem #2130-stable_id-Schluesselwechsel ---------------
+
+describe("stable_id-keyed rows (#2467)", () => {
+    const STABLE = "greetings-match-x7";
+    const stableRow = {...orphanRow, exercise_id: STABLE};
+    const lessonWithStable = (key: string) => ({
+        steps: [
+            {exercise: {id: EX, stable_id: STABLE, type: "matching", pairs: [{left: key}]}},
+        ],
+    });
+
+    it("detects a row the #2130 migration re-keyed to stable_id", async () => {
+        listErrors.mockResolvedValue([stableRow]);
+        getLesson.mockResolvedValue(lessonWithStable(NEW));
+        const a = await assessJkzRecovery();
+        expect(a?.applicableCount).toBe(1);
+        expect(a?.affectedSets).toEqual([SET]);
+    });
+
+    it("restore carries the ROW's exercise_id (stable), not the table's authored id", async () => {
+        listErrors.mockResolvedValue([stableRow]);
+        getLesson.mockResolvedValue(lessonWithStable(NEW));
+        const outcome = await restoreRecoverySet(SET);
+        expect(remapKeys).toHaveBeenCalledWith("u1", [
+            {set_id: SET, lesson_id: LESSON, exercise_id: STABLE, old: OLD, new: NEW},
+        ]);
+        expect(outcome.applied).toBe(1);
+    });
+
+    it("an authored-keyed row (not yet migrated) still resolves", async () => {
+        listErrors.mockResolvedValue([orphanRow]);
+        getLesson.mockResolvedValue(lessonWithStable(NEW));
+        const a = await assessJkzRecovery();
+        expect(a?.applicableCount).toBe(1);
+    });
+});
+
+describe("isRecoverableRow (#3958)", () => {
+    // The first entry of the incident table: the pair's left side was
+    // rewritten from "こんにちは" to "こんにちは (konnichiwa)".
+    const ROW = {
+        set_id: "ja-a1-from-de",
+        lesson_id: "01-begruessungen.json",
+        exercise_id: "ex-match-begruessung",
+        element_key: "こんにちは",
+    };
+    const lessonWith = (exercise: Record<string, unknown>) =>
+        ({steps: [{id: "s", type: "exercise", exercise}]}) as never;
+
+    it("names a row still keyed by the originally published key", async () => {
+        const {isRecoverableRow} = await import("./jkz-recovery-service");
+        expect(isRecoverableRow(ROW, lessonWith({id: "ex-match-begruessung"}))).toBe(true);
+    });
+
+    it("names it under the exercise's stable_id as well (#2467)", async () => {
+        const {isRecoverableRow} = await import("./jkz-recovery-service");
+        const lesson = lessonWith({id: "ex-match-begruessung", stable_id: "match-x7"});
+        expect(isRecoverableRow({...ROW, exercise_id: "match-x7"}, lesson)).toBe(true);
+    });
+
+    it.each([
+        ["a key the table does not hold", {element_key: "いぬ"}],
+        ["the same key in another set", {set_id: "es-a1"}],
+        ["the same key in another lesson", {lesson_id: "02-zahlen.json"}],
+    ])("does not name %s", async (_label, over) => {
+        const {isRecoverableRow} = await import("./jkz-recovery-service");
+        expect(isRecoverableRow({...ROW, ...over}, lessonWith({id: "ex-match-begruessung"}))).toBe(
+            false,
+        );
+    });
+});

@@ -1,0 +1,108 @@
+# Getting started
+
+Adaptive Learner is a learning companion built on a
+research-backed six-method model. You take a short test that finds
+out which methods suit you, then run AI-assisted learning sessions
+through a seven-step cycle. The app learns with you and adapts how
+it teaches.
+
+## Try it now
+
+The fastest way to get to know Adaptive Learner is the public
+online version:
+
+[**Open the app**](https://astrapi69.github.io/adaptive-learner/){ .md-button .md-button--primary }
+
+It runs in **local mode**: among other things, your progress, your
+statistics, your settings and your API keys are stored in your
+browser. Others get parts of them only when a feature needs them, for
+example GitHub, when the app asks for new content on its own at
+start-up. AI calls are an example too: they go straight from your
+browser to your AI provider, such as Anthropic, OpenAI or Google
+Gemini, using your own API key and without a detour through a server
+of the operator. The [privacy policy](../legal/privacy.md) describes
+which data goes to whom in these cases, your IP address included.
+
+## Install as a Progressive Web App
+
+Adaptive Learner is installable, and the way you install it depends
+on your platform:
+
+- **Android & desktop (Chrome / Edge):** the browser fires an
+  install prompt, which the app turns into a discreet, dismissable
+  **"Install app"** banner (re-offered after 7 days if you dismiss
+  it). You can also install any time from **Settings > General >
+  Install app**.
+- **iPhone / iPad (Safari):** iOS has no automatic install prompt,
+  so Adaptive Learner shows a small **"Add to Home Screen"** hint
+  instead: tap the **Share** button, then **"Add to Home Screen"**.
+  The hint appears only on iOS Safari and only while the app is not
+  yet installed - once installed it never shows again.
+
+Either way, Adaptive Learner becomes a **standalone app** on your
+phone or desktop, launchable without a browser tab. (When it is
+already running as an installed app, none of the install hints
+appear.)
+
+The app works offline for the Dashboard and past sessions. New AI
+sessions need the internet, because the AI provider lives outside
+the browser.
+
+## What you need
+
+- **A modern browser** (Chrome 100+, Firefox 100+, Safari 17+,
+  Edge 100+). The app uses IndexedDB, service workers and modern
+  JavaScript.
+- **An AI API key** for at least one provider: Anthropic, OpenAI
+  or Google Gemini in the browser version; the desktop app also
+  offers Perplexity. The free tiers
+  are usually enough to get started; see [Settings](settings.md)
+  for key setup.
+
+## The first five minutes
+
+1. **Open the app** and choose a language. All 11 UI languages
+   are fully translated (DE, EL, EN, ES, FR, HI, ID, JA, KO,
+   PT, TR).
+2. **Onboarding: only name + topic.** The quick start asks for
+   just these two fields, everything else takes defaults.
+   Afterwards you can choose "Jump right in" or optionally set up
+   your profile in more detail in the wizard. See
+   [Onboarding](onboarding.md).
+3. **Start your first lesson** - the fastest way without an AI
+   key: open the
+   [Content Browser](../features/content-browser.md) at
+   `/content`, choose a lesson set and start a lesson. You read
+   short theory and do exercises; at the end you see your result
+   with stars. See [Lessons and reviews](lessons.md). **Tip:** the
+   best place to begin is the bundled set
+   **"Adaptive Learner - App-Tutorial"**, which teaches you the app
+   directly as lessons. See [App tutorial](app-tutorial.md).
+4. **Optional: AI sessions.** If you would rather have the guided
+   six-method learning conversation, store an **API key**
+   (Settings or `~/.config/adaptive_learner/secrets.yaml`), take
+   the optional [learning-style assessment](assessment.md) and
+   start a [learning session](learning-session.md).
+5. **Save your result.** From the lesson summary you can copy the
+   result as Markdown or save it as a file, and under
+   **Settings → Data** create a [backup](../features/backup.md).
+
+## Bring your own AI key
+
+Adaptive Learner is **bring-your-own-key (BYOK)**. When no key is
+set, the Dashboard shows a single inviting **"add your AI key"** card
+that leads to the AI settings. Add a key for Claude, OpenAI or Gemini
+to unlock the AI-powered features (tutor session, chat analysis,
+exercise generation). Your keys are stored **locally** on your
+device.
+
+## Where to go next
+
+- [App tutorial](app-tutorial.md) - practice the app inside the app (no AI key needed)
+- [Lessons and reviews](lessons.md) - the lesson flow in detail
+- [Content Browser](../features/content-browser.md) - find and filter lessons
+- [Multiple content repositories](../features/content-repos.md) - connect your own content sources
+- [Backup and restore](../features/backup.md)
+- [Understanding your Dashboard](dashboard.md) - progress, streak, XP, badges
+- [FAQ - frequently asked questions](faq.md)
+- [The pedagogical idea behind the app](../concept/philosophy.md)
